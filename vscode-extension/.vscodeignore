@@ -1,0 +1,14 @@
+src/**
+scripts/**
+node_modules/**
+.vscode/**
+webview-mini/**
+webview-dist/**
+*.map
+tsconfig.json
+package-lock.json
+backend/**/__pycache__/**
+backend/**/*.pyc
+CodeLens/**/__pycache__/**
+CodeLens/**/*.pyc
+.env

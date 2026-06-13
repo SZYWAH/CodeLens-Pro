@@ -1,0 +1,16 @@
+.env
+.venv
+__pycache__/
+*.pyc
+.pytest_cache/
+.idea/
+.claude/
+logs/
+frontend/node_modules/
+frontend/dist/
+CodeLens/report_history/
+CodeLens/__pycache__/
+CodeLens/core/__pycache__/
+backend/**/__pycache__/
+backend/tests/__pycache__/
+backend/alembic/**/__pycache__/
