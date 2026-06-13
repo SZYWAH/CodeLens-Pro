@@ -12899,11 +12899,12 @@ body {
 }
 
 .project-guide-hero {
-  display: grid;
-  grid-template-columns: minmax(280px, 0.9fr) minmax(420px, 1.1fr);
-  align-items: stretch;
-  gap: 14px;
-  padding: 14px 16px !important;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  min-height: 92px;
+  padding: 14px 18px !important;
 }
 
 .project-guide-intro {
@@ -12934,20 +12935,14 @@ body {
   padding-inline: 12px;
 }
 
-.project-guide-status {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: stretch;
-  gap: 10px;
-  min-width: 0;
-}
-
 .project-guide-page {
+  display: flex;
+  flex-direction: column;
   gap: 12px;
 }
 
 .project-guide-page > .learning-notice {
-  margin: -2px 0 8px;
+  margin: 0;
   padding: 9px 12px;
 }
 
@@ -13122,13 +13117,6 @@ body {
   }
 }
 
-@media (max-width: 1180px) {
-  .project-guide-hero,
-  .project-guide-status {
-    grid-template-columns: 1fr;
-  }
-}
-
 @media (max-width: 900px) {
   .daily-log-card-head {
     grid-template-columns: 1fr;
@@ -13168,16 +13156,18 @@ body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 12px;
-  min-height: 0;
+  gap: 16px;
+  flex: 0 0 auto;
+  min-height: 72px;
   border: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
   border-radius: 8px;
-  background: color-mix(in srgb, var(--field-bg) 58%, transparent);
-  padding: 9px 10px;
-  box-shadow: none;
+  background:
+    linear-gradient(135deg, color-mix(in srgb, var(--surface) 96%, transparent), color-mix(in srgb, var(--field-bg) 74%, transparent));
+  box-shadow: 0 10px 24px rgba(8, 13, 24, 0.12);
+  padding: 10px 14px;
 }
 
-.project-overview > div:first-child {
+.project-overview-main {
   min-width: 0;
 }
 
@@ -13189,7 +13179,7 @@ body {
 .project-overview strong {
   overflow: hidden;
   margin-top: 2px;
-  font-size: 0.9rem;
+  font-size: 1rem;
   line-height: 1.22;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -13200,7 +13190,7 @@ body {
   overflow: hidden;
   margin: 3px 0 0;
   color: var(--muted);
-  font-size: 0.66rem;
+  font-size: 0.72rem;
   line-height: 1.32;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -13208,19 +13198,19 @@ body {
 
 .project-overview-stats {
   display: grid;
-  grid-template-columns: repeat(3, minmax(54px, 1fr));
+  grid-template-columns: repeat(3, minmax(64px, 1fr));
   align-items: stretch;
   gap: 6px;
 }
 
 .project-overview-stats span {
   display: grid;
-  min-width: 54px;
-  min-height: 42px;
+  min-width: 64px;
+  min-height: 44px;
   place-items: center;
   border-radius: 7px;
   padding: 6px 7px;
-  font-size: 0.82rem;
+  font-size: 0.9rem;
   line-height: 1.1;
 }
 
@@ -13231,7 +13221,6 @@ body {
 
 @media (max-width: 760px) {
   .project-guide-hero,
-  .project-guide-status,
   .project-overview {
     align-items: stretch;
     grid-template-columns: 1fr;
