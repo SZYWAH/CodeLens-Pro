@@ -1,9 +1,9 @@
 import { BookMarked, Copy, Loader2, Maximize2, Trash2, X } from "lucide-react";
-import { useEffect, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type FocusEvent } from "react";
 import { createPortal } from "react-dom";
 import { ChatPanel } from "./ChatPanel";
 import { LearningCardCandidatePanel } from "./LearningCardCandidatePanel";
-import { MarkdownDocument } from "./MarkdownDocument";
+import { extractMarkdownHeadings, MarkdownDocument, type MarkdownHeadingItem } from "./MarkdownDocument";
 import type { LearningCardCandidate, LearningCardItem, SettingsResponse } from "../types";
 
 export type ReportContextChatConfig = {
@@ -45,7 +45,13 @@ export function ReportViewer({
   const [fullscreen, setFullscreen] = useState(false);
   const [splitPercent, setSplitPercent] = useState(66.7);
   const [resizingSplit, setResizingSplit] = useState(false);
+  const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
+  const readerScrollRef = useRef<HTMLDivElement | null>(null);
+  const fullscreenBodyRef = useRef<HTMLDivElement | null>(null);
+  const fullscreenReportPaneRef = useRef<HTMLDivElement | null>(null);
   const hasContextChat = Boolean(contextChat && content.trim() && !loading && !error);
+  const reportHeadings = useMemo(() => extractMarkdownHeadings(content), [content]);
+  const reportHeadingKey = useMemo(() => reportHeadings.map((heading) => heading.id).join("|"), [reportHeadings]);
 
   useEffect(() => {
     if (!fullscreen) return;
@@ -99,10 +105,60 @@ export function ReportViewer({
     };
   }, [resizingSplit]);
 
+  useEffect(() => {
+    if (!reportHeadings.length) {
+      setActiveHeadingId(null);
+      return;
+    }
+
+    const containers = [readerScrollRef.current, fullscreenReportPaneRef.current, fullscreenBodyRef.current].filter(Boolean) as HTMLElement[];
+    if (!containers.length) return;
+
+    function updateActiveHeading() {
+      const container = fullscreen && hasContextChat
+        ? fullscreenReportPaneRef.current
+        : fullscreen
+          ? fullscreenBodyRef.current
+          : readerScrollRef.current;
+      if (!container) return;
+
+      const containerTop = container.getBoundingClientRect().top;
+      let nextId = reportHeadings[0].id;
+
+      reportHeadings.forEach((heading) => {
+        const node = container.querySelector<HTMLElement>(`#${cssEscape(heading.id)}`);
+        if (!node) return;
+        if (node.getBoundingClientRect().top - containerTop <= 96) {
+          nextId = heading.id;
+        }
+      });
+
+      setActiveHeadingId(nextId);
+    }
+
+    updateActiveHeading();
+    containers.forEach((container) => container.addEventListener("scroll", updateActiveHeading, { passive: true }));
+    window.addEventListener("resize", updateActiveHeading);
+
+    return () => {
+      containers.forEach((container) => container.removeEventListener("scroll", updateActiveHeading));
+      window.removeEventListener("resize", updateActiveHeading);
+    };
+  }, [fullscreen, hasContextChat, reportHeadingKey, reportHeadings]);
+
   async function copyReport() {
     if (content) {
       await navigator.clipboard.writeText(content);
     }
+  }
+
+  function jumpToReportSection(id: string, container?: HTMLElement | null) {
+    const scope = container ?? (fullscreen ? fullscreenReportPaneRef.current ?? fullscreenBodyRef.current : readerScrollRef.current);
+    const target = scope?.querySelector<HTMLElement>(`#${cssEscape(id)}`) ?? document.getElementById(id);
+    if (!target) return;
+
+    setActiveHeadingId(id);
+    target.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   function renderContextChat(className = "") {
@@ -151,12 +207,18 @@ export function ReportViewer({
                 </div>
               </div>
               <div
-                className={hasContextChat ? "report-fullscreen-body report-fullscreen-body-split" : "report-fullscreen-body"}
+                ref={fullscreenBodyRef}
+                className={hasContextChat ? "report-fullscreen-body report-fullscreen-body-split" : "report-fullscreen-body report-reader-scope"}
                 style={hasContextChat ? ({ "--report-split": `${splitPercent}%` } as CSSProperties) : undefined}
               >
                 {hasContextChat ? (
                   <>
-                    <div className="report-fullscreen-report-pane">
+                    <div className="report-fullscreen-report-pane report-reader-scope" ref={fullscreenReportPaneRef}>
+                      <ReportSectionRail
+                        headings={reportHeadings}
+                        activeHeadingId={activeHeadingId}
+                        onSelect={(id) => jumpToReportSection(id, fullscreenReportPaneRef.current)}
+                      />
                       <ReportContent content={content} error={error} emptyText="暂无报告内容" learningCards={learningCards} />
                     </div>
                     <button
@@ -176,6 +238,13 @@ export function ReportViewer({
                 ) : (
                   <ReportContent content={content} error={error} emptyText="暂无报告内容" learningCards={learningCards} />
                 )}
+                {!hasContextChat ? (
+                  <ReportSectionRail
+                    headings={reportHeadings}
+                    activeHeadingId={activeHeadingId}
+                    onSelect={(id) => jumpToReportSection(id, fullscreenBodyRef.current)}
+                  />
+                ) : null}
               </div>
             </div>
           </div>,
@@ -205,7 +274,12 @@ export function ReportViewer({
           ) : null}
         </div>
       </div>
-      <div className="reader-scroll">
+      <div className="reader-scroll report-reader-scope" ref={readerScrollRef}>
+        <ReportSectionRail
+          headings={reportHeadings}
+          activeHeadingId={activeHeadingId}
+          onSelect={(id) => jumpToReportSection(id, readerScrollRef.current)}
+        />
         <ReportContent content={content} error={error} emptyText="报告将在这里显示" learningCards={learningCards} />
         {hasContextChat && !fullscreen ? <div className="report-inline-chat">{renderContextChat()}</div> : null}
       </div>
@@ -254,6 +328,120 @@ function ReportContent({
   );
 }
 
+function ReportSectionRail({
+  headings,
+  activeHeadingId,
+  onSelect
+}: {
+  headings: MarkdownHeadingItem[];
+  activeHeadingId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const openTimerRef = useRef<number | null>(null);
+  const closeTimerRef = useRef<number | null>(null);
+
+  if (headings.length < 2) return null;
+
+  function clearTimers() {
+    if (openTimerRef.current !== null) {
+      window.clearTimeout(openTimerRef.current);
+      openTimerRef.current = null;
+    }
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+  }
+
+  function openWithDelay() {
+    if (closeTimerRef.current !== null) {
+      window.clearTimeout(closeTimerRef.current);
+      closeTimerRef.current = null;
+    }
+    if (open || openTimerRef.current !== null) return;
+    openTimerRef.current = window.setTimeout(() => {
+      openTimerRef.current = null;
+      setOpen(true);
+    }, 160);
+  }
+
+  function closeWithDelay() {
+    if (openTimerRef.current !== null) {
+      window.clearTimeout(openTimerRef.current);
+      openTimerRef.current = null;
+    }
+    if (closeTimerRef.current !== null) return;
+    closeTimerRef.current = window.setTimeout(() => {
+      closeTimerRef.current = null;
+      setOpen(false);
+    }, 120);
+  }
+
+  function handleBlur(event: FocusEvent<HTMLDivElement>) {
+    const nextTarget = event.relatedTarget instanceof Node ? event.relatedTarget : null;
+    if (nextTarget && event.currentTarget.contains(nextTarget)) return;
+    closeWithDelay();
+  }
+
+  function selectHeading(id: string) {
+    clearTimers();
+    onSelect(id);
+    setOpen(false);
+  }
+
+  return (
+    <div
+      className="report-section-rail-shell"
+      onBlur={handleBlur}
+      onFocus={() => {
+        clearTimers();
+        setOpen(true);
+      }}
+      onMouseEnter={openWithDelay}
+      onMouseLeave={closeWithDelay}
+    >
+      <div className="report-section-rail" aria-label="报告章节定位">
+        {headings.map((heading, index) => (
+          <button
+            aria-label={`定位到章节：${heading.text}`}
+            className={[
+              "report-section-bar",
+              `report-section-bar-level-${heading.level}`,
+              activeHeadingId === heading.id || (!activeHeadingId && index === 0) ? "report-section-bar-active" : ""
+            ].filter(Boolean).join(" ")}
+            key={heading.id}
+            onClick={() => selectHeading(heading.id)}
+            type="button"
+          />
+        ))}
+      </div>
+      {open ? (
+        <div className="report-section-popover">
+          <div className="report-section-popover-title">章节定位</div>
+          <div className="report-section-option-list">
+            {headings.map((heading, index) => (
+              <button
+                className={[
+                  "report-section-option",
+                  `report-section-option-level-${heading.level}`,
+                  activeHeadingId === heading.id || (!activeHeadingId && index === 0) ? "report-section-option-active" : ""
+                ].filter(Boolean).join(" ")}
+                key={`${heading.id}-option`}
+                onClick={() => selectHeading(heading.id)}
+                type="button"
+              >
+                <span>{sectionNumberLabel(index + 1, heading.level)}</span>
+                <strong>{heading.text}</strong>
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function ReportSavedLearningCards({
   cards,
   onOpenCard
@@ -282,6 +470,19 @@ function ReportSavedLearningCards({
       )}
     </section>
   );
+}
+
+function cssEscape(value: string) {
+  if (typeof CSS !== "undefined" && "escape" in CSS) {
+    return CSS.escape(value);
+  }
+  return value.replace(/[^a-zA-Z0-9_-]/g, "\\$&");
+}
+
+function sectionNumberLabel(index: number, level: number) {
+  if (level === 1) return `主章 ${index}`;
+  if (level === 2) return `小节 ${index}`;
+  return `细节 ${index}`;
 }
 
 function statusLabel(status: string) {

@@ -262,6 +262,12 @@ export function LearningCenterPage({ onNavigate: _onNavigate }: { onNavigate: (p
               <span>{selectedDate} · {selectedSlot?.weekday ?? ""}</span>
               <h3>{editing ? "编辑日记" : log?.title || `${selectedDate} 工作日志`}</h3>
             </div>
+            <section className="daily-log-head-stats" aria-label="Daily activity stats">
+              <span><strong>{activeStats.reports ?? 0}</strong>报告</span>
+              <span><strong>{activeStats.messages ?? 0}</strong>对话</span>
+              <span><strong>{activeStats.agent_tasks ?? 0}</strong>Agent</span>
+              <span><strong>{activeStats.learning_cards ?? 0}</strong>卡片</span>
+            </section>
             <div className="daily-log-card-actions">
               {hasLog ? (
                 <>

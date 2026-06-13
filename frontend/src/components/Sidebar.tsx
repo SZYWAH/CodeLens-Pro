@@ -51,7 +51,7 @@ export function Sidebar({
   onToggle: () => void;
 }) {
   return (
-    <aside className={["glass-panel m-4 mr-0 flex shrink-0 flex-col rounded-md p-2", collapsed ? "w-16" : "w-48"].join(" ")}>
+    <aside className={["glass-panel m-4 mr-0 flex shrink-0 flex-col rounded-md p-2", collapsed ? "w-16" : "w-44"].join(" ")}>
       <div className="mb-2.5 flex min-h-8 items-center gap-2">
         <div className="grid h-8 w-8 shrink-0 place-items-center rounded-md border border-line bg-[#0d1930] text-[10px] font-black text-pine">CL</div>
         {!collapsed ? (

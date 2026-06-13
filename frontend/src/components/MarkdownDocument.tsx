@@ -3,6 +3,12 @@ import { Fragment, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+export type MarkdownHeadingItem = {
+  id: string;
+  text: string;
+  level: 1 | 2 | 3;
+};
+
 export function MarkdownDocument({
   content,
   className = ""
@@ -10,14 +16,16 @@ export function MarkdownDocument({
   content: string;
   className?: string;
 }) {
+  const headingIds = buildHeadingIdMap(content);
+
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
-          h1: MarkdownHeading("h1"),
-          h2: MarkdownHeading("h2"),
-          h3: MarkdownHeading("h3"),
+          h1: MarkdownHeading("h1", headingIds),
+          h2: MarkdownHeading("h2", headingIds),
+          h3: MarkdownHeading("h3", headingIds),
           p: MarkdownParagraph,
           pre: ({ children }) => <>{children}</>,
           code: MarkdownCode
@@ -29,10 +37,14 @@ export function MarkdownDocument({
   );
 }
 
-function MarkdownHeading(Tag: "h1" | "h2" | "h3") {
+function MarkdownHeading(Tag: "h1" | "h2" | "h3", headingIds: Map<string, string[]>) {
   return function Heading({ children }: { children?: ReactNode }) {
     const text = flattenText(children).trim();
-    return <Tag id={headingId(text)}>{children}</Tag>;
+    const level = Number(Tag.slice(1));
+    const key = `${level}:${text}`;
+    const ids = headingIds.get(key);
+    const id = ids?.shift() ?? headingId(text);
+    return <Tag id={id}>{children}</Tag>;
   };
 }
 
@@ -47,13 +59,56 @@ function MarkdownParagraph({ children }: { children?: ReactNode }) {
   return <p>{children}</p>;
 }
 
-function headingId(text: string) {
+export function headingId(text: string) {
   return text
     .replace(/[#*_`>\[\]{}()（）【】"'“”‘’]+/g, " ")
     .trim()
     .replace(/[^0-9A-Za-z\u4e00-\u9fff]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .toLowerCase() || "section";
+}
+
+export function extractMarkdownHeadings(content: string): MarkdownHeadingItem[] {
+  const usedIds = new Map<string, number>();
+  const headings: MarkdownHeadingItem[] = [];
+  let inFence = false;
+
+  content.split(/\r?\n/).forEach((rawLine) => {
+    const line = rawLine.trim();
+    if (/^```/.test(line) || /^~~~/.test(line)) {
+      inFence = !inFence;
+      return;
+    }
+    if (inFence) return;
+
+    const match = /^(#{1,3})\s+(.+?)\s*#*$/.exec(line);
+    if (!match) return;
+
+    const text = match[2].trim();
+    if (!text) return;
+
+    const baseId = headingId(text);
+    const count = usedIds.get(baseId) ?? 0;
+    usedIds.set(baseId, count + 1);
+    headings.push({
+      id: count ? `${baseId}-${count + 1}` : baseId,
+      text,
+      level: match[1].length as 1 | 2 | 3
+    });
+  });
+
+  return headings.slice(0, 64);
+}
+
+function buildHeadingIdMap(content: string) {
+  const map = new Map<string, string[]>();
+  extractMarkdownHeadings(content).forEach((heading) => {
+    const key = `${heading.level}:${heading.text}`;
+    const ids = map.get(key) ?? [];
+    ids.push(heading.id);
+    map.set(key, ids);
+  });
+  return map;
 }
 
 function flattenText(node: ReactNode): string {
