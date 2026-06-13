@@ -25,8 +25,8 @@ export function ProjectGuidePage() {
   }, []);
 
   return (
-    <div className="page-scroll learning-page">
-      <section className="learning-hero">
+    <div className="page-scroll learning-page project-guide-page">
+      <section className="learning-hero project-guide-hero">
         <div>
           <span className="learning-kicker"><Compass size={14} /> Project Guide</span>
           <h2>项目导读</h2>

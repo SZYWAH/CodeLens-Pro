@@ -1,6 +1,6 @@
 import { MessageSquarePlus, PanelLeftClose, PanelLeftOpen, RefreshCw, Search, Trash2 } from "lucide-react";
-import { useEffect, useState } from "react";
-import { CalendarPopover } from "../components/CalendarPopover";
+import { useEffect, useMemo, useState } from "react";
+import { CalendarPopover, dateKeyFromIso } from "../components/CalendarPopover";
 import { ChatPanel } from "../components/ChatPanel";
 import { api } from "../lib/api";
 import { formatTime } from "../lib/format";
@@ -20,6 +20,7 @@ export function ChatPage({
   onActivityChanged?: () => void;
 }) {
   const [sessions, setSessions] = useState<ChatSessionListItem[]>([]);
+  const [calendarSessions, setCalendarSessions] = useState<ChatSessionListItem[]>([]);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<ChatFilter>("all");
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
@@ -27,17 +28,26 @@ export function ChatPage({
   const [error, setError] = useState("");
   const [historyOpen, setHistoryOpen] = useState(true);
 
+  const dateMarkers = useMemo(() => markerCounts(calendarSessions.map((item) => item.updated_at)), [calendarSessions]);
+
   async function loadSessions() {
     setLoading(true);
     setError("");
     try {
-      const next = await api.listChatSessions({
+      const baseParams = {
         query: query || undefined,
         context_type: filter === "all" ? undefined : filter,
-        date_from: selectedDate || undefined,
-        date_to: selectedDate || undefined,
-      });
+      };
+      const [next, calendarNext] = await Promise.all([
+        api.listChatSessions({
+          ...baseParams,
+          date_from: selectedDate || undefined,
+          date_to: selectedDate || undefined,
+        }),
+        api.listChatSessions(baseParams),
+      ]);
       setSessions(next.filter((item) => item.context_type !== "agent"));
+      setCalendarSessions(calendarNext.filter((item) => item.context_type !== "agent"));
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "对话列表加载失败");
     } finally {
@@ -111,7 +121,9 @@ export function ChatPage({
               <CalendarPopover
                 value={selectedDate}
                 onChange={setSelectedDate}
+                markers={dateMarkers}
                 label={selectedDate ? `选择日期：${selectedDate.slice(5)}` : "全部日期"}
+                className="chat-date-trigger"
               />
             </div>
             {error ? <div className="mt-2 text-xs text-coral">{error}</div> : null}
@@ -175,4 +187,12 @@ export function ChatPage({
 function chatSessionBadge(item: ChatSessionListItem) {
   if (item.context_type === "report") return "报告对话";
   return "普通对话";
+}
+
+function markerCounts(values: string[]) {
+  return values.reduce<Record<string, number>>((acc, value) => {
+    const key = dateKeyFromIso(value);
+    acc[key] = (acc[key] ?? 0) + 1;
+    return acc;
+  }, {});
 }

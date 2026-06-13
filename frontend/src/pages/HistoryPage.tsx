@@ -1,6 +1,6 @@
 import { ArrowUpRight, FileClock, MessageSquare, PanelLeftClose, PanelLeftOpen, RefreshCw, Search, Trash2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { CalendarPopover } from "../components/CalendarPopover";
+import { CalendarPopover, dateKeyFromIso } from "../components/CalendarPopover";
 import { ReportViewer } from "../components/ReportViewer";
 import { SelectField } from "../components/SelectField";
 import { api } from "../lib/api";
@@ -21,6 +21,7 @@ export function HistoryPage({
   onOpenLearningCard: (card: LearningCardItem) => void;
 }) {
   const [items, setItems] = useState<ReportListItem[]>([]);
+  const [calendarItems, setCalendarItems] = useState<ReportListItem[]>([]);
   const [selected, setSelected] = useState<ReportDetail | null>(null);
   const [query, setQuery] = useState("");
   const [languageCode, setLanguageCode] = useState("");
@@ -35,20 +36,28 @@ export function HistoryPage({
   const languages = settings?.languages ?? {};
   const modeOptions = useMemo(() => reportModeOptions(settings, reportType), [settings, reportType]);
   const groupedItems = useMemo(() => groupReportsByDate(items), [items]);
+  const dateMarkers = useMemo(() => markerCounts(calendarItems.map((item) => item.created_at)), [calendarItems]);
 
   async function loadReports() {
     setLoading(true);
     setError("");
     try {
-      const next = await api.listReports({
+      const baseParams = {
         query,
         language_code: languageCode || undefined,
         mode: mode || undefined,
         report_type: reportType || undefined,
-        date_from: selectedDate || undefined,
-        date_to: selectedDate || undefined,
-      });
+      };
+      const [next, calendarNext] = await Promise.all([
+        api.listReports({
+          ...baseParams,
+          date_from: selectedDate || undefined,
+          date_to: selectedDate || undefined,
+        }),
+        api.listReports(baseParams),
+      ]);
       setItems(next);
+      setCalendarItems(calendarNext);
       if (!selected && next[0]) {
         setSelected(await api.getReport(next[0].id));
       }
@@ -162,6 +171,7 @@ export function HistoryPage({
               <CalendarPopover
                 value={selectedDate}
                 onChange={setSelectedDate}
+                markers={dateMarkers}
                 label={selectedDate ? `选择日期：${selectedDate.slice(5)}` : "全部日期"}
               />
             </div>
@@ -263,32 +273,28 @@ function reportModeOptions(settings: SettingsResponse | null, reportType: string
   });
 }
 
-function formatDateInput(value: Date) {
-  const year = value.getFullYear();
-  const month = String(value.getMonth() + 1).padStart(2, "0");
-  const day = String(value.getDate()).padStart(2, "0");
-  return `${year}-${month}-${day}`;
+function groupReportsByDate(items: ReportListItem[]) {
+  const grouped = new Map<string, ReportListItem[]>();
+  items.forEach((item) => {
+    const key = dateKeyFromIso(item.created_at);
+    grouped.set(key, [...(grouped.get(key) ?? []), item]);
+  });
+  return Array.from(grouped.entries()).map(([date, groupItems]) => ({
+    label: dateLabel(date),
+    items: groupItems,
+  }));
 }
 
-function groupReportsByDate(items: ReportListItem[]) {
-  const groups = [
-    { label: "今天", items: [] as ReportListItem[] },
-    { label: "本周", items: [] as ReportListItem[] },
-    { label: "本月", items: [] as ReportListItem[] },
-    { label: "更早", items: [] as ReportListItem[] },
-  ];
-  const today = new Date();
-  const todayKey = formatDateInput(today);
-  const weekStart = new Date(today);
-  weekStart.setDate(today.getDate() - 6);
-  const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
-  items.forEach((item) => {
-    const created = new Date(item.created_at);
-    const dayKey = formatDateInput(created);
-    if (dayKey === todayKey) groups[0].items.push(item);
-    else if (created >= weekStart) groups[1].items.push(item);
-    else if (created >= monthStart) groups[2].items.push(item);
-    else groups[3].items.push(item);
-  });
-  return groups.filter((group) => group.items.length);
+function dateLabel(dateKey: string) {
+  const today = dateKeyFromIso(new Date().toISOString());
+  if (dateKey === today) return "今天";
+  return dateKey;
+}
+
+function markerCounts(values: string[]) {
+  return values.reduce<Record<string, number>>((acc, value) => {
+    const key = dateKeyFromIso(value);
+    acc[key] = (acc[key] ?? 0) + 1;
+    return acc;
+  }, {});
 }

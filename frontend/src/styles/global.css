@@ -12336,6 +12336,12 @@ body {
   margin-top: 8px;
 }
 
+.chat-date-filter-row .calendar-popover-trigger,
+.chat-date-trigger {
+  width: 100%;
+  justify-content: center;
+}
+
 .calendar-popover-trigger,
 .filter-popover-trigger {
   display: inline-flex;
@@ -12429,6 +12435,19 @@ body {
   transition: background 150ms ease, border-color 150ms ease, transform 150ms ease;
 }
 
+.calendar-popover-grid button.unmarked {
+  color: color-mix(in srgb, var(--muted) 74%, transparent);
+  opacity: 0.62;
+}
+
+.calendar-popover-grid button.marked {
+  background:
+    radial-gradient(circle at 50% 82%, color-mix(in srgb, var(--pine) 30%, transparent) 0 2px, transparent 3px),
+    color-mix(in srgb, var(--pine) 7%, transparent);
+  color: var(--ink);
+  opacity: 1;
+}
+
 .calendar-popover-grid button:hover,
 .calendar-popover-grid button:focus-visible {
   border-color: color-mix(in srgb, var(--pine) 42%, var(--line));
@@ -12465,6 +12484,39 @@ body {
   font-weight: 900;
   line-height: 12px;
   text-align: center;
+}
+
+.calendar-popover-legend {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 70%, transparent);
+  margin-top: 10px;
+  padding-top: 9px;
+}
+
+.calendar-popover-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-weight: 820;
+}
+
+.calendar-popover-legend i {
+  width: 7px;
+  height: 7px;
+  border: 1px solid color-mix(in srgb, var(--line) 80%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--muted) 26%, transparent);
+}
+
+.calendar-popover-legend i.has-record {
+  border-color: color-mix(in srgb, var(--pine) 72%, transparent);
+  background: var(--pine);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--pine) 12%, transparent);
 }
 
 .calendar-popover-actions {
@@ -12603,6 +12655,27 @@ body {
 .knowledge-create-card textarea:focus {
   border-color: var(--pine);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--pine) 14%, transparent);
+}
+
+.project-guide-hero {
+  min-height: 0;
+  padding: 10px 12px !important;
+}
+
+.project-guide-hero h2 {
+  margin: 2px 0 !important;
+  font-size: 1.02rem !important;
+}
+
+.project-guide-hero p {
+  -webkit-line-clamp: 1 !important;
+  font-size: 0.76rem !important;
+  line-height: 1.35 !important;
+}
+
+.project-guide-hero .btn {
+  min-height: 34px;
+  padding-inline: 11px;
 }
 
 .history-card-row {

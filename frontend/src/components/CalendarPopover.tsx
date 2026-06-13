@@ -25,7 +25,6 @@ export function CalendarPopover({
   const [menuStyle, setMenuStyle] = useState<CSSProperties>({});
   const buttonRef = useRef<HTMLButtonElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
-  const hoverTimerRef = useRef<number | null>(null);
 
   const title = label ?? (value ? formatDateLabel(value) : clearLabel);
   const days = useMemo(() => monthGrid(viewMonth), [viewMonth]);
@@ -50,18 +49,6 @@ export function CalendarPopover({
 
   function closeMenu() {
     setOpen(false);
-  }
-
-  function queueHoverOpen() {
-    if (hoverTimerRef.current) window.clearTimeout(hoverTimerRef.current);
-    hoverTimerRef.current = window.setTimeout(openMenu, 180);
-  }
-
-  function cancelHoverOpen() {
-    if (hoverTimerRef.current) {
-      window.clearTimeout(hoverTimerRef.current);
-      hoverTimerRef.current = null;
-    }
   }
 
   function choose(date: string) {
@@ -95,16 +82,12 @@ export function CalendarPopover({
     };
   }, [open, updatePosition]);
 
-  useEffect(() => () => cancelHoverOpen(), []);
-
   return (
     <>
       <button
         ref={buttonRef}
         className={["calendar-popover-trigger", value ? "calendar-popover-trigger-active" : "", className].filter(Boolean).join(" ")}
         onClick={() => (open ? closeMenu() : openMenu())}
-        onMouseEnter={queueHoverOpen}
-        onMouseLeave={cancelHoverOpen}
         type="button"
       >
         <CalendarDays size={15} />
@@ -113,7 +96,7 @@ export function CalendarPopover({
 
       {open
         ? createPortal(
-            <div ref={menuRef} className="calendar-popover-layer" style={menuStyle} onMouseEnter={cancelHoverOpen}>
+            <div ref={menuRef} className="calendar-popover-layer" style={menuStyle}>
               <div className="calendar-popover-head">
                 <button className="icon-button" onClick={() => setViewMonth(shiftMonth(viewMonth, -1))} type="button" title="上个月">
                   <ChevronLeft size={15} />
@@ -136,9 +119,10 @@ export function CalendarPopover({
                         item.inMonth ? "" : "muted",
                         item.date === today ? "today" : "",
                         item.date === value ? "selected" : "",
-                        count ? "marked" : "",
+                        count ? "marked" : "unmarked",
                       ].filter(Boolean).join(" ")}
                       onClick={() => choose(item.date)}
+                      title={count ? `${count} 条记录` : "无记录"}
                       type="button"
                     >
                       <span>{item.day}</span>
@@ -146,6 +130,10 @@ export function CalendarPopover({
                     </button>
                   );
                 })}
+              </div>
+              <div className="calendar-popover-legend" aria-hidden="true">
+                <span><i className="has-record" />有记录</span>
+                <span><i />无记录</span>
               </div>
               <div className="calendar-popover-actions">
                 <button type="button" onClick={() => { onChange(null); closeMenu(); }}>
