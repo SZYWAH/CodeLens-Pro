@@ -27,31 +27,32 @@ export function ProjectGuidePage() {
   return (
     <div className="page-scroll learning-page project-guide-page">
       <section className="learning-hero project-guide-hero">
-        <div>
+        <div className="project-guide-intro">
           <span className="learning-kicker"><Compass size={14} /> Project Guide</span>
           <h2>项目导读</h2>
           <p>基于 VS Code 插件同步的项目结构，面向初学者推断入口、核心目录、阅读顺序和可能涉及的知识点。</p>
         </div>
-        <button className="btn btn-secondary" onClick={load} disabled={loading} type="button">
-          <RefreshCw className={loading ? "animate-spin" : ""} size={15} />
-          刷新导读
-        </button>
+        <div className="project-guide-status">
+          <div className="project-overview">
+            <div>
+              <span>当前项目</span>
+              <strong>{guide?.workspace.name || "等待 VS Code 插件同步"}</strong>
+              <p>{guide?.workspace.root || "打开 VS Code 项目后，这里会基于项目树生成导读建议。"}</p>
+            </div>
+            <div className="project-overview-stats">
+              <span>{guide?.workspace.file_count ?? 0}<em>文件</em></span>
+              <span>{guide?.workspace.directory_count ?? 0}<em>目录</em></span>
+              <span>{guide?.workspace.connected ? "在线" : "待连接"}<em>插件</em></span>
+            </div>
+          </div>
+          <button className="btn btn-secondary" onClick={load} disabled={loading} type="button">
+            <RefreshCw className={loading ? "animate-spin" : ""} size={15} />
+            刷新导读
+          </button>
+        </div>
       </section>
 
       {error ? <div className="chat-panel-error">{error}</div> : null}
-
-      <section className="learning-surface project-overview">
-        <div>
-          <span>当前项目</span>
-          <strong>{guide?.workspace.name || "等待 VS Code 插件同步"}</strong>
-          <p>{guide?.workspace.root || "打开 VS Code 项目后，这里会基于项目树生成导读建议。"}</p>
-        </div>
-        <div className="project-overview-stats">
-          <span>{guide?.workspace.file_count ?? 0}<em>文件</em></span>
-          <span>{guide?.workspace.directory_count ?? 0}<em>目录</em></span>
-          <span>{guide?.workspace.connected ? "在线" : "待连接"}<em>插件</em></span>
-        </div>
-      </section>
 
       {guide?.notes.length ? (
         <div className="learning-notice">

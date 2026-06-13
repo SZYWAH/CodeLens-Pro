@@ -12899,10 +12899,17 @@ body {
 }
 
 .project-guide-hero {
-  min-height: auto;
-  align-items: center;
+  display: grid;
+  grid-template-columns: minmax(280px, 0.9fr) minmax(420px, 1.1fr);
+  align-items: stretch;
   gap: 14px;
   padding: 14px 16px !important;
+}
+
+.project-guide-intro {
+  display: grid;
+  align-content: center;
+  min-width: 0;
 }
 
 .project-guide-hero h2 {
@@ -12922,9 +12929,17 @@ body {
 }
 
 .project-guide-hero .btn {
-  min-height: 34px;
+  min-height: 36px;
   flex-shrink: 0;
   padding-inline: 12px;
+}
+
+.project-guide-status {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  gap: 10px;
+  min-width: 0;
 }
 
 .project-guide-page {
@@ -13107,6 +13122,13 @@ body {
   }
 }
 
+@media (max-width: 1180px) {
+  .project-guide-hero,
+  .project-guide-status {
+    grid-template-columns: 1fr;
+  }
+}
+
 @media (max-width: 900px) {
   .daily-log-card-head {
     grid-template-columns: 1fr;
@@ -13146,9 +13168,13 @@ body {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 14px;
-  min-height: 72px;
-  padding: 14px 16px;
+  gap: 12px;
+  min-height: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--field-bg) 58%, transparent);
+  padding: 9px 10px;
+  box-shadow: none;
 }
 
 .project-overview > div:first-child {
@@ -13156,14 +13182,14 @@ body {
 }
 
 .project-overview span {
-  font-size: 0.68rem;
+  font-size: 0.62rem;
   line-height: 1.2;
 }
 
 .project-overview strong {
   overflow: hidden;
-  margin-top: 3px;
-  font-size: 1.04rem;
+  margin-top: 2px;
+  font-size: 0.9rem;
   line-height: 1.22;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -13172,9 +13198,9 @@ body {
 .project-overview p {
   display: block;
   overflow: hidden;
-  margin: 4px 0 0;
+  margin: 3px 0 0;
   color: var(--muted);
-  font-size: 0.74rem;
+  font-size: 0.66rem;
   line-height: 1.32;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -13182,19 +13208,19 @@ body {
 
 .project-overview-stats {
   display: grid;
-  grid-template-columns: repeat(3, minmax(62px, 1fr));
+  grid-template-columns: repeat(3, minmax(54px, 1fr));
   align-items: stretch;
-  gap: 8px;
+  gap: 6px;
 }
 
 .project-overview-stats span {
   display: grid;
-  min-width: 62px;
-  min-height: 48px;
+  min-width: 54px;
+  min-height: 42px;
   place-items: center;
   border-radius: 7px;
-  padding: 7px 8px;
-  font-size: 0.9rem;
+  padding: 6px 7px;
+  font-size: 0.82rem;
   line-height: 1.1;
 }
 
@@ -13204,6 +13230,8 @@ body {
 }
 
 @media (max-width: 760px) {
+  .project-guide-hero,
+  .project-guide-status,
   .project-overview {
     align-items: stretch;
     grid-template-columns: 1fr;
