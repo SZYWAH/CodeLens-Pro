@@ -16,6 +16,8 @@ type ConversationTurn = {
   preview: string;
 };
 
+const CHAT_AUTO_FOLLOW_THRESHOLD = 80;
+
 export type ChatPanelProps = {
   settings: SettingsResponse | null;
   mode?: ChatPanelMode;
@@ -76,6 +78,7 @@ export function ChatPanel({
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const turnNodeRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const sessionSnapshotRef = useRef("");
+  const autoFollowBottomRef = useRef(true);
   const inputResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const inputResizeCleanupRef = useRef<(() => void) | null>(null);
 
@@ -128,9 +131,25 @@ export function ChatPanel({
     onSessionIdChange?.(nextSessionId);
   }
 
+  function followMessagesBottom(force = false) {
+    const panel = messagesScrollRef.current;
+    if (!panel) return;
+    if (!force && !autoFollowBottomRef.current) return;
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const nextPanel = messagesScrollRef.current;
+        if (!nextPanel) return;
+        if (!force && !autoFollowBottomRef.current) return;
+        nextPanel.scrollTop = nextPanel.scrollHeight;
+      });
+    });
+  }
+
   function jumpToConversationTurn(messageIndex: number) {
     const target = turnNodeRefs.current[messageIndex];
     if (!target) return;
+    autoFollowBottomRef.current = false;
     setActiveTurnMessageIndex(messageIndex);
     target.scrollIntoView({ behavior: "smooth", block: "center" });
   }
@@ -203,7 +222,8 @@ export function ChatPanel({
     const silent = options.silent ?? false;
     const scrollPanel = messagesScrollRef.current;
     const previousScrollTop = scrollPanel?.scrollTop ?? 0;
-    const wasNearBottom = scrollPanel ? isNearBottom(scrollPanel) : true;
+    const wasNearBottom = scrollPanel ? isNearBottom(scrollPanel, CHAT_AUTO_FOLLOW_THRESHOLD) : true;
+    if (!silent) autoFollowBottomRef.current = true;
 
     if (!silent) {
       setLoadingSession(true);
@@ -221,6 +241,7 @@ export function ChatPanel({
         setAgentPlans(nextPlans);
 
         if (silent) {
+          autoFollowBottomRef.current = wasNearBottom;
           window.requestAnimationFrame(() => {
             window.requestAnimationFrame(() => {
               const nextPanel = messagesScrollRef.current;
@@ -242,8 +263,29 @@ export function ChatPanel({
   }
 
   useEffect(() => {
+    if (!shouldRenderMessages) return;
+    const panel = messagesScrollRef.current;
+    if (!panel) return;
+    const scrollPanel = panel;
+
+    function updateAutoFollow() {
+      autoFollowBottomRef.current = isNearBottom(scrollPanel, CHAT_AUTO_FOLLOW_THRESHOLD);
+    }
+
+    updateAutoFollow();
+    scrollPanel.addEventListener("scroll", updateAutoFollow, { passive: true });
+    return () => scrollPanel.removeEventListener("scroll", updateAutoFollow);
+  }, [activeSessionId, mode, shouldRenderMessages]);
+
+  useEffect(() => {
+    if (!shouldRenderMessages || loadingSession) return;
+    followMessagesBottom();
+  }, [agentPlans, inputHeight, loadingSession, messages, shouldRenderMessages]);
+
+  useEffect(() => {
     applySessionId(sessionId ?? null);
     sessionSnapshotRef.current = "";
+    autoFollowBottomRef.current = true;
     if (!sessionId) {
       setMessages([]);
       setAgentPlans([]);
@@ -305,6 +347,8 @@ export function ChatPanel({
     setError("");
     setLoading(true);
     if (options.clearInput ?? true) setInput("");
+    autoFollowBottomRef.current = true;
+    setActiveTurnMessageIndex(null);
     setMessages((previous) => [...previous, { role: "user", content: message }, { role: "assistant", content: "" }]);
 
     try {

@@ -2605,6 +2605,10 @@ def stream_report(payload: ReportStreamRequest) -> StreamingResponse:
                 learning_card_candidates: list[dict] = []
                 learning_card_candidate_error: str | None = None
                 if payload.generate_learning_card_candidates:
+                    yield sse_event(
+                        "status",
+                        {"phase": "learning_cards", "message": "知识卡片正在生成中..."},
+                    )
                     try:
                         learning_card_candidates = [
                             item.model_dump()
@@ -2677,6 +2681,10 @@ def stream_diff(payload: DiffStreamRequest) -> StreamingResponse:
                 learning_card_candidates: list[dict] = []
                 learning_card_candidate_error: str | None = None
                 if payload.generate_learning_card_candidates:
+                    yield sse_event(
+                        "status",
+                        {"phase": "learning_cards", "message": "知识卡片正在生成中..."},
+                    )
                     try:
                         learning_card_candidates = [
                             item.model_dump()

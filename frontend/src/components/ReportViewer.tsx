@@ -8,6 +8,7 @@ import type { LearningCardCandidate, LearningCardItem, SettingsResponse } from "
 
 const REPORT_HEADING_ACTIVATION_OFFSET = 96;
 const REPORT_HEADING_CLICK_LOCK_MS = 900;
+const REPORT_AUTO_FOLLOW_THRESHOLD = 80;
 
 export type ReportContextChatConfig = {
   settings: SettingsResponse | null;
@@ -23,6 +24,7 @@ export type ReportLearningCardsConfig = {
   candidates: LearningCardCandidate[];
   savedCards?: LearningCardItem[];
   notice?: string;
+  pendingMessage?: string;
   onDismiss?: () => void;
   onSaved?: (created: number, skipped: number, cards: LearningCardItem[]) => void;
   onOpenCard?: (card: LearningCardItem) => void;
@@ -54,9 +56,19 @@ export function ReportViewer({
   const fullscreenReportPaneRef = useRef<HTMLDivElement | null>(null);
   const activeHeadingLockRef = useRef<{ id: string; releaseAt: number } | null>(null);
   const activeHeadingReleaseTimerRef = useRef<number | null>(null);
+  const autoFollowBottomRef = useRef(true);
+  const lastContentRef = useRef(content);
+  const lastAutoFollowKeyRef = useRef("");
   const hasContextChat = Boolean(contextChat && content.trim() && !loading && !error);
   const reportHeadings = useMemo(() => extractMarkdownHeadings(content), [content]);
   const reportHeadingKey = useMemo(() => reportHeadings.map((heading) => heading.id).join("|"), [reportHeadings]);
+  const reportAutoFollowKey = [
+    content.length,
+    learningCards?.pendingMessage ?? "",
+    learningCards?.notice ?? "",
+    learningCards?.candidates.length ?? 0,
+    learningCards?.savedCards?.length ?? 0
+  ].join("|");
 
   useEffect(() => {
     if (!fullscreen) return;
@@ -128,6 +140,8 @@ export function ReportViewer({
       if (!container) return;
 
       const containerTop = container.getBoundingClientRect().top;
+      const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      autoFollowBottomRef.current = distanceFromBottom <= REPORT_AUTO_FOLLOW_THRESHOLD;
       const lock = activeHeadingLockRef.current;
       if (lock) {
         if (Date.now() < lock.releaseAt) {
@@ -178,6 +192,52 @@ export function ReportViewer({
   }, [fullscreen, hasContextChat, reportHeadingKey, reportHeadings]);
 
   useEffect(() => {
+    const containers = [readerScrollRef.current, fullscreenReportPaneRef.current, fullscreenBodyRef.current].filter(Boolean) as HTMLElement[];
+    if (!containers.length) return;
+
+    function updateAutoFollow() {
+      const container = fullscreen && hasContextChat
+        ? fullscreenReportPaneRef.current
+        : fullscreen
+          ? fullscreenBodyRef.current
+          : readerScrollRef.current;
+      if (!container) return;
+      const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+      autoFollowBottomRef.current = distanceFromBottom <= REPORT_AUTO_FOLLOW_THRESHOLD;
+    }
+
+    updateAutoFollow();
+    containers.forEach((container) => container.addEventListener("scroll", updateAutoFollow, { passive: true }));
+    return () => {
+      containers.forEach((container) => container.removeEventListener("scroll", updateAutoFollow));
+    };
+  }, [fullscreen, hasContextChat]);
+
+  useEffect(() => {
+    if (loading && !lastContentRef.current && content) {
+      autoFollowBottomRef.current = true;
+    }
+    const contentChanged = reportAutoFollowKey !== lastAutoFollowKeyRef.current;
+    lastContentRef.current = content;
+    lastAutoFollowKeyRef.current = reportAutoFollowKey;
+    if (!contentChanged || !content || !autoFollowBottomRef.current || activeHeadingLockRef.current) return;
+
+    const container = fullscreen && hasContextChat
+      ? fullscreenReportPaneRef.current
+      : fullscreen
+        ? fullscreenBodyRef.current
+        : readerScrollRef.current;
+    if (!container) return;
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        if (!autoFollowBottomRef.current || activeHeadingLockRef.current) return;
+        container.scrollTop = container.scrollHeight;
+      });
+    });
+  }, [content, fullscreen, hasContextChat, loading, reportAutoFollowKey]);
+
+  useEffect(() => {
     return () => {
       if (activeHeadingReleaseTimerRef.current !== null) {
         window.clearTimeout(activeHeadingReleaseTimerRef.current);
@@ -201,6 +261,7 @@ export function ReportViewer({
       activeHeadingReleaseTimerRef.current = null;
     }
     activeHeadingLockRef.current = { id, releaseAt: Date.now() + REPORT_HEADING_CLICK_LOCK_MS };
+    autoFollowBottomRef.current = false;
     setActiveHeadingId(id);
     if (scope) {
       const scopeRect = scope.getBoundingClientRect();
@@ -370,6 +431,12 @@ function ReportContent({
     <>
       <MarkdownDocument content={content} className="report-document" />
       {learningCards?.notice ? <div className="learning-notice report-learning-card-notice">{learningCards.notice}</div> : null}
+      {learningCards?.pendingMessage ? (
+        <div className="report-learning-card-pending">
+          <Loader2 className="animate-spin" size={14} />
+          <span>{learningCards.pendingMessage}</span>
+        </div>
+      ) : null}
       {learningCards?.savedCards ? (
         <ReportSavedLearningCards cards={learningCards.savedCards} onOpenCard={learningCards.onOpenCard} />
       ) : null}

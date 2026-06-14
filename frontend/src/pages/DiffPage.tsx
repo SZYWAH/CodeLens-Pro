@@ -48,6 +48,7 @@ export function DiffPage({
   const [learningCardCandidates, setLearningCardCandidates] = useState<LearningCardCandidate[]>([]);
   const [savedLearningCards, setSavedLearningCards] = useState<LearningCardItem[]>([]);
   const [learningCardNotice, setLearningCardNotice] = useState("");
+  const [learningCardPendingMessage, setLearningCardPendingMessage] = useState("");
 
   const languages = settings?.languages ?? { Python: "python" };
   const languageCode = languages[languageLabel] ?? "python";
@@ -90,6 +91,7 @@ export function DiffPage({
     setLearningCardCandidates([]);
     setSavedLearningCards([]);
     setLearningCardNotice("");
+    setLearningCardPendingMessage("");
 
     try {
       await streamPost(
@@ -107,7 +109,13 @@ export function DiffPage({
           onDelta: (text) => {
             setReport((previous) => previous + text);
           },
+          onStatus: (data) => {
+            if (data.phase === "learning_cards") {
+              setLearningCardPendingMessage(String(data.message ?? "知识卡片正在生成中..."));
+            }
+          },
           onDone: (data) => {
+            setLearningCardPendingMessage("");
             const nextReportId = String(data.id ?? "") || null;
             setReportId(nextReportId);
             if (nextReportId) void loadSavedLearningCards(nextReportId);
@@ -122,12 +130,14 @@ export function DiffPage({
             setLoading(false);
           },
           onError: (message) => {
+            setLearningCardPendingMessage("");
             setError(message);
             setLoading(false);
           }
         }
       );
     } catch (exc) {
+      setLearningCardPendingMessage("");
       setError(exc instanceof Error ? exc.message : "对比失败");
       setLoading(false);
     }
@@ -184,6 +194,7 @@ export function DiffPage({
         candidates: learningCardCandidates,
         savedCards: savedLearningCards,
         notice: learningCardNotice,
+        pendingMessage: learningCardPendingMessage,
         onOpenCard: onOpenLearningCard,
         onDismiss: () => setLearningCardCandidates([]),
         onSaved: (created, skipped, cards) => {
@@ -214,6 +225,7 @@ export function DiffPage({
         setLearningCardCandidates([]);
         setSavedLearningCards([]);
         setLearningCardNotice("");
+        setLearningCardPendingMessage("");
       }}
     />
   );

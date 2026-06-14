@@ -61,6 +61,7 @@ export function LearningCardCandidatePanel({
     setSaving(true);
     setError("");
     setMessage("");
+    let savedSuccessfully = false;
     try {
       const result = await api.createLearningCardsBulk(selected);
       setMessage(`已保存 ${result.created} 张知识卡片，跳过 ${result.skipped} 张重复卡片。`);
@@ -71,10 +72,14 @@ export function LearningCardCandidatePanel({
         })
       );
       onSaved?.(result.created, result.skipped, result.cards ?? []);
+      savedSuccessfully = true;
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "保存知识卡片失败");
     } finally {
       setSaving(false);
+      if (savedSuccessfully) {
+        onDismiss?.();
+      }
     }
   }
 

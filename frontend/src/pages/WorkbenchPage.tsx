@@ -61,6 +61,7 @@ export function WorkbenchPage({
   const [learningCardCandidates, setLearningCardCandidates] = useState<LearningCardCandidate[]>([]);
   const [savedLearningCards, setSavedLearningCards] = useState<LearningCardItem[]>([]);
   const [learningCardNotice, setLearningCardNotice] = useState("");
+  const [learningCardPendingMessage, setLearningCardPendingMessage] = useState("");
 
   const languages = settings?.languages ?? { Python: "python" };
   const modes = settings?.report_modes?.[modeGroup] ?? [];
@@ -98,6 +99,7 @@ export function WorkbenchPage({
     setLearningCardCandidates([]);
     setSavedLearningCards([]);
     setLearningCardNotice("");
+    setLearningCardPendingMessage("");
 
     try {
       await analyze();
@@ -115,7 +117,13 @@ export function WorkbenchPage({
           onDelta: (text) => {
             setReport((previous) => previous + text);
           },
+          onStatus: (data) => {
+            if (data.phase === "learning_cards") {
+              setLearningCardPendingMessage(String(data.message ?? "知识卡片正在生成中..."));
+            }
+          },
           onDone: (data) => {
+            setLearningCardPendingMessage("");
             const nextReportId = String(data.id ?? "") || null;
             setReportId(nextReportId);
             if (nextReportId) void loadSavedLearningCards(nextReportId);
@@ -130,12 +138,14 @@ export function WorkbenchPage({
             setLoading(false);
           },
           onError: (message) => {
+            setLearningCardPendingMessage("");
             setError(message);
             setLoading(false);
           }
         }
       );
     } catch (exc) {
+      setLearningCardPendingMessage("");
       setError(exc instanceof Error ? exc.message : "生成失败");
       setLoading(false);
     }
@@ -214,6 +224,7 @@ export function WorkbenchPage({
         candidates: learningCardCandidates,
         savedCards: savedLearningCards,
         notice: learningCardNotice,
+        pendingMessage: learningCardPendingMessage,
         onOpenCard: onOpenLearningCard,
         onDismiss: () => setLearningCardCandidates([]),
         onSaved: (created, skipped, cards) => {
@@ -244,6 +255,7 @@ export function WorkbenchPage({
         setLearningCardCandidates([]);
         setSavedLearningCards([]);
         setLearningCardNotice("");
+        setLearningCardPendingMessage("");
       }}
     />
   );

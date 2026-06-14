@@ -11795,6 +11795,96 @@ body {
   gap: 7px;
 }
 
+.metrics-panel-compact {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 7px;
+  min-height: 48px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 86%, transparent);
+  padding: 6px;
+  box-shadow: 0 10px 24px rgba(8, 13, 24, 0.14);
+}
+
+.metrics-panel-empty {
+  display: flex;
+  min-height: 42px;
+  align-items: center;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 760;
+}
+
+.metrics-panel-empty-dot {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pine) 60%, var(--muted));
+  opacity: 0.86;
+}
+
+.metrics-panel-item {
+  display: flex;
+  min-width: 0;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--field-bg) 68%, transparent);
+  padding: 5px 8px;
+}
+
+.metrics-panel-icon {
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  background: color-mix(in srgb, currentColor 14%, transparent);
+}
+
+.metrics-panel-tone-teal {
+  color: var(--teal);
+}
+
+.metrics-panel-tone-plum {
+  color: var(--plum);
+}
+
+.metrics-panel-tone-coral {
+  color: var(--coral);
+}
+
+.metrics-panel-text {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.metrics-panel-text strong {
+  color: var(--ink);
+  font-size: 1.02rem;
+  font-weight: 920;
+  line-height: 1;
+}
+
+.metrics-panel-text em {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.68rem;
+  font-style: normal;
+  font-weight: 780;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .learning-card-candidate-panel {
   display: grid;
   gap: 12px;
@@ -11810,6 +11900,32 @@ body {
 .report-learning-card-notice + .learning-card-candidate-panel,
 .report-learning-card-notice {
   margin-top: 18px;
+}
+
+.report-learning-card-pending {
+  display: inline-flex;
+  min-height: 38px;
+  align-items: center;
+  gap: 8px;
+  margin-top: 18px;
+  border: 1px solid color-mix(in srgb, var(--pine) 26%, var(--line));
+  border-radius: 8px;
+  background:
+    linear-gradient(90deg, color-mix(in srgb, var(--pine) 11%, transparent), transparent 72%),
+    color-mix(in srgb, var(--surface) 90%, transparent);
+  color: var(--ink);
+  padding: 8px 11px;
+  font-size: 0.8rem;
+  font-weight: 820;
+}
+
+.report-learning-card-pending svg {
+  color: var(--pine);
+}
+
+.report-learning-card-notice + .report-learning-card-pending,
+.report-learning-card-pending + .learning-card-candidate-panel {
+  margin-top: 10px;
 }
 
 .learning-card-candidate-head,
