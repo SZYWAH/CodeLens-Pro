@@ -51,6 +51,7 @@ export function AgentPage({
   const [contextMode, setContextMode] = useState<AgentContextMode>("manual");
   const workspacePanelOpen = workspaceOpen || workspaceHoverOpen;
   const webApiBase = getApiBase() || "同源 /api";
+  const workspaceReady = Boolean(workspace?.connected && !workspace.stale && workspace.status !== "no_workspace");
 
   async function loadSessions() {
     setLoading(true);
@@ -293,8 +294,10 @@ export function AgentPage({
               ) : null}
             </div>
 
-            <div className="mt-3 rounded-md border border-line bg-[#070b14] p-3 text-xs leading-5 text-[#b8c9e6]">
-              Web 端负责下指令、看计划和确认应用；VS Code 插件负责读取工作区并执行文件修改。
+            <div className="agent-workspace-brief">
+              <strong>{workspaceReady ? "项目协作链路已就绪" : "项目协作链路待就绪"}</strong>
+              <span>Web 端负责下指令、看计划和确认应用；VS Code 插件负责读取工作区并执行文件修改。</span>
+              <em>演示建议：先选择 1-3 个核心文件，再让 Agent 生成“小范围重构/补充异常处理/完善说明文案”的计划。</em>
             </div>
             {error ? <div className="mt-2 text-xs text-coral">{error}</div> : null}
           </div>
@@ -355,6 +358,7 @@ export function AgentPage({
         sessionId={selectedSessionId}
         selectedFilePaths={selectedFilePaths}
         contextMode={contextMode}
+        workspace={workspace}
         onSessionIdChange={onSelectedSessionIdChange}
         onSessionSaved={() => {
           void loadSessions();

@@ -6,6 +6,9 @@ import { LearningCardCandidatePanel } from "./LearningCardCandidatePanel";
 import { extractMarkdownHeadings, MarkdownDocument, type MarkdownHeadingItem } from "./MarkdownDocument";
 import type { LearningCardCandidate, LearningCardItem, SettingsResponse } from "../types";
 
+const REPORT_HEADING_ACTIVATION_OFFSET = 96;
+const REPORT_HEADING_CLICK_LOCK_MS = 900;
+
 export type ReportContextChatConfig = {
   settings: SettingsResponse | null;
   reportId?: string | null;
@@ -21,7 +24,7 @@ export type ReportLearningCardsConfig = {
   savedCards?: LearningCardItem[];
   notice?: string;
   onDismiss?: () => void;
-  onSaved?: (created: number, skipped: number) => void;
+  onSaved?: (created: number, skipped: number, cards: LearningCardItem[]) => void;
   onOpenCard?: (card: LearningCardItem) => void;
 };
 
@@ -49,6 +52,8 @@ export function ReportViewer({
   const readerScrollRef = useRef<HTMLDivElement | null>(null);
   const fullscreenBodyRef = useRef<HTMLDivElement | null>(null);
   const fullscreenReportPaneRef = useRef<HTMLDivElement | null>(null);
+  const activeHeadingLockRef = useRef<{ id: string; releaseAt: number } | null>(null);
+  const activeHeadingReleaseTimerRef = useRef<number | null>(null);
   const hasContextChat = Boolean(contextChat && content.trim() && !loading && !error);
   const reportHeadings = useMemo(() => extractMarkdownHeadings(content), [content]);
   const reportHeadingKey = useMemo(() => reportHeadings.map((heading) => heading.id).join("|"), [reportHeadings]);
@@ -123,15 +128,41 @@ export function ReportViewer({
       if (!container) return;
 
       const containerTop = container.getBoundingClientRect().top;
+      const lock = activeHeadingLockRef.current;
+      if (lock) {
+        if (Date.now() < lock.releaseAt) {
+          setActiveHeadingId(lock.id);
+          return;
+        }
+        activeHeadingLockRef.current = null;
+      }
+
+      const activationOffset = REPORT_HEADING_ACTIVATION_OFFSET;
+      const maxScrollTop = Math.max(0, container.scrollHeight - container.clientHeight);
+      const isAtBottom = maxScrollTop > 0 && container.scrollTop >= maxScrollTop - 2;
       let nextId = reportHeadings[0].id;
+      let closestId = reportHeadings[0].id;
+      let closestTop = Number.POSITIVE_INFINITY;
+      let closestDistance = Number.POSITIVE_INFINITY;
 
       reportHeadings.forEach((heading) => {
         const node = container.querySelector<HTMLElement>(`#${cssEscape(heading.id)}`);
         if (!node) return;
-        if (node.getBoundingClientRect().top - containerTop <= 96) {
+        const headingTop = node.getBoundingClientRect().top - containerTop;
+        const distance = Math.abs(headingTop - activationOffset);
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          closestTop = headingTop;
+          closestId = heading.id;
+        }
+        if (headingTop <= activationOffset) {
           nextId = heading.id;
         }
       });
+
+      if (isAtBottom || (closestTop > activationOffset && closestTop - activationOffset <= activationOffset)) {
+        nextId = closestId;
+      }
 
       setActiveHeadingId(nextId);
     }
@@ -146,6 +177,14 @@ export function ReportViewer({
     };
   }, [fullscreen, hasContextChat, reportHeadingKey, reportHeadings]);
 
+  useEffect(() => {
+    return () => {
+      if (activeHeadingReleaseTimerRef.current !== null) {
+        window.clearTimeout(activeHeadingReleaseTimerRef.current);
+      }
+    };
+  }, []);
+
   async function copyReport() {
     if (content) {
       await navigator.clipboard.writeText(content);
@@ -157,8 +196,28 @@ export function ReportViewer({
     const target = scope?.querySelector<HTMLElement>(`#${cssEscape(id)}`) ?? document.getElementById(id);
     if (!target) return;
 
+    if (activeHeadingReleaseTimerRef.current !== null) {
+      window.clearTimeout(activeHeadingReleaseTimerRef.current);
+      activeHeadingReleaseTimerRef.current = null;
+    }
+    activeHeadingLockRef.current = { id, releaseAt: Date.now() + REPORT_HEADING_CLICK_LOCK_MS };
     setActiveHeadingId(id);
-    target.scrollIntoView({ behavior: "smooth", block: "start" });
+    if (scope) {
+      const scopeRect = scope.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      const nextScrollTop = scope.scrollTop + targetRect.top - scopeRect.top - REPORT_HEADING_ACTIVATION_OFFSET;
+      scope.scrollTo({ top: Math.max(0, nextScrollTop), behavior: "smooth" });
+    } else {
+      target.scrollIntoView({ behavior: "smooth", block: "start" });
+    }
+    activeHeadingReleaseTimerRef.current = window.setTimeout(() => {
+      const lock = activeHeadingLockRef.current;
+      if (lock?.id === id) {
+        activeHeadingLockRef.current = null;
+      }
+      activeHeadingReleaseTimerRef.current = null;
+      scope?.dispatchEvent(new Event("scroll"));
+    }, REPORT_HEADING_CLICK_LOCK_MS + 120);
   }
 
   function renderContextChat(className = "") {
@@ -236,15 +295,15 @@ export function ReportViewer({
                     {renderContextChat("report-fullscreen-chat-pane")}
                   </>
                 ) : (
-                  <ReportContent content={content} error={error} emptyText="暂无报告内容" learningCards={learningCards} />
+                  <>
+                    <ReportSectionRail
+                      headings={reportHeadings}
+                      activeHeadingId={activeHeadingId}
+                      onSelect={(id) => jumpToReportSection(id, fullscreenBodyRef.current)}
+                    />
+                    <ReportContent content={content} error={error} emptyText="暂无报告内容" learningCards={learningCards} />
+                  </>
                 )}
-                {!hasContextChat ? (
-                  <ReportSectionRail
-                    headings={reportHeadings}
-                    activeHeadingId={activeHeadingId}
-                    onSelect={(id) => jumpToReportSection(id, fullscreenBodyRef.current)}
-                  />
-                ) : null}
               </div>
             </div>
           </div>,

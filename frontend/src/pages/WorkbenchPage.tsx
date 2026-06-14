@@ -216,8 +216,14 @@ export function WorkbenchPage({
         notice: learningCardNotice,
         onOpenCard: onOpenLearningCard,
         onDismiss: () => setLearningCardCandidates([]),
-        onSaved: (created, skipped) => {
+        onSaved: (created, skipped, cards) => {
           setLearningCardNotice(`已保存 ${created} 张知识卡片，跳过 ${skipped} 张重复卡片。`);
+          if (cards.length) {
+            setSavedLearningCards((current) => {
+              const seen = new Set(current.map((card) => card.id));
+              return [...cards.filter((card) => !seen.has(card.id)), ...current];
+            });
+          }
           void loadSavedLearningCards();
           onActivityChanged?.();
         }

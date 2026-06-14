@@ -157,7 +157,7 @@ export function LearningCenterPage({ onNavigate: _onNavigate }: { onNavigate: (p
         <div>
           <span className="learning-kicker"><BookOpenText size={14} /> Daily Journal</span>
           <h2>每日工作日志</h2>
-          <p>把每天的报告、AI 对话、Agent 实践、知识卡片和手写记录沉淀成可回看的开发日记。</p>
+          <p>作为学习闭环的收尾，把报告、追问、Agent 实践、知识卡片和手写记录整理成可回看的开发日记。</p>
         </div>
         <div className="daily-log-hero-actions">
           <button className="btn btn-secondary" onClick={() => changeMonth(-1)} type="button">

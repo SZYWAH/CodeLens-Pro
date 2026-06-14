@@ -13235,3 +13235,120 @@ body {
     min-width: 0;
   }
 }
+
+/* Product-flow polish: clearer demo narrative without changing page routes. */
+.sidebar-nav-group {
+  display: grid;
+  gap: 4px;
+}
+
+.sidebar-nav-group-title {
+  padding: 0 8px;
+  color: #7890b4;
+  font-size: 0.6rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.agent-workspace-brief {
+  display: grid;
+  gap: 5px;
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--surface) 78%, transparent);
+  color: var(--muted);
+  padding: 10px;
+  font-size: 0.72rem;
+  line-height: 1.5;
+}
+
+.agent-workspace-brief strong {
+  color: var(--ink);
+  font-size: 0.78rem;
+}
+
+.agent-workspace-brief em {
+  color: color-mix(in srgb, var(--pine) 84%, var(--muted));
+  font-style: normal;
+}
+
+.agent-workflow-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  border-top: 1px solid var(--line);
+  background: color-mix(in srgb, var(--surface) 82%, transparent);
+  padding: 8px 10px;
+}
+
+.agent-workflow-step {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+  border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--field-bg) 70%, transparent);
+  padding: 7px 8px;
+}
+
+.agent-workflow-step span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.62rem;
+  font-weight: 820;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-workflow-step strong {
+  overflow: hidden;
+  color: var(--ink);
+  font-size: 0.72rem;
+  font-weight: 900;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-workflow-step-ready,
+.agent-workflow-step-applied,
+.agent-workflow-step-done {
+  border-color: color-mix(in srgb, var(--pine) 48%, var(--line));
+  background: color-mix(in srgb, var(--pine) 10%, var(--field-bg));
+}
+
+.agent-workflow-step-pending,
+.agent-workflow-step-waiting,
+.agent-workflow-step-waiting_confirm,
+.agent-workflow-step-confirmed {
+  border-color: color-mix(in srgb, #f7c96b 42%, var(--line));
+  background: color-mix(in srgb, #f7c96b 9%, var(--field-bg));
+}
+
+.agent-workflow-step-blocked,
+.agent-workflow-step-failed,
+.agent-workflow-step-rejected {
+  border-color: color-mix(in srgb, var(--coral) 50%, var(--line));
+  background: color-mix(in srgb, var(--coral) 8%, var(--field-bg));
+}
+
+.agent-plan-card-guidance {
+  border: 1px solid rgba(96, 165, 250, 0.18);
+  border-radius: 8px;
+  background: rgba(37, 99, 235, 0.08);
+  color: #dce9fb;
+  padding: 0.55rem 0.65rem;
+}
+
+.agent-plan-card-guidance-failed,
+.agent-plan-card-guidance-rejected {
+  border-color: rgba(251, 113, 133, 0.28);
+  background: rgba(251, 113, 133, 0.08);
+}
+
+@media (max-width: 900px) {
+  .agent-workflow-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}

@@ -49,8 +49,8 @@ export function SettingsPage({
       <section className="analytics-header">
         <div>
           <span>Usage Overview</span>
-          <h2>运行统计</h2>
-          <p>报告、对话、Agent 与 Token 使用情况汇总。</p>
+          <h2>复盘看板</h2>
+          <p>作为演示收尾层，汇总报告、知识沉淀、Agent 任务与 Token 使用情况。</p>
         </div>
         <Button onClick={onRefreshAnalytics} type="button" tone="primary">
           <RefreshCw className={analyticsLoading ? "animate-spin" : ""} size={16} />
@@ -70,7 +70,7 @@ export function SettingsPage({
           </div>
 
           <Surface className="analytics-trend-panel">
-            <ChartHeader title="近 14 天活跃趋势" subtitle="报告生成与 AI 提问的总体活跃度" />
+            <ChartHeader title="近 14 天学习与协作趋势" subtitle="报告生成、AI 提问和 Agent 任务的总体活跃度" />
             <div className="analytics-trend-chart">
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart data={daily}>
@@ -92,11 +92,11 @@ export function SettingsPage({
 
           <div className="analytics-distribution-grid">
             <Surface className="analytics-distribution-panel">
-              <ChartHeader title="功能使用排行" subtitle="各入口使用频次" />
+              <ChartHeader title="主线入口使用排行" subtitle="分析、沉淀、协作入口的使用频次" />
               <DistributionList items={toolUsage} emptyText="暂无功能使用数据" />
             </Surface>
             <Surface className="analytics-distribution-panel">
-              <ChartHeader title="对话类型分布" subtitle="普通、报告追问与 Agent" />
+              <ChartHeader title="对话类型分布" subtitle="普通问答、报告追问与 Agent 协作" />
               <DistributionList items={chatTypes} emptyText="暂无对话类型数据" />
             </Surface>
           </div>

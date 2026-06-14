@@ -338,10 +338,13 @@ export function KnowledgeCardsPage({
           title="历史报告候选卡片"
           description="这些候选来自最近报告的语义提炼。你可以编辑后选择保存。"
           onDismiss={() => setCandidateCards([])}
-          onSaved={async (created, skipped) => {
+          onSaved={async (created, skipped, savedCards) => {
             setNotice(`已保存 ${created} 张知识卡片，跳过 ${skipped} 张重复卡片。`);
             setCandidateCards([]);
             await load();
+            if (savedCards[0]) {
+              await openCard(savedCards[0]);
+            }
           }}
         />
       ) : null}

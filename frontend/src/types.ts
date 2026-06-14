@@ -159,9 +159,6 @@ export type AnalyticsResponse = {
     tokenizer_available?: boolean;
     tokenizer_source?: string;
     refreshed_at?: string;
-    report_input_tokens: number;
-    report_output_tokens: number;
-    chat_tokens: number;
     total_tokens: number;
     items: AnalyticsDatum[];
   };

@@ -2183,8 +2183,9 @@ def _analytics_summary(session: Session) -> dict:
     chat_messages = list(session.exec(select(ChatMessage)).all())
     metrics = list(session.exec(select(AnalysisMetric)).all())
     agent_plans = list(session.exec(select(AgentPlan)).all())
-    report_tokens = sum(count_tokens(item.content) for item in reports)
-    chat_tokens = sum(count_tokens(item.content) for item in chat_messages)
+    learning_cards = list(session.exec(select(LearningCard)).all())
+    learning_materials = list(session.exec(select(LearningCardMaterial)).all())
+    daily_logs = list(session.exec(select(DailyWorkLog)).all())
     return {
         "reports": len(reports),
         "single_reports": sum(1 for item in reports if item.report_type == "single"),
@@ -2193,8 +2194,76 @@ def _analytics_summary(session: Session) -> dict:
         "agent_tasks": len(agent_plans),
         "code_lines": sum(item.lines for item in metrics),
         "security_risks": sum(_json_list_count(item.secrets_json) for item in metrics),
-        "total_tokens": report_tokens + chat_tokens,
+        "total_tokens": _total_content_tokens(
+            session,
+            reports=reports,
+            chat_messages=chat_messages,
+            agent_plans=agent_plans,
+            learning_cards=learning_cards,
+            learning_materials=learning_materials,
+            daily_logs=daily_logs,
+        ),
     }
+
+
+def _total_content_tokens(
+    session: Session,
+    *,
+    reports: list[Report] | None = None,
+    chat_messages: list[ChatMessage] | None = None,
+    agent_plans: list[AgentPlan] | None = None,
+    learning_cards: list[LearningCard] | None = None,
+    learning_materials: list[LearningCardMaterial] | None = None,
+    daily_logs: list[DailyWorkLog] | None = None,
+) -> int:
+    reports = reports if reports is not None else list(session.exec(select(Report)).all())
+    chat_messages = chat_messages if chat_messages is not None else list(session.exec(select(ChatMessage)).all())
+    agent_plans = agent_plans if agent_plans is not None else list(session.exec(select(AgentPlan)).all())
+    learning_cards = learning_cards if learning_cards is not None else list(session.exec(select(LearningCard)).all())
+    learning_materials = learning_materials if learning_materials is not None else list(session.exec(select(LearningCardMaterial)).all())
+    daily_logs = daily_logs if daily_logs is not None else list(session.exec(select(DailyWorkLog)).all())
+
+    report_tokens = sum(
+        count_tokens(item.code_content)
+        + count_tokens(item.code_a)
+        + count_tokens(item.code_b)
+        + count_tokens(item.content)
+        for item in reports
+    )
+    chat_tokens = sum(count_tokens(item.content) for item in chat_messages)
+    agent_tokens = sum(
+        count_tokens(item.instruction)
+        + count_tokens(item.summary)
+        + count_tokens(item.assumptions_json)
+        + count_tokens(item.warnings_json)
+        + count_tokens(item.operations_json)
+        + count_tokens(item.selected_files_json)
+        + count_tokens(item.apply_result)
+        for item in agent_plans
+    )
+    learning_tokens = sum(
+        count_tokens(item.title)
+        + count_tokens(item.explanation)
+        + count_tokens(item.tags_json)
+        + count_tokens(item.code_excerpt)
+        + count_tokens(item.detail_markdown)
+        + count_tokens(item.notes)
+        + count_tokens(item.resource_links_json)
+        for item in learning_cards
+    )
+    material_tokens = sum(
+        count_tokens(item.content_markdown)
+        + count_tokens(item.source_links_json)
+        for item in learning_materials
+    )
+    daily_log_tokens = sum(
+        count_tokens(item.title)
+        + count_tokens(item.content_markdown)
+        + count_tokens(item.source_stats_json)
+        + count_tokens(item.source_refs_json)
+        for item in daily_logs
+    )
+    return report_tokens + chat_tokens + agent_tokens + learning_tokens + material_tokens + daily_log_tokens
 
 
 def _recent_activity(session: Session, limit: int = 16) -> list[dict]:
@@ -2393,6 +2462,10 @@ def read_analytics(session: Session = Depends(get_session)) -> AnalyticsResponse
     chat_sessions = list(session.exec(select(ChatSession)).all())
     chat_messages = list(session.exec(select(ChatMessage)).all())
     metrics = list(session.exec(select(AnalysisMetric)).all())
+    agent_plans = list(session.exec(select(AgentPlan)).all())
+    learning_cards = list(session.exec(select(LearningCard)).all())
+    learning_materials = list(session.exec(select(LearningCardMaterial)).all())
+    daily_logs = list(session.exec(select(DailyWorkLog)).all())
 
     single_reports = [item for item in reports if item.report_type == "single"]
     diff_reports = [item for item in reports if item.report_type == "diff"]
@@ -2432,15 +2505,15 @@ def read_analytics(session: Session = Depends(get_session)) -> AnalyticsResponse
             }
         )
 
-    report_input_tokens = sum(
-        count_tokens(item.code_content)
-        + count_tokens(item.code_a)
-        + count_tokens(item.code_b)
-        for item in reports
+    total_tokens = _total_content_tokens(
+        session,
+        reports=reports,
+        chat_messages=chat_messages,
+        agent_plans=agent_plans,
+        learning_cards=learning_cards,
+        learning_materials=learning_materials,
+        daily_logs=daily_logs,
     )
-    report_output_tokens = sum(count_tokens(item.content) for item in reports)
-    chat_tokens = sum(count_tokens(item.content) for item in chat_messages)
-    total_tokens = report_input_tokens + report_output_tokens + chat_tokens
     token_status = tokenizer_status()
     balance = fetch_deepseek_balance()
 
@@ -2457,6 +2530,10 @@ def read_analytics(session: Session = Depends(get_session)) -> AnalyticsResponse
             "general_chats": len(general_chats),
             "report_chats": len(report_chats),
             "chat_messages": len(chat_messages),
+            "agent_tasks": len(agent_plans),
+            "learning_cards": len(learning_cards),
+            "learning_materials": len(learning_materials),
+            "daily_logs": len(daily_logs),
             "code_lines": total_lines,
             "functions": total_functions,
             "security_risks": total_risks,
@@ -2476,14 +2553,9 @@ def read_analytics(session: Session = Depends(get_session)) -> AnalyticsResponse
             "tokenizer_available": token_status.get("available"),
             "tokenizer_source": token_status.get("source"),
             "refreshed_at": datetime.utcnow().isoformat(),
-            "report_input_tokens": report_input_tokens,
-            "report_output_tokens": report_output_tokens,
-            "chat_tokens": chat_tokens,
             "total_tokens": total_tokens,
             "items": [
-                {"label": "报告输入", "value": report_input_tokens},
-                {"label": "报告输出", "value": report_output_tokens},
-                {"label": "AI 对话", "value": chat_tokens},
+                {"label": "Token", "value": total_tokens},
             ],
         },
         api_balance=balance,

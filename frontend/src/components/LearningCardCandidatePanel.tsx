@@ -1,7 +1,7 @@
 import { Check, Loader2, Save, Sparkles, X } from "lucide-react";
 import { useMemo, useState } from "react";
 import { api } from "../lib/api";
-import type { LearningCardCandidate } from "../types";
+import type { LearningCardCandidate, LearningCardItem } from "../types";
 
 type EditableCandidate = LearningCardCandidate & {
   local_id: string;
@@ -22,7 +22,7 @@ export function LearningCardCandidatePanel({
   description?: string;
   emptyText?: string;
   compactByDefault?: boolean;
-  onSaved?: (created: number, skipped: number) => void;
+  onSaved?: (created: number, skipped: number, cards: LearningCardItem[]) => void;
   onDismiss?: () => void;
 }) {
   const [items, setItems] = useState<EditableCandidate[]>(() =>
@@ -70,7 +70,7 @@ export function LearningCardCandidatePanel({
           return saved ? { ...item, selected: false } : item;
         })
       );
-      onSaved?.(result.created, result.skipped);
+      onSaved?.(result.created, result.skipped, result.cards ?? []);
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "保存知识卡片失败");
     } finally {

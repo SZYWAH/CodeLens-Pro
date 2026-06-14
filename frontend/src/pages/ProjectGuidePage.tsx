@@ -30,7 +30,7 @@ export function ProjectGuidePage() {
         <div className="project-guide-intro">
           <span className="learning-kicker"><Compass size={14} /> Project Guide</span>
           <h2>项目导读</h2>
-          <p>基于 VS Code 插件同步的项目结构，面向初学者推断入口、核心目录、阅读顺序和可能涉及的知识点。</p>
+          <p>基于 VS Code 插件同步的项目结构，作为辅助视角推断入口、核心目录、阅读顺序和可能涉及的知识点。</p>
         </div>
         <button className="btn btn-secondary project-guide-refresh" onClick={load} disabled={loading} type="button">
           <RefreshCw className={loading ? "animate-spin" : ""} size={15} />

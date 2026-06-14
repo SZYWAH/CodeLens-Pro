@@ -6,7 +6,7 @@ import { api } from "../lib/api";
 import { streamPost } from "../lib/stream";
 import { MarkdownDocument } from "./MarkdownDocument";
 import { SelectField } from "./SelectField";
-import type { AgentContextMode, AgentPlan, ChatMessage, SettingsResponse } from "../types";
+import type { AgentContextMode, AgentPlan, ChatMessage, SettingsResponse, WorkspaceSnapshot } from "../types";
 
 type ChatPanelMode = "general" | "report" | "agent";
 
@@ -30,6 +30,7 @@ export type ChatPanelProps = {
   liftOnInputResize?: boolean;
   selectedFilePaths?: string[];
   contextMode?: AgentContextMode;
+  workspace?: WorkspaceSnapshot | null;
   onSessionIdChange?: (sessionId: string | null) => void;
   onSessionSaved?: (sessionId: string) => void;
   onRemoveSelectedFile?: (path: string) => void;
@@ -51,6 +52,7 @@ export function ChatPanel({
   liftOnInputResize = false,
   selectedFilePaths = [],
   contextMode = "manual",
+  workspace = null,
   onSessionIdChange,
   onSessionSaved,
   onRemoveSelectedFile,
@@ -104,6 +106,7 @@ export function ChatPanel({
       return turns;
     }, []);
   }, [isReportMode, messages]);
+  const agentStage = useMemo(() => buildAgentStageState(workspace, contextMode, selectedFilePaths.length, agentPlans), [agentPlans, contextMode, selectedFilePaths.length, workspace]);
 
   const helperText = useMemo(() => {
     if (isReportMode && !reportId) return "报告保存完成后即可开始上下文对话";
@@ -624,6 +627,8 @@ export function ChatPanel({
 
       {error ? <div className="chat-panel-error">{error}</div> : null}
 
+      {isAgentMode ? <AgentWorkflowStrip stage={agentStage} /> : null}
+
       {isAgentMode ? (
         <div className="agent-context-mode-strip">
           <span>上下文</span>
@@ -641,7 +646,7 @@ export function ChatPanel({
               </button>
             ))}
           </div>
-          <em>{contextModeHint(contextMode, selectedFilePaths.length)}</em>
+          <em>{contextModeHint(contextMode, selectedFilePaths.length, workspace)}</em>
         </div>
       ) : null}
 
@@ -842,10 +847,99 @@ function contextModeLabel(mode: AgentContextMode) {
   return "手动选择";
 }
 
-function contextModeHint(mode: AgentContextMode, selectedCount: number) {
-  if (mode === "ai_auto") return "无需勾选文件，插件会让 AI 从项目清单中选择。";
+function contextModeHint(mode: AgentContextMode, selectedCount: number, workspace?: WorkspaceSnapshot | null) {
+  if (!workspace?.connected || workspace.stale) return "等待 VS Code 插件同步项目后，计划任务才能读取真实文件。";
+  if (workspace.status === "no_workspace") return "VS Code 已连接，但尚未打开工作区文件夹。";
+  if (mode === "ai_auto") return "无需勾选文件，插件会让 AI 从项目清单中选择最小上下文。";
   if (mode === "hybrid") return selectedCount ? `保留 ${selectedCount} 个种子文件，再由 AI 补充。` : "可先勾核心文件，也可直接让 AI 补充。";
   return selectedCount ? `已选择 ${selectedCount} 个文件。` : "从当前项目树勾选文件作为上下文。";
+}
+
+type AgentStageState = {
+  workspace: "ready" | "blocked" | "waiting";
+  context: "ready" | "waiting";
+  plan: "idle" | "pending" | "waiting_confirm" | "confirmed" | "applied" | "failed" | "rejected";
+  execution: "idle" | "waiting" | "done" | "failed" | "rejected";
+};
+
+function AgentWorkflowStrip({ stage }: { stage: AgentStageState }) {
+  const steps = [
+    { key: "workspace", label: "工作区", status: stage.workspace, detail: agentStageDetail("workspace", stage.workspace) },
+    { key: "context", label: "上下文", status: stage.context, detail: agentStageDetail("context", stage.context) },
+    { key: "plan", label: "计划确认", status: stage.plan, detail: agentStageDetail("plan", stage.plan) },
+    { key: "execution", label: "插件执行", status: stage.execution, detail: agentStageDetail("execution", stage.execution) },
+  ];
+
+  return (
+    <div className="agent-workflow-strip" aria-label="Agent 任务流程">
+      {steps.map((step) => (
+        <div className={`agent-workflow-step agent-workflow-step-${step.status}`} key={step.key}>
+          <span>{step.label}</span>
+          <strong>{step.detail}</strong>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function buildAgentStageState(
+  workspace: WorkspaceSnapshot | null,
+  contextMode: AgentContextMode,
+  selectedCount: number,
+  plans: AgentPlan[]
+): AgentStageState {
+  const latest = [...plans].reverse().find(Boolean);
+  const status = latest?.status ?? "";
+  const workspaceReady = Boolean(workspace?.connected && !workspace.stale && workspace.status !== "no_workspace");
+  const contextReady = contextMode !== "manual" || selectedCount > 0;
+
+  return {
+    workspace: workspaceReady ? "ready" : workspace?.connected ? "blocked" : "waiting",
+    context: contextReady ? "ready" : "waiting",
+    plan: normalizePlanStage(status),
+    execution: normalizeExecutionStage(status),
+  };
+}
+
+function normalizePlanStage(status: string): AgentStageState["plan"] {
+  if (status === "pending") return "pending";
+  if (status === "waiting_confirm") return "waiting_confirm";
+  if (status === "confirmed") return "confirmed";
+  if (status === "applied") return "applied";
+  if (status === "failed") return "failed";
+  if (status === "rejected") return "rejected";
+  return "idle";
+}
+
+function normalizeExecutionStage(status: string): AgentStageState["execution"] {
+  if (status === "confirmed") return "waiting";
+  if (status === "applied") return "done";
+  if (status === "failed") return "failed";
+  if (status === "rejected") return "rejected";
+  return "idle";
+}
+
+function agentStageDetail(step: string, status: string) {
+  if (step === "workspace") {
+    if (status === "ready") return "已连接";
+    if (status === "blocked") return "需打开项目";
+    return "等插件";
+  }
+  if (step === "context") return status === "ready" ? "已确定" : "待选择";
+  if (step === "plan") {
+    if (status === "pending") return "插件生成中";
+    if (status === "waiting_confirm") return "待确认";
+    if (status === "confirmed") return "已确认";
+    if (status === "applied") return "已完成";
+    if (status === "failed") return "失败";
+    if (status === "rejected") return "已拒绝";
+    return "未开始";
+  }
+  if (status === "waiting") return "等待应用";
+  if (status === "done") return "已应用";
+  if (status === "failed") return "失败";
+  if (status === "rejected") return "已拒绝";
+  return "未开始";
 }
 
 function AgentPlanCard({
@@ -858,20 +952,9 @@ function AgentPlanCard({
   onConfirm?: (action: "apply" | "reject") => void;
 }) {
   const status = plan.status ?? "pending";
-  const statusText = status === "pending"
-    ? "待插件处理"
-    : status === "waiting_confirm"
-      ? "等待网页确认"
-      : status === "confirmed"
-        ? "已确认，等待插件应用"
-        : status === "applied"
-          ? "已应用"
-          : status === "failed"
-            ? "失败"
-            : status === "rejected"
-              ? "已拒绝"
-              : status;
+  const statusText = agentPlanStatusText(status);
   const canConfirm = status === "waiting_confirm" && plan.operations.length > 0 && onConfirm;
+  const guidance = agentPlanGuidance(plan);
 
   return (
     <article className="agent-plan-card">
@@ -915,6 +998,7 @@ function AgentPlanCard({
           ) : null}
         </div>
       ) : null}
+      {guidance ? <p className={`agent-plan-card-guidance agent-plan-card-guidance-${status}`}>{guidance}</p> : null}
       {plan.apply_result ? <p className="agent-plan-card-result">{plan.apply_result}</p> : null}
       {canConfirm ? (
         <div className="agent-plan-card-actions">
@@ -929,6 +1013,26 @@ function AgentPlanCard({
       ) : null}
     </article>
   );
+}
+
+function agentPlanStatusText(status: string) {
+  if (status === "pending") return "待插件生成计划";
+  if (status === "waiting_confirm") return "等待网页确认";
+  if (status === "confirmed") return "已确认，等待插件应用";
+  if (status === "applied") return "已应用";
+  if (status === "failed") return "失败";
+  if (status === "rejected") return "已拒绝";
+  return status;
+}
+
+function agentPlanGuidance(plan: AgentPlan) {
+  const status = plan.status ?? "pending";
+  if (status === "pending") return "请保持 VS Code 插件和当前项目打开，插件会读取上下文并回传可确认的修改计划。";
+  if (status === "waiting_confirm" && !plan.operations.length) return "计划没有生成文件操作，可以继续追问补充任务目标，或改用讨论模式先定位问题。";
+  if (status === "waiting_confirm") return "确认后才会进入插件执行阶段，执行前仍可拒绝。";
+  if (status === "confirmed") return "已进入插件执行队列，请保持 VS Code 工作区在线。";
+  if (status === "failed") return "检查插件连接、工作区路径和计划中的文件是否仍存在，然后重新生成计划。";
+  return "";
 }
 
 function isNearBottom(element: HTMLElement, threshold = 96) {

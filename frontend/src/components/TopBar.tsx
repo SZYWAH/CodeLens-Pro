@@ -35,7 +35,7 @@ export function TopBar({
           <span>{theme === "dark" ? "深色" : "亮色"}</span>
         </button>
         <StatusPill ok={Boolean(analytics?.api_balance.available)} label={balanceValue} subtle />
-        <StatusPill ok={Boolean(analytics)} label={`Token ${formatNumber(totalTokens)}`} subtle />
+        <StatusPill ok={Boolean(analytics)} label={`Token ${formatNumber(totalTokens)}`} title="Token" subtle />
         <StatusPill ok={Boolean(settings?.mysql_ok)} label={settings?.mysql_ok ? "MySQL 已连接" : "MySQL 未连接"} />
         <StatusPill ok={Boolean(settings?.llm_key_configured)} label={settings?.llm_key_configured ? "LLM 已配置" : "LLM 未配置"} />
       </div>

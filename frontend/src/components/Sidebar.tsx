@@ -27,16 +27,39 @@ export type PageKey =
   | "settings"
   | "activityGalaxy";
 
-const items: Array<{ key: PageKey; label: string; icon: LucideIcon }> = [
-  { key: "workbench", label: "工作台", icon: Sparkles },
-  { key: "diff", label: "代码对比", icon: GitCompare },
-  { key: "chat", label: "AI 对话", icon: Bot },
-  { key: "agent", label: "Agent 工作区", icon: Cpu },
-  { key: "projectGuide", label: "项目导读", icon: Compass },
-  { key: "knowledgeCards", label: "知识卡片", icon: Layers3 },
-  { key: "learning", label: "每日日志", icon: BookOpenText },
-  { key: "history", label: "历史报告", icon: FileClock },
-  { key: "settings", label: "统计", icon: BarChart3 },
+const navGroups: Array<{
+  title: string;
+  items: Array<{ key: PageKey; label: string; icon: LucideIcon }>;
+}> = [
+  {
+    title: "分析主线",
+    items: [
+      { key: "workbench", label: "代码工作台", icon: Sparkles },
+      { key: "diff", label: "代码对比", icon: GitCompare },
+      { key: "history", label: "历史报告", icon: FileClock },
+    ],
+  },
+  {
+    title: "学习沉淀",
+    items: [
+      { key: "knowledgeCards", label: "知识卡片", icon: Layers3 },
+      { key: "learning", label: "每日日志", icon: BookOpenText },
+    ],
+  },
+  {
+    title: "项目协作",
+    items: [
+      { key: "agent", label: "Agent 工作区", icon: Cpu },
+      { key: "projectGuide", label: "项目导读", icon: Compass },
+    ],
+  },
+  {
+    title: "复盘展示",
+    items: [
+      { key: "chat", label: "AI 对话", icon: Bot },
+      { key: "settings", label: "统计看板", icon: BarChart3 },
+    ],
+  },
 ];
 
 export function Sidebar({
@@ -57,38 +80,45 @@ export function Sidebar({
         {!collapsed ? (
           <div className="min-w-0">
             <div className="truncate text-[13px] font-black text-[#f8fbff]">CodeLens Pro</div>
-            <div className="truncate text-[10px] font-bold text-[#9fb3ce]">AI workspace</div>
+            <div className="truncate text-[10px] font-bold text-[#9fb3ce]">分析 · 沉淀 · Agent</div>
           </div>
         ) : null}
       </div>
 
-      <nav className="flex flex-1 flex-col gap-1" aria-label="主导航">
-        {items.map((item) => {
-          const Icon = item.icon;
-          const selected = active === item.key;
-          const button = (
-            <button
-              key={item.key}
-              title={item.label}
-              className={[
-                "flex h-8 items-center gap-2 rounded-md px-2 text-[12px] font-bold transition",
-                collapsed ? "justify-center px-0" : "",
-                selected ? "bg-[#102647] text-pine" : "text-[#b8c9e6] hover:bg-[#111a2e] hover:text-pine",
-              ].join(" ")}
-              onClick={() => onChange(item.key)}
-              type="button"
-            >
-              <Icon size={16} />
-              {!collapsed ? <span>{item.label}</span> : null}
-            </button>
-          );
+      <nav className="flex flex-1 flex-col gap-2" aria-label="主导航">
+        {navGroups.map((group) => (
+          <div className="sidebar-nav-group" key={group.title}>
+            {!collapsed ? <div className="sidebar-nav-group-title">{group.title}</div> : null}
+            <div className="flex flex-col gap-1">
+              {group.items.map((item) => {
+                const Icon = item.icon;
+                const selected = active === item.key;
+                const button = (
+                  <button
+                    key={item.key}
+                    title={item.label}
+                    className={[
+                      "flex h-8 items-center gap-2 rounded-md px-2 text-[12px] font-bold transition",
+                      collapsed ? "justify-center px-0" : "",
+                      selected ? "bg-[#102647] text-pine" : "text-[#b8c9e6] hover:bg-[#111a2e] hover:text-pine",
+                    ].join(" ")}
+                    onClick={() => onChange(item.key)}
+                    type="button"
+                  >
+                    <Icon size={16} />
+                    {!collapsed ? <span>{item.label}</span> : null}
+                  </button>
+                );
 
-          return collapsed ? (
-            <Tooltip key={item.key} label={item.label}>
-              {button}
-            </Tooltip>
-          ) : button;
-        })}
+                return collapsed ? (
+                  <Tooltip key={item.key} label={`${group.title} · ${item.label}`}>
+                    {button}
+                  </Tooltip>
+                ) : button;
+              })}
+            </div>
+          </div>
+        ))}
       </nav>
 
       <div className="border-t border-line pt-2">
@@ -103,7 +133,7 @@ export function Sidebar({
         </button>
         {!collapsed ? (
           <div className="mt-2 truncate text-[10px] leading-4 text-[#9fb3ce]">
-            <strong>Local Demo</strong>
+            <strong>Local Prototype</strong>
           </div>
         ) : null}
       </div>
