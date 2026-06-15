@@ -11,6 +11,7 @@ type GalaxyPoint = {
   phase: number;
   speed: number;
   drift: number;
+  stream: number;
   size: number;
   alpha: number;
 };
@@ -21,6 +22,7 @@ type DustPoint = {
   phase: number;
   speed: number;
   drift: number;
+  stream: number;
   size: number;
   alpha: number;
 };
@@ -31,6 +33,14 @@ type PointLayer = {
   positions: Float32Array;
   sizes: Float32Array;
   alphas: Float32Array;
+};
+
+type FocusStarLayer = {
+  group: THREE.Group;
+  core: THREE.Sprite;
+  halo: THREE.Sprite;
+  materials: THREE.SpriteMaterial[];
+  textures: THREE.Texture[];
 };
 
 type RotationControls = {
@@ -55,6 +65,9 @@ type RotationControls = {
 type FocusState = {
   active: boolean;
   selectedIndex: number;
+  approach: number;
+  targetLocal: THREE.Vector3;
+  nearLocal: THREE.Vector3;
   yaw: number;
   pitch: number;
   roll: number;
@@ -62,10 +75,13 @@ type FocusState = {
   restorePitch: number;
   restoreRoll: number;
   restoreDistance: number;
+  restoreFov: number;
 };
 
+const DEFAULT_CAMERA_FOV = 43;
 const DEFAULT_CAMERA_DISTANCE = 8.6;
-const FOCUS_CAMERA_DISTANCE = 5.45;
+const FOCUS_CAMERA_DISTANCE = 6.45;
+const FOCUS_CAMERA_FOV = 41.4;
 const MIN_CAMERA_DISTANCE = 4.8;
 const MAX_CAMERA_DISTANCE = 12.5;
 const DRAG_THRESHOLD = 5;
@@ -80,6 +96,7 @@ export function ActivityGalaxyPage({
   onOpenActivity: (item: ActivityStarItem) => void | Promise<void>;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const focusMarkerRef = useRef<HTMLDivElement | null>(null);
   const selectedIdRef = useRef<string | null>(null);
   const [items, setItems] = useState<ActivityStarItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -119,7 +136,7 @@ export function ActivityGalaxyPage({
     const hostElement: HTMLDivElement = container;
 
     const scene = new THREE.Scene();
-    const camera = new THREE.PerspectiveCamera(43, 1, 0.1, 100);
+    const camera = new THREE.PerspectiveCamera(DEFAULT_CAMERA_FOV, 1, 0.1, 100);
     camera.position.set(0, 0, DEFAULT_CAMERA_DISTANCE);
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true, preserveDrawingBuffer: true });
@@ -145,11 +162,13 @@ export function ActivityGalaxyPage({
     const ambientStarField = new THREE.Points(ambientLayer.geometry, ambientLayer.material);
     const dataStarField = new THREE.Points(dataLayer.geometry, dataLayer.material);
     const backgroundStarField = new THREE.Points(backgroundLayer.geometry, backgroundLayer.material);
+    const focusStarLayer = createFocusStarLayer();
     backgroundStarField.rotation.order = "YXZ";
     ambientStarField.renderOrder = 1;
     dataStarField.renderOrder = 2;
+    focusStarLayer.group.renderOrder = 3;
     backgroundStarField.renderOrder = 0;
-    galaxyGroup.add(ambientStarField, dataStarField);
+    galaxyGroup.add(ambientStarField, dataStarField, focusStarLayer.group);
     scene.add(backgroundStarField, galaxyGroup);
 
     const controls: RotationControls = {
@@ -174,6 +193,9 @@ export function ActivityGalaxyPage({
     const focusState: FocusState = {
       active: false,
       selectedIndex: -1,
+      approach: 0,
+      targetLocal: new THREE.Vector3(),
+      nearLocal: new THREE.Vector3(),
       yaw: 0,
       pitch: 0,
       roll: 0,
@@ -181,6 +203,7 @@ export function ActivityGalaxyPage({
       restorePitch: 0,
       restoreRoll: 0,
       restoreDistance: DEFAULT_CAMERA_DISTANCE,
+      restoreFov: DEFAULT_CAMERA_FOV,
     };
 
     const raycaster = new THREE.Raycaster();
@@ -228,7 +251,7 @@ export function ActivityGalaxyPage({
       const point = dataStars[index];
       if (!point) return;
 
-      const targetDirection = new THREE.Vector3(0.34, 0, 1).normalize();
+      const targetDirection = new THREE.Vector3(0.18, 0.02, 1).normalize();
       const sourceDirection = point.base.clone().normalize();
       const quaternion = new THREE.Quaternion().setFromUnitVectors(sourceDirection, targetDirection);
       const targetEuler = new THREE.Euler().setFromQuaternion(quaternion, "YXZ");
@@ -239,6 +262,10 @@ export function ActivityGalaxyPage({
       focusState.restorePitch = controls.pitchTarget;
       focusState.restoreRoll = controls.rollTarget;
       focusState.restoreDistance = cameraDistanceTarget;
+      focusState.restoreFov = camera.fov;
+      focusState.targetLocal.copy(point.base);
+      focusState.nearLocal.copy(point.base);
+      focusState.approach = 0;
       focusState.yaw = nearestAngle(targetEuler.y, controls.yawTarget);
       focusState.pitch = clamp(targetEuler.x, -1.1, 1.1);
       focusState.roll = nearestAngle(targetEuler.z, controls.rollTarget);
@@ -256,13 +283,13 @@ export function ActivityGalaxyPage({
     }
 
     function releaseFocusIfNeeded() {
-      if (!focusState.active || selectedIdRef.current) return;
+      if (selectedIdRef.current) return;
+      if (!focusState.active && focusState.approach <= 0.001 && Math.abs(cameraDistanceTarget - focusState.restoreDistance) < 0.01) return;
       controls.yawTarget = focusState.restoreYaw;
       controls.pitchTarget = focusState.restorePitch;
       controls.rollTarget = focusState.restoreRoll;
       cameraDistanceTarget = focusState.restoreDistance;
       focusState.active = false;
-      focusState.selectedIndex = -1;
       controls.autoPausedUntil = performance.now() + 1600;
     }
 
@@ -360,6 +387,14 @@ export function ActivityGalaxyPage({
 
       const motionScale = reducedMotion ? 0.08 : 1;
       const shouldAutoDrift = !controls.dragging && !focusState.active && now > controls.autoPausedUntil;
+      const focusTarget = focusState.active ? 1 : 0;
+      focusState.approach = damp(focusState.approach, focusTarget, focusState.active ? 2.7 : 4.8, dt);
+      if (!focusState.active && focusState.approach < 0.018) {
+        focusState.approach = 0;
+        focusState.selectedIndex = -1;
+      }
+      const focusEase = easeOutCubic(focusState.approach);
+      const focusRush = reducedMotion ? focusEase * 0.08 : focusEase * 0.34;
 
       if (!controls.dragging && !focusState.active) {
         controls.yawTarget += controls.velocityYaw * dt;
@@ -388,18 +423,31 @@ export function ActivityGalaxyPage({
       controls.roll = damp(controls.roll, targetRoll, focusState.active ? 4.2 : 3.6, dt);
       galaxyGroup.rotation.set(controls.pitch, controls.yaw, controls.roll, "YXZ");
 
-      const targetX = selectedIdRef.current ? -1.08 : 0;
+      const targetX = selectedIdRef.current ? -0.38 : 0;
       galaxyGroup.position.x = damp(galaxyGroup.position.x, targetX, 6.2, dt);
       camera.position.z = damp(camera.position.z, cameraDistanceTarget, 7.4, dt);
+      camera.fov = damp(camera.fov, focusState.active ? FOCUS_CAMERA_FOV : focusState.restoreFov, 4.6, dt);
       camera.updateProjectionMatrix();
 
-      backgroundStarField.rotation.y = Math.sin(elapsed * 0.018) * 0.025 * motionScale;
-      backgroundStarField.rotation.x = Math.cos(elapsed * 0.014) * 0.018 * motionScale;
+      backgroundStarField.rotation.y = Math.sin(elapsed * 0.018) * 0.025 * motionScale - focusRush * 0.035;
+      backgroundStarField.rotation.x = Math.cos(elapsed * 0.014) * 0.018 * motionScale + focusRush * 0.02;
+      backgroundStarField.position.z = damp(backgroundStarField.position.z, -focusRush * 0.7, 5.4, dt);
+      ambientStarField.position.z = damp(ambientStarField.position.z, focusRush * 0.08, 5.4, dt);
 
-      updatePointPositions(dataStars, dataLayer.positions, elapsed, motionScale, 0.6);
-      updatePointPositions(ambientDust, ambientLayer.positions, elapsed, motionScale, 0.28);
-      updatePointPositions(backgroundDust, backgroundLayer.positions, elapsed, motionScale, 0.18);
+      updatePointPositions(dataStars, dataLayer.positions, elapsed, motionScale, 0.6, focusRush * 0.08);
+      updatePointPositions(ambientDust, ambientLayer.positions, elapsed, motionScale, 0.28, focusRush * 0.18);
+      updatePointPositions(backgroundDust, backgroundLayer.positions, elapsed, motionScale, 0.18, focusRush * 0.36);
       updateDataStarHighlights(dataStars, dataLayer, hoveredIndex, focusState.selectedIndex, dt);
+      updateFocusStarLayer(focusStarLayer, focusState, dataStars[focusState.selectedIndex], elapsed, dt);
+      updateFocusMarker(
+        focusMarkerRef.current,
+        dataStars[focusState.selectedIndex],
+        focusState,
+        galaxyGroup,
+        camera,
+        renderer.domElement,
+        focusEase,
+      );
       dataLayer.geometry.attributes.position.needsUpdate = true;
       ambientLayer.geometry.attributes.position.needsUpdate = true;
       backgroundLayer.geometry.attributes.position.needsUpdate = true;
@@ -407,6 +455,8 @@ export function ActivityGalaxyPage({
       dataLayer.material.uniforms.uTime.value = elapsed;
       ambientLayer.material.uniforms.uTime.value = elapsed * 0.72;
       backgroundLayer.material.uniforms.uTime.value = elapsed * 0.36;
+      ambientLayer.material.uniforms.uOpacity.value = 0.98 - focusEase * 0.08;
+      backgroundLayer.material.uniforms.uOpacity.value = 0.58 - focusEase * 0.04;
 
       renderer.render(scene, camera);
       frameId = window.requestAnimationFrame(render);
@@ -439,6 +489,7 @@ export function ActivityGalaxyPage({
       dataLayer.material.dispose();
       ambientLayer.material.dispose();
       backgroundLayer.material.dispose();
+      disposeFocusStarLayer(focusStarLayer);
       renderer.dispose();
       renderer.domElement.remove();
     };
@@ -448,6 +499,10 @@ export function ActivityGalaxyPage({
     <div className={["activity-galaxy-page", selected ? "activity-galaxy-page-detail-open" : ""].join(" ")}>
       <div className="activity-galaxy-backdrop" />
       <div className="activity-galaxy-stage" ref={containerRef} />
+      <div className="activity-galaxy-focus-marker" ref={focusMarkerRef} aria-hidden="true">
+        <span className="activity-galaxy-focus-marker-ring" />
+        <span className="activity-galaxy-focus-marker-core" />
+      </div>
       <div className="activity-galaxy-vignette" />
 
       <button className="activity-galaxy-back" onClick={onBack} type="button" aria-label="返回统计页">
@@ -589,6 +644,148 @@ function createPointLayer<T extends { color: string; base: THREE.Vector3; size: 
   return { geometry, material, positions, sizes, alphas };
 }
 
+function createFocusStarLayer(): FocusStarLayer {
+  const coreTexture = createRadialTexture([
+    { stop: 0, color: "rgba(255,255,255,0)" },
+    { stop: 1, color: "rgba(255,255,255,0)" },
+  ]);
+  const haloTexture = createRadialTexture([
+    { stop: 0, color: "rgba(255,255,255,0)" },
+    { stop: 0.2, color: "rgba(174,211,255,0.045)" },
+    { stop: 0.52, color: "rgba(90,146,231,0.018)" },
+    { stop: 1, color: "rgba(140,191,255,0)" },
+  ]);
+
+  const coreMaterial = new THREE.SpriteMaterial({
+    map: coreTexture,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    opacity: 0,
+  });
+  const haloMaterial = new THREE.SpriteMaterial({
+    map: haloTexture,
+    transparent: true,
+    depthWrite: false,
+    blending: THREE.AdditiveBlending,
+    opacity: 0,
+  });
+  const group = new THREE.Group();
+  const halo = new THREE.Sprite(haloMaterial);
+  const core = new THREE.Sprite(coreMaterial);
+  halo.renderOrder = 4;
+  core.renderOrder = 5;
+  group.visible = false;
+  group.add(halo, core);
+
+  return {
+    group,
+    core,
+    halo,
+    materials: [coreMaterial, haloMaterial],
+    textures: [coreTexture, haloTexture],
+  };
+}
+
+function createRadialTexture(stops: Array<{ stop: number; color: string }>) {
+  const size = 192;
+  const canvas = document.createElement("canvas");
+  canvas.width = size;
+  canvas.height = size;
+  const context = canvas.getContext("2d");
+  if (!context) return new THREE.CanvasTexture(canvas);
+
+  const radius = size / 2;
+  const gradient = context.createRadialGradient(radius, radius, 0, radius, radius, radius);
+  stops.forEach((item) => gradient.addColorStop(item.stop, item.color));
+  context.fillStyle = gradient;
+  context.fillRect(0, 0, size, size);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function updateFocusStarLayer(
+  layer: FocusStarLayer,
+  focusState: FocusState,
+  point: GalaxyPoint | undefined,
+  elapsed: number,
+  delta: number,
+) {
+  const approach = easeOutCubic(focusState.approach);
+  if (!point || approach <= 0.001) {
+    layer.group.visible = false;
+    layer.materials.forEach((material) => {
+      material.opacity = 0;
+    });
+    return;
+  }
+
+  const pulse = 1 + Math.sin(elapsed * 1.8 + point.phase) * 0.012;
+  const nextPosition = focusState.targetLocal.clone();
+  nextPosition.x += Math.sin(elapsed * 0.34 + point.phase) * 0.006 * approach;
+  nextPosition.y += Math.sin(elapsed * 0.62 + point.phase) * 0.008 * approach;
+
+  layer.group.visible = true;
+  layer.group.position.lerp(nextPosition, 1 - Math.exp(-10 * delta));
+
+  const color = new THREE.Color(point.color);
+  layer.halo.material.color.lerp(color, 0.22);
+
+  const baseScale = (0.22 + approach * 0.14) * pulse;
+  layer.core.scale.setScalar(baseScale);
+  layer.halo.scale.setScalar(baseScale * 2.45);
+  layer.core.material.opacity = 0;
+  layer.halo.material.opacity = Math.min(0.085, approach * 0.07);
+}
+
+function disposeFocusStarLayer(layer: FocusStarLayer) {
+  layer.materials.forEach((material) => material.dispose());
+  layer.textures.forEach((texture) => texture.dispose());
+}
+
+function updateFocusMarker(
+  marker: HTMLDivElement | null,
+  point: GalaxyPoint | undefined,
+  focusState: FocusState,
+  galaxyGroup: THREE.Group,
+  camera: THREE.PerspectiveCamera,
+  canvas: HTMLCanvasElement,
+  focusEase: number,
+) {
+  if (!marker) return;
+  if (!point || focusState.approach <= 0.001) {
+    marker.style.setProperty("--focus-opacity", "0");
+    marker.dataset.active = "false";
+    return;
+  }
+
+  galaxyGroup.updateMatrixWorld(true);
+  const worldPosition = point.base.clone();
+  galaxyGroup.localToWorld(worldPosition);
+  worldPosition.project(camera);
+  const inView = worldPosition.z > -1 && worldPosition.z < 1 && Math.abs(worldPosition.x) < 1.08 && Math.abs(worldPosition.y) < 1.08;
+  if (!inView) {
+    marker.style.setProperty("--focus-opacity", "0");
+    marker.dataset.active = "false";
+    return;
+  }
+
+  const rect = canvas.getBoundingClientRect();
+  const screenX = ((worldPosition.x + 1) * 0.5) * rect.width;
+  const screenY = ((1 - worldPosition.y) * 0.5) * rect.height;
+  const markerScale = clamp(0.84 + focusEase * 0.18, 0.82, 1.02);
+  const markerOpacity = clamp(0.12 + focusEase * 0.58, 0, 0.7);
+
+  marker.style.setProperty("--focus-x", `${screenX}px`);
+  marker.style.setProperty("--focus-y", `${screenY}px`);
+  marker.style.setProperty("--focus-scale", markerScale.toFixed(3));
+  marker.style.setProperty("--focus-opacity", markerOpacity.toFixed(3));
+  marker.dataset.active = markerOpacity > 0.02 ? "true" : "false";
+}
+
 function updateDataStarHighlights(
   points: GalaxyPoint[],
   layer: PointLayer,
@@ -599,10 +796,10 @@ function updateDataStarHighlights(
   for (let index = 0; index < points.length; index += 1) {
     const selected = index === selectedIndex;
     const hovered = index === hoveredIndex;
-    const targetSize = points[index].size * (selected ? 2.35 : hovered ? 1.26 : 1);
-    const targetAlpha = points[index].alpha * (selected ? 1.75 : hovered ? 1.22 : 1);
-    layer.sizes[index] = damp(layer.sizes[index], targetSize, selected ? 11 : 8, delta);
-    layer.alphas[index] = damp(layer.alphas[index], targetAlpha, selected ? 11 : 8, delta);
+    const targetSize = points[index].size * (selected ? 2.18 : hovered ? 1.18 : 1);
+    const targetAlpha = points[index].alpha * (selected ? 1.82 : hovered ? 1.14 : 1);
+    layer.sizes[index] = damp(layer.sizes[index], targetSize, selected ? 13 : 8, delta);
+    layer.alphas[index] = damp(layer.alphas[index], targetAlpha, selected ? 13 : 8, delta);
   }
   layer.geometry.attributes.pointSize.needsUpdate = true;
   layer.geometry.attributes.alphaBase.needsUpdate = true;
@@ -618,6 +815,7 @@ function buildGalaxyPoints(items: ActivityStarItem[]): GalaxyPoint[] {
       phase: seeded(`${seed}:phase`) * Math.PI * 2,
       speed: 0.25 + seeded(`${seed}:speed`) * 0.38,
       drift: 0.005 + seeded(`${seed}:drift`) * 0.014,
+      stream: 0.18 + seeded(`${seed}:stream`) * 0.28,
       size: 12.2 + seeded(`${seed}:size`) * 4.6 + Math.min(item.weight ?? 0, 5) * 0.68,
       alpha: 1,
     };
@@ -639,6 +837,7 @@ function buildAmbientDust(count: number): DustPoint[] {
       phase: seeded(`${seed}:phase`) * Math.PI * 2,
       speed: 0.12 + seeded(`${seed}:speed`) * 0.24,
       drift: 0.002 + seeded(`${seed}:drift`) * 0.007,
+      stream: 0.2 + seeded(`${seed}:stream`) * 0.42,
       size: 2.15 + seeded(`${seed}:size`) * 2.4,
       alpha: 0.42 + seeded(`${seed}:alpha`) * 0.58,
     };
@@ -658,25 +857,28 @@ function buildBackgroundDust(count: number): DustPoint[] {
       phase: seeded(`${seed}:phase`) * Math.PI * 2,
       speed: 0.04 + seeded(`${seed}:speed`) * 0.12,
       drift: 0.001 + seeded(`${seed}:drift`) * 0.004,
+      stream: 0.3 + seeded(`${seed}:stream`) * 0.58,
       size: 1.1 + seeded(`${seed}:size`) * 1.55,
       alpha: 0.22 + seeded(`${seed}:alpha`) * 0.38,
     };
   });
 }
 
-function updatePointPositions<T extends { base: THREE.Vector3; speed: number; phase: number; drift: number }>(
+function updatePointPositions<T extends { base: THREE.Vector3; speed: number; phase: number; drift: number; stream: number }>(
   points: T[],
   positions: Float32Array,
   elapsed: number,
   motionScale: number,
   travel: number,
+  rush = 0,
 ) {
   points.forEach((point, index) => {
     const offset = point.drift * motionScale * travel;
-    const radial = 1 + Math.sin(elapsed * point.speed + point.phase) * 0.006 * motionScale * travel;
+    const radial = 1 + Math.sin(elapsed * point.speed + point.phase) * 0.006 * motionScale * travel + rush * 0.05;
+    const stream = rush * point.stream;
     positions[index * 3] = point.base.x * radial + Math.sin(elapsed * 0.21 + point.phase) * offset;
     positions[index * 3 + 1] = point.base.y * radial + Math.cos(elapsed * 0.17 + point.phase * 0.7) * offset;
-    positions[index * 3 + 2] = point.base.z * radial + Math.sin(elapsed * 0.19 + point.phase * 1.3) * offset;
+    positions[index * 3 + 2] = point.base.z * radial + Math.sin(elapsed * 0.19 + point.phase * 1.3) * offset + stream;
   });
 }
 
@@ -724,6 +926,10 @@ function seeded(value: string) {
 
 function damp(current: number, target: number, lambda: number, delta: number) {
   return current + (target - current) * (1 - Math.exp(-lambda * delta));
+}
+
+function easeOutCubic(value: number) {
+  return 1 - Math.pow(1 - clamp(value, 0, 1), 3);
 }
 
 function clamp(value: number, min: number, max: number) {

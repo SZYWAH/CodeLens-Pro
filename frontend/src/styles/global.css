@@ -7582,8 +7582,8 @@ body {
   inset: 0;
   z-index: 0;
   background:
-    radial-gradient(ellipse at 50% 50%, rgba(20, 45, 84, 0.44) 0%, rgba(8, 21, 42, 0.3) 34%, rgba(2, 7, 17, 0.08) 58%, transparent 74%),
-    radial-gradient(ellipse at 50% 50%, rgba(66, 101, 158, 0.08) 0%, transparent 42%),
+    radial-gradient(ellipse at 50% 50%, rgba(14, 32, 60, 0.22) 0%, rgba(6, 16, 32, 0.18) 34%, rgba(2, 7, 17, 0.045) 60%, transparent 78%),
+    radial-gradient(ellipse at 50% 50%, rgba(66, 101, 158, 0.022) 0%, transparent 42%),
     #000000;
 }
 
@@ -7592,8 +7592,8 @@ body {
   inset: 0;
   background:
     linear-gradient(115deg, transparent 0 46%, rgba(120, 150, 205, 0.018) 50%, transparent 56%),
-    radial-gradient(ellipse at 50% 50%, transparent 0 48%, rgba(0, 0, 0, 0.28) 78%, rgba(0, 0, 0, 0.92) 100%);
-  opacity: 0.88;
+    radial-gradient(ellipse at 50% 50%, transparent 0 46%, rgba(0, 0, 0, 0.3) 76%, rgba(0, 0, 0, 0.94) 100%);
+  opacity: 0.94;
   content: "";
 }
 
@@ -7619,6 +7619,103 @@ body {
   cursor: grab;
   touch-action: none;
   user-select: none;
+}
+
+.activity-galaxy-focus-marker {
+  --focus-x: 50%;
+  --focus-y: 50%;
+  --focus-opacity: 0;
+  --focus-scale: 0.8;
+  pointer-events: none;
+  position: absolute;
+  left: var(--focus-x);
+  top: var(--focus-y);
+  z-index: 3;
+  width: 112px;
+  height: 112px;
+  opacity: var(--focus-opacity);
+  transform: translate(-50%, -50%) scale(var(--focus-scale));
+  transition: opacity 220ms ease;
+  will-change: opacity, transform;
+}
+
+.activity-galaxy-focus-marker-ring,
+.activity-galaxy-focus-marker-core {
+  position: absolute;
+  border-radius: 999px;
+}
+
+.activity-galaxy-focus-marker-ring {
+  inset: 0;
+  border: 1px solid rgba(184, 215, 255, 0.24);
+  box-shadow:
+    inset 0 0 24px rgba(168, 211, 255, 0.055),
+    0 0 24px rgba(112, 168, 255, 0.095);
+}
+
+.activity-galaxy-focus-marker-ring::before,
+.activity-galaxy-focus-marker-ring::after {
+  position: absolute;
+  content: "";
+}
+
+.activity-galaxy-focus-marker-ring::before {
+  inset: -1px;
+  border-radius: inherit;
+  background:
+    conic-gradient(
+      from 8deg,
+      rgba(200, 226, 255, 0.68) 0deg 32deg,
+      transparent 32deg 86deg,
+      rgba(200, 226, 255, 0.38) 86deg 120deg,
+      transparent 120deg 178deg,
+      rgba(200, 226, 255, 0.64) 178deg 210deg,
+      transparent 210deg 270deg,
+      rgba(200, 226, 255, 0.34) 270deg 302deg,
+      transparent 302deg 360deg
+    );
+  -webkit-mask: radial-gradient(circle, transparent 0 72%, #000 73% 100%);
+  mask: radial-gradient(circle, transparent 0 72%, #000 73% 100%);
+}
+
+.activity-galaxy-focus-marker-ring::after {
+  inset: 18px;
+  border: 1px solid rgba(196, 222, 255, 0.16);
+  border-bottom-color: transparent;
+  border-left-color: transparent;
+  border-radius: inherit;
+  transform: rotate(24deg);
+}
+
+.activity-galaxy-focus-marker-core {
+  display: none;
+}
+
+.activity-galaxy-focus-marker[data-active="true"] .activity-galaxy-focus-marker-ring {
+  animation: activity-galaxy-focus-breathe 3.2s ease-in-out infinite;
+}
+
+.activity-galaxy-focus-marker[data-active="true"] .activity-galaxy-focus-marker-ring::before {
+  animation: activity-galaxy-focus-drift 9s linear infinite;
+}
+
+@keyframes activity-galaxy-focus-breathe {
+  0%,
+  100% {
+    transform: scale(0.99);
+    opacity: 0.8;
+  }
+
+  50% {
+    transform: scale(1.018);
+    opacity: 0.98;
+  }
+}
+
+@keyframes activity-galaxy-focus-drift {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .activity-galaxy-vignette {
@@ -8901,6 +8998,42 @@ body {
   color: var(--ink-soft);
   font-size: 0.9rem;
   line-height: 1.75;
+}
+
+.daily-log-generating-sheet {
+  display: grid;
+  gap: 12px;
+}
+
+.daily-log-document-streaming {
+  position: relative;
+}
+
+.daily-log-document-streaming::after {
+  display: inline-block;
+  width: 7px;
+  height: 1.1em;
+  margin-left: 4px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pine) 72%, var(--amber));
+  content: "";
+  animation: daily-log-stream-caret 0.9s ease-in-out infinite;
+  vertical-align: text-bottom;
+}
+
+.daily-log-stream-empty {
+  min-height: 260px;
+}
+
+@keyframes daily-log-stream-caret {
+  0%,
+  100% {
+    opacity: 0.22;
+  }
+
+  50% {
+    opacity: 1;
+  }
 }
 
 .daily-log-document-cover {
@@ -11896,36 +12029,64 @@ body {
   box-shadow: 0 14px 34px rgba(8, 13, 24, 0.18);
 }
 
+.report-learning-card-section {
+  display: grid;
+  max-width: 920px;
+  gap: 14px;
+  margin-top: 18px;
+}
+
+.report-fullscreen-body .report-learning-card-section {
+  width: min(100%, 1500px);
+  max-width: 1500px;
+}
+
+.report-fullscreen-report-pane .report-learning-card-section {
+  width: min(100%, 1200px);
+  max-width: 1200px;
+}
+
 .report-document + .learning-card-candidate-panel,
 .report-learning-card-notice + .learning-card-candidate-panel,
 .report-learning-card-notice {
   margin-top: 18px;
 }
 
-.report-learning-card-pending {
-  display: inline-flex;
-  min-height: 38px;
+.report-learning-card-status-bar {
+  display: flex;
+  min-height: 42px;
+  flex-shrink: 0;
   align-items: center;
+  justify-content: center;
   gap: 8px;
-  margin-top: 18px;
+  border-top: 1px solid color-mix(in srgb, var(--pine) 24%, var(--line));
   border: 1px solid color-mix(in srgb, var(--pine) 26%, var(--line));
-  border-radius: 8px;
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 0;
   background:
-    linear-gradient(90deg, color-mix(in srgb, var(--pine) 11%, transparent), transparent 72%),
-    color-mix(in srgb, var(--surface) 90%, transparent);
+    linear-gradient(90deg, transparent, color-mix(in srgb, var(--pine) 10%, transparent), transparent),
+    color-mix(in srgb, var(--surface) 94%, transparent);
   color: var(--ink);
-  padding: 8px 11px;
+  padding: 8px 16px;
   font-size: 0.8rem;
   font-weight: 820;
 }
 
-.report-learning-card-pending svg {
+.report-learning-card-status-bar svg {
   color: var(--pine);
 }
 
-.report-learning-card-notice + .report-learning-card-pending,
-.report-learning-card-pending + .learning-card-candidate-panel {
-  margin-top: 10px;
+.report-learning-card-status-bar span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.report-learning-card-section .report-learning-card-notice,
+.report-learning-card-section .learning-card-candidate-panel,
+.report-learning-card-section .report-saved-learning-cards {
+  margin-top: 0;
 }
 
 .learning-card-candidate-head,

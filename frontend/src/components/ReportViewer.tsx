@@ -22,6 +22,7 @@ export type ReportContextChatConfig = {
 
 export type ReportLearningCardsConfig = {
   candidates: LearningCardCandidate[];
+  reportId?: string | null;
   savedCards?: LearningCardItem[];
   notice?: string;
   pendingMessage?: string;
@@ -60,15 +61,10 @@ export function ReportViewer({
   const lastContentRef = useRef(content);
   const lastAutoFollowKeyRef = useRef("");
   const hasContextChat = Boolean(contextChat && content.trim() && !loading && !error);
+  const learningCardStatusMessage = learningCards?.pendingMessage ?? "";
   const reportHeadings = useMemo(() => extractMarkdownHeadings(content), [content]);
   const reportHeadingKey = useMemo(() => reportHeadings.map((heading) => heading.id).join("|"), [reportHeadings]);
-  const reportAutoFollowKey = [
-    content.length,
-    learningCards?.pendingMessage ?? "",
-    learningCards?.notice ?? "",
-    learningCards?.candidates.length ?? 0,
-    learningCards?.savedCards?.length ?? 0
-  ].join("|");
+  const reportAutoFollowKey = `${content.length}|${loading ? "loading" : "idle"}`;
 
   useEffect(() => {
     if (!fullscreen) return;
@@ -339,7 +335,8 @@ export function ReportViewer({
                         activeHeadingId={activeHeadingId}
                         onSelect={(id) => jumpToReportSection(id, fullscreenReportPaneRef.current)}
                       />
-                      <ReportContent content={content} error={error} emptyText="暂无报告内容" learningCards={learningCards} />
+                      <ReportContent content={content} error={error} emptyText="暂无报告内容" />
+                      <ReportLearningCardSection content={content} loading={loading} learningCards={learningCards} />
                     </div>
                     <button
                       className="report-fullscreen-resizer"
@@ -362,10 +359,12 @@ export function ReportViewer({
                       activeHeadingId={activeHeadingId}
                       onSelect={(id) => jumpToReportSection(id, fullscreenBodyRef.current)}
                     />
-                    <ReportContent content={content} error={error} emptyText="暂无报告内容" learningCards={learningCards} />
+                    <ReportContent content={content} error={error} emptyText="暂无报告内容" />
+                    <ReportLearningCardSection content={content} loading={loading} learningCards={learningCards} />
                   </>
                 )}
               </div>
+              <ReportLearningCardStatusBar message={learningCardStatusMessage} />
             </div>
           </div>,
           document.body
@@ -400,24 +399,35 @@ export function ReportViewer({
           activeHeadingId={activeHeadingId}
           onSelect={(id) => jumpToReportSection(id, readerScrollRef.current)}
         />
-        <ReportContent content={content} error={error} emptyText="报告将在这里显示" learningCards={learningCards} />
+        <ReportContent content={content} error={error} emptyText="报告将在这里显示" />
+        <ReportLearningCardSection content={content} loading={loading} learningCards={learningCards} />
         {hasContextChat && !fullscreen ? <div className="report-inline-chat">{renderContextChat()}</div> : null}
       </div>
+      <ReportLearningCardStatusBar message={fullscreen ? "" : learningCardStatusMessage} />
       {fullscreenOverlay}
     </section>
+  );
+}
+
+function ReportLearningCardStatusBar({ message }: { message: string }) {
+  if (!message) return null;
+
+  return (
+    <div className="report-learning-card-status-bar" role="status" aria-live="polite">
+      <Loader2 className="animate-spin" size={14} />
+      <span>{message}</span>
+    </div>
   );
 }
 
 function ReportContent({
   content,
   error,
-  emptyText,
-  learningCards
+  emptyText
 }: {
   content: string;
   error?: string;
   emptyText: string;
-  learningCards?: ReportLearningCardsConfig;
 }) {
   if (error) {
     return <div className="rounded-md border border-[#5c3024] bg-[#241713] p-3 text-sm text-coral">{error}</div>;
@@ -428,19 +438,34 @@ function ReportContent({
   }
 
   return (
-    <>
-      <MarkdownDocument content={content} className="report-document" />
-      {learningCards?.notice ? <div className="learning-notice report-learning-card-notice">{learningCards.notice}</div> : null}
-      {learningCards?.pendingMessage ? (
-        <div className="report-learning-card-pending">
-          <Loader2 className="animate-spin" size={14} />
-          <span>{learningCards.pendingMessage}</span>
-        </div>
-      ) : null}
-      {learningCards?.savedCards ? (
+    <MarkdownDocument content={content} className="report-document" />
+  );
+}
+
+function ReportLearningCardSection({
+  content,
+  loading,
+  learningCards
+}: {
+  content: string;
+  loading?: boolean;
+  learningCards?: ReportLearningCardsConfig;
+}) {
+  if (!content || !learningCards) return null;
+
+  const hasReportRecord = Boolean(learningCards.reportId);
+  const hasSavedCards = hasReportRecord && !loading && Boolean(learningCards.savedCards);
+  const hasNotice = Boolean(learningCards.notice);
+  const hasCandidates = Boolean(learningCards.candidates?.length);
+  if (!hasSavedCards && !hasNotice && !hasCandidates) return null;
+
+  return (
+    <section className="report-learning-card-section">
+      {learningCards.notice ? <div className="learning-notice report-learning-card-notice">{learningCards.notice}</div> : null}
+      {hasSavedCards && learningCards.savedCards ? (
         <ReportSavedLearningCards cards={learningCards.savedCards} onOpenCard={learningCards.onOpenCard} />
       ) : null}
-      {learningCards?.candidates?.length ? (
+      {hasCandidates ? (
         <LearningCardCandidatePanel
           candidates={learningCards.candidates}
           title="本报告可沉淀的知识卡片"
@@ -450,7 +475,7 @@ function ReportContent({
           onSaved={learningCards.onSaved}
         />
       ) : null}
-    </>
+    </section>
   );
 }
 

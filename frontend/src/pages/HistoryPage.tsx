@@ -245,6 +245,7 @@ export function HistoryPage({
                 content={selected.content}
                 learningCards={{
                   candidates: [],
+                  reportId: selected.id,
                   savedCards: savedLearningCards,
                   onOpenCard: onOpenLearningCard,
                 }}

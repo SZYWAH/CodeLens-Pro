@@ -4,6 +4,7 @@ import json
 import re
 from collections import Counter
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -324,6 +325,46 @@ def read_learning_card_material(card_id: str, session: Session = Depends(get_ses
     return _learning_card_material_placeholder(card)
 
 
+def _learning_card_material_context(card: LearningCard) -> tuple[list[str], list[dict[str, str]]]:
+    tags = [str(item) for item in _safe_json_list(card.tags_json) if str(item).strip()]
+    source_links = _normalize_resource_links(_safe_json_list(card.resource_links_json))
+    if not source_links:
+        source_links = _recommended_learning_resources(card, title=card.title, language_label=card.language_label, tags=tags)
+    return tags, source_links
+
+
+def _upsert_learning_card_material(
+    session: Session,
+    card: LearningCard,
+    content: str,
+    source_links: list[dict[str, str]],
+    model: str | None,
+) -> LearningCardMaterialItem:
+    tags = [str(item) for item in _safe_json_list(card.tags_json) if str(item).strip()]
+    final_content = content.strip() or _fallback_learning_card_material(card, tags)
+    material = _learning_card_material_for_card(session, card.id)
+    now = datetime.utcnow()
+    if material:
+        material.content_markdown = final_content
+        material.source_links_json = json.dumps(source_links, ensure_ascii=False)
+        material.model = model
+        material.generated_at = now
+        material.updated_at = now
+    else:
+        material = LearningCardMaterial(
+            card_id=card.id,
+            content_markdown=final_content,
+            source_links_json=json.dumps(source_links, ensure_ascii=False),
+            model=model,
+            generated_at=now,
+            updated_at=now,
+        )
+    session.add(material)
+    session.commit()
+    session.refresh(material)
+    return _learning_card_material_item(card, material, cached=True)
+
+
 @router.post("/learning/cards/{card_id}/material/generate", response_model=LearningCardMaterialItem)
 def generate_learning_card_material(
     card_id: str,
@@ -333,10 +374,7 @@ def generate_learning_card_material(
     card = session.get(LearningCard, card_id)
     if not card:
         raise HTTPException(status_code=404, detail="Learning card not found")
-    tags = [str(item) for item in _safe_json_list(card.tags_json) if str(item).strip()]
-    source_links = _normalize_resource_links(_safe_json_list(card.resource_links_json))
-    if not source_links:
-        source_links = _recommended_learning_resources(card, title=card.title, language_label=card.language_label, tags=tags)
+    tags, source_links = _learning_card_material_context(card)
     service = LLMService(payload.model)
     content = service.generate_learning_card_material(
         title=card.title,
@@ -347,29 +385,63 @@ def generate_learning_card_material(
         code_excerpt=card.code_excerpt,
         source_links=source_links,
     ).strip()
-    if not content:
-        content = _fallback_learning_card_material(card, tags)
-    material = _learning_card_material_for_card(session, card_id)
-    now = datetime.utcnow()
-    if material:
-        material.content_markdown = content
-        material.source_links_json = json.dumps(source_links, ensure_ascii=False)
-        material.model = service.model
-        material.generated_at = now
-        material.updated_at = now
-    else:
-        material = LearningCardMaterial(
-            card_id=card.id,
-            content_markdown=content,
-            source_links_json=json.dumps(source_links, ensure_ascii=False),
-            model=service.model,
-            generated_at=now,
-            updated_at=now,
-        )
-    session.add(material)
-    session.commit()
-    session.refresh(material)
-    return _learning_card_material_item(card, material, cached=True)
+    return _upsert_learning_card_material(session, card, content, source_links, service.model)
+
+
+@router.post("/learning/cards/{card_id}/material/generate/stream")
+def stream_learning_card_material(
+    card_id: str,
+    payload: LearningCardMaterialGenerateRequest,
+) -> StreamingResponse:
+    def event_generator():
+        chunks: list[str] = []
+        try:
+            mysql_ok, mysql_message = check_database()
+            if not mysql_ok:
+                yield sse_event("error", _mysql_error_payload(mysql_message))
+                return
+
+            with Session(engine) as session:
+                card = session.get(LearningCard, card_id)
+                if not card:
+                    yield sse_event("error", error_payload("LEARNING_CARD_NOT_FOUND", "Learning card not found."))
+                    return
+                tags, source_links = _learning_card_material_context(card)
+                card_snapshot = {
+                    "id": card.id,
+                    "title": card.title,
+                    "language_label": card.language_label,
+                    "difficulty": card.difficulty,
+                    "explanation": card.explanation,
+                    "code_excerpt": card.code_excerpt,
+                }
+
+            service = LLMService(payload.model)
+            yield sse_event("status", {"phase": "learning_card_material", "message": "学习资料正在生成中..."})
+            for text in service.stream_learning_card_material(
+                title=card_snapshot["title"],
+                language_label=card_snapshot["language_label"],
+                difficulty=card_snapshot["difficulty"],
+                explanation=card_snapshot["explanation"],
+                tags=tags,
+                code_excerpt=card_snapshot["code_excerpt"],
+                source_links=source_links,
+            ):
+                chunks.append(text)
+                yield sse_event("delta", {"text": text})
+
+            content = "".join(chunks).strip()
+            with Session(engine) as session:
+                card = session.get(LearningCard, card_id)
+                if not card:
+                    yield sse_event("error", error_payload("LEARNING_CARD_NOT_FOUND", "Learning card not found."))
+                    return
+                item = _upsert_learning_card_material(session, card, content, source_links, service.model)
+                yield sse_event("done", {"item": item.model_dump(mode="json")})
+        except Exception as exc:
+            yield sse_event("error", _llm_error_payload(exc))
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=_stream_headers())
 
 
 @router.post("/learning/cards/generate", response_model=LearningCardGenerateResponse)
@@ -497,6 +569,43 @@ def read_daily_work_log(log_date: str, session: Session = Depends(get_session)) 
     return _daily_work_log_item(session, day, log)
 
 
+def _upsert_daily_work_log(
+    session: Session,
+    day: date,
+    content: str,
+    context: dict[str, Any],
+    model: str | None,
+) -> DailyWorkLogItem:
+    final_content = _clean_daily_work_log_markdown(content) or _fallback_daily_work_log(day, context["stats"])
+    title = _daily_log_title(day, final_content)
+    existing = _daily_log_for_date(session, day)
+    now = datetime.utcnow()
+    if existing:
+        existing.title = title
+        existing.content_markdown = final_content
+        existing.source_stats_json = json.dumps(context["stats"], ensure_ascii=False)
+        existing.source_refs_json = json.dumps(context["refs"], ensure_ascii=False)
+        existing.model = model
+        existing.generated_at = now
+        existing.updated_at = now
+        log = existing
+    else:
+        log = DailyWorkLog(
+            log_date=_day_start(day),
+            title=title,
+            content_markdown=final_content,
+            source_stats_json=json.dumps(context["stats"], ensure_ascii=False),
+            source_refs_json=json.dumps(context["refs"], ensure_ascii=False),
+            model=model,
+            generated_at=now,
+            updated_at=now,
+        )
+    session.add(log)
+    session.commit()
+    session.refresh(log)
+    return _daily_work_log_item(session, day, log)
+
+
 @router.post("/daily-logs/{log_date}/generate", response_model=DailyWorkLogItem)
 def generate_daily_work_log(
     log_date: str,
@@ -513,35 +622,47 @@ def generate_daily_work_log(
         context_markdown=context["context_markdown"],
         stats=context["stats"],
     ).strip()
-    if not content:
-        content = _fallback_daily_work_log(day, context["stats"])
-    title = _daily_log_title(day, content)
-    existing = _daily_log_for_date(session, day)
-    now = datetime.utcnow()
-    if existing:
-        existing.title = title
-        existing.content_markdown = content
-        existing.source_stats_json = json.dumps(context["stats"], ensure_ascii=False)
-        existing.source_refs_json = json.dumps(context["refs"], ensure_ascii=False)
-        existing.model = service.model
-        existing.generated_at = now
-        existing.updated_at = now
-        log = existing
-    else:
-        log = DailyWorkLog(
-            log_date=_day_start(day),
-            title=title,
-            content_markdown=content,
-            source_stats_json=json.dumps(context["stats"], ensure_ascii=False),
-            source_refs_json=json.dumps(context["refs"], ensure_ascii=False),
-            model=service.model,
-            generated_at=now,
-            updated_at=now,
-        )
-    session.add(log)
-    session.commit()
-    session.refresh(log)
-    return _daily_work_log_item(session, day, log)
+    return _upsert_daily_work_log(session, day, content, context, service.model)
+
+
+@router.post("/daily-logs/{log_date}/generate/stream")
+def stream_daily_work_log(
+    log_date: str,
+    payload: DailyWorkLogGenerateRequest,
+) -> StreamingResponse:
+    def event_generator():
+        chunks: list[str] = []
+        try:
+            mysql_ok, mysql_message = check_database()
+            if not mysql_ok:
+                yield sse_event("error", _mysql_error_payload(mysql_message))
+                return
+
+            day = _parse_log_date(log_date)
+            with Session(engine) as session:
+                context = _daily_work_context(session, day)
+            if not context["stats"]["total_activity"]:
+                yield sse_event("error", error_payload("NO_DAILY_ACTIVITY", "这一天还没有可总结的使用记录。"))
+                return
+
+            service = LLMService(payload.model)
+            yield sse_event("status", {"phase": "daily_log", "message": "日志正在生成中..."})
+            for text in service.stream_daily_work_log(
+                log_date=day.isoformat(),
+                context_markdown=context["context_markdown"],
+                stats=context["stats"],
+            ):
+                chunks.append(text)
+                yield sse_event("delta", {"text": text})
+
+            content = "".join(chunks).strip()
+            with Session(engine) as session:
+                item = _upsert_daily_work_log(session, day, content, context, service.model)
+                yield sse_event("done", {"item": item.model_dump(mode="json")})
+        except Exception as exc:
+            yield sse_event("error", _llm_error_payload(exc))
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=_stream_headers())
 
 
 @router.patch("/daily-logs/{log_date}", response_model=DailyWorkLogItem)
@@ -682,7 +803,7 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
             title = _ensure_unique_title(
                 session,
                 ChatSession,
-                build_chat_fallback_title(instruction, "", "Agent task"),
+                build_chat_fallback_title(instruction, "", "Agent 任务"),
             )
             chat_session = ChatSession(title=title, context_type="agent")
             session.add(chat_session)
@@ -1513,7 +1634,7 @@ def _fallback_learning_card_material(card: LearningCard, tags: list[str]) -> str
     tag_text = "、".join(tags[:4]) if tags else card.language_label
     code = f"\n\n```text\n{card.code_excerpt[:900]}\n```" if card.code_excerpt else ""
     return (
-        f"## 概念解释\n{card.title} 是当前卡片需要重点理解的编程知识点。"
+        f"## 概念解释\n{card.title} 是当前卡片需要重点理解的编程知识点。\n\n"
         f"{card.explanation}\n\n"
         f"## 适用场景\n- 在 {card.language_label} 学习或项目阅读中遇到 {tag_text} 相关代码时，可以用它建立理解框架。\n"
         "- 复习时建议回到具体代码，看它的输入、输出、边界情况和常见错误。\n\n"
@@ -1954,15 +2075,18 @@ def _daily_activity_stats(session: Session, day: date) -> dict[str, int]:
 def _daily_calendar_item(session: Session, day: date, log: DailyWorkLog | None) -> DailyWorkLogCalendarItem:
     stats = _daily_activity_stats(session, day)
     summary = None
+    title = None
     if log:
-        summary = _compact_daily_summary(log.content_markdown)
+        content = _clean_daily_work_log_markdown(log.content_markdown)
+        summary = _compact_daily_summary(content)
+        title = _daily_log_title(day, content) if _is_bad_daily_log_title(log.title) else log.title
     return DailyWorkLogCalendarItem(
         date=day.isoformat(),
         weekday=WEEKDAY_LABELS[day.weekday()],
         has_activity=bool(stats["total_activity"]),
         has_log=bool(log),
         activity_score=min(6, stats["reports"] * 2 + stats["agent_tasks"] * 2 + stats["learning_cards"] + max(0, stats["messages"] // 3)),
-        title=log.title if log else None,
+        title=title,
         summary=summary,
         generated_at=log.generated_at if log else None,
         stats=stats,
@@ -1981,11 +2105,12 @@ def _daily_work_log_item(session: Session, day: date, log: DailyWorkLog | None) 
             has_activity=bool(stats["total_activity"]),
             has_log=False,
         )
+    content = _clean_daily_work_log_markdown(log.content_markdown)
     return DailyWorkLogItem(
         id=log.id,
         date=day.isoformat(),
-        title=log.title,
-        content_markdown=log.content_markdown,
+        title=_daily_log_title(day, content) if _is_bad_daily_log_title(log.title) else log.title,
+        content_markdown=content,
         source_stats=_safe_json_dict(log.source_stats_json) or stats,
         source_refs=[item for item in _safe_json_list(log.source_refs_json) if isinstance(item, dict)],
         model=log.model,
@@ -2007,7 +2132,7 @@ def _safe_json_dict(value: str | None) -> dict:
 
 
 def _compact_daily_summary(content: str) -> str:
-    for line in content.splitlines():
+    for line in _clean_daily_work_log_markdown(content).splitlines():
         text = re.sub(r"^[#*\-\s>]+", "", line).strip()
         if text and not text.startswith(("今日概览", "完成事项", "AI 对话", "Agent", "知识卡片", "明日建议")):
             return text[:72]
@@ -2103,11 +2228,32 @@ def _daily_work_context(session: Session, day: date) -> dict[str, Any]:
 
 
 def _daily_log_title(day: date, content: str) -> str:
-    for line in content.splitlines():
+    for line in _clean_daily_work_log_markdown(content).splitlines():
         title = line.strip().lstrip("#").strip()
-        if title and not title.startswith(("今日概览", "完成事项")):
+        if title and not title.startswith(("今日概览", "完成事项", "```")):
             return title[:80]
     return f"{day.isoformat()} 工作日志"
+
+
+def _is_bad_daily_log_title(title: str | None) -> bool:
+    value = str(title or "").strip().lower()
+    return not value or value in {"```", "```markdown", "```md", "markdown"} or value.startswith("```")
+
+
+def _clean_daily_work_log_markdown(content: str | None) -> str:
+    text = str(content or "").strip()
+    for _ in range(2):
+        match = re.fullmatch(r"```(?:markdown|md)?\s*\n([\s\S]*?)\n```", text, re.IGNORECASE)
+        if not match:
+            break
+        text = match.group(1).strip()
+    lines = text.splitlines()
+    if lines and re.fullmatch(r"```(?:markdown|md)?", lines[0].strip(), re.IGNORECASE):
+        lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text
 
 
 def _fallback_daily_work_log(day: date, stats: dict[str, int]) -> str:
@@ -2718,7 +2864,7 @@ def stream_chat(payload: ChatStreamRequest) -> StreamingResponse:
         try:
             mysql_ok, mysql_message = check_database()
             if not mysql_ok:
-                yield sse_event("error", {"message": f"MySQL 未连接：{mysql_message}"})
+                yield sse_event("error", _mysql_error_payload(mysql_message))
                 return
 
             with Session(engine) as session:
@@ -2765,7 +2911,7 @@ def stream_chat(payload: ChatStreamRequest) -> StreamingResponse:
 
                 if not chat_session:
                     if report:
-                        title = _ensure_unique_title(session, ChatSession, f"{report.title}·关联对话")
+                        title = _ensure_unique_title(session, ChatSession, f"{report.title} · 关联对话")
                     else:
                         title = _ensure_unique_title(session, ChatSession, build_chat_fallback_title(payload.message, "", "新的对话"))
                     chat_session = ChatSession(
@@ -2813,7 +2959,7 @@ def stream_chat(payload: ChatStreamRequest) -> StreamingResponse:
                             chat_session.title = _ensure_unique_title(
                                 session,
                                 ChatSession,
-                                f"{linked_report.title}·关联对话",
+                                f"{linked_report.title} · 关联对话",
                                 chat_session.id,
                             )
                     elif should_auto_name_chat:

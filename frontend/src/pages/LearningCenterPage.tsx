@@ -11,11 +11,12 @@ import {
   Save,
   Sparkles,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { MarkdownDocument } from "../components/MarkdownDocument";
 import type { PageKey } from "../components/Sidebar";
 import { api } from "../lib/api";
 import { formatTime } from "../lib/format";
+import { streamPost } from "../lib/stream";
 import type { DailyWorkLogCalendarItem, DailyWorkLogItem } from "../types";
 
 export function LearningCenterPage({ onNavigate: _onNavigate }: { onNavigate: (page: PageKey) => void }) {
@@ -33,6 +34,7 @@ export function LearningCenterPage({ onNavigate: _onNavigate }: { onNavigate: (p
   const [dateRailCollapsed, setDateRailCollapsed] = useState(false);
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
+  const editorRef = useRef<HTMLTextAreaElement | null>(null);
 
   const selectedSlot = useMemo(
     () => days.find((item) => item.date === selectedDate) ?? null,
@@ -79,18 +81,50 @@ export function LearningCenterPage({ onNavigate: _onNavigate }: { onNavigate: (p
 
   async function generateLog() {
     if (isFutureDate) return;
+    const previousLog = log;
+    const previousTitle = draftTitle;
+    const previousContent = draftContent;
+    const previousEditing = editing;
+    let completed = false;
+    let streamError = "";
     setGenerating(true);
     setError("");
     setNotice("");
+    setEditing(false);
+    setDraftTitle(`${selectedDate} 工作日志`);
+    setDraftContent("");
     try {
-      const nextLog = await api.generateDailyLog(selectedDate);
-      setLog(nextLog);
-      setDraftTitle(nextLog.title);
-      setDraftContent(nextLog.content_markdown);
-      setEditing(false);
-      setNotice("日志已生成。");
-      await loadCalendar();
+      await streamPost(`/api/daily-logs/${selectedDate}/generate/stream`, { model: null }, {
+        onDelta: (text) => {
+          setDraftContent((current) => current + text);
+        },
+        onDone: (data) => {
+          const nextLog = data.item as DailyWorkLogItem | undefined;
+          if (!nextLog) return;
+          completed = true;
+          setLog(nextLog);
+          setDraftTitle(nextLog.title);
+          setDraftContent(nextLog.content_markdown);
+          setEditing(false);
+          setNotice("日志已生成。");
+          void loadCalendar();
+        },
+        onError: (message) => {
+          streamError = message;
+        },
+      });
+      if (!completed) {
+        setLog(previousLog);
+        setDraftTitle(previousTitle);
+        setDraftContent(previousContent);
+        setEditing(previousEditing);
+        setError(streamError || "生成日志失败");
+      }
     } catch (exc) {
+      setLog(previousLog);
+      setDraftTitle(previousTitle);
+      setDraftContent(previousContent);
+      setEditing(previousEditing);
       setError(exc instanceof Error ? exc.message : "生成日志失败");
     } finally {
       setGenerating(false);
@@ -260,7 +294,7 @@ export function LearningCenterPage({ onNavigate: _onNavigate }: { onNavigate: (p
           <div className="daily-log-card-head">
             <div>
               <span>{selectedDate} · {selectedSlot?.weekday ?? ""}</span>
-              <h3>{editing ? "编辑日记" : log?.title || `${selectedDate} 工作日志`}</h3>
+              <h3>{editing ? "编辑日记" : generating ? draftTitle : log?.title || `${selectedDate} 工作日志`}</h3>
             </div>
             <section className="daily-log-head-stats" aria-label="Daily activity stats">
               <span><strong>{activeStats.reports ?? 0}</strong>报告</span>
@@ -307,6 +341,19 @@ export function LearningCenterPage({ onNavigate: _onNavigate }: { onNavigate: (p
 
           {loadingLog ? (
             <div className="daily-log-empty"><Loader2 className="animate-spin" size={18} /> 正在加载日志...</div>
+          ) : generating ? (
+            <section className="daily-log-generating-sheet" aria-live="polite">
+              {draftContent.trim() ? (
+                <article className="daily-log-document daily-log-document-streaming">
+                  {renderDailyMarkdown(cleanDailyMarkdown(draftContent), selectedDate)}
+                </article>
+              ) : (
+                <div className="daily-log-empty daily-log-stream-empty">
+                  <Loader2 className="animate-spin" size={18} />
+                  正在整理当天记录...
+                </div>
+              )}
+            </section>
           ) : editing ? (
             <section className="daily-log-editor-sheet">
               <div className="daily-log-editor-title-row">
@@ -314,6 +361,7 @@ export function LearningCenterPage({ onNavigate: _onNavigate }: { onNavigate: (p
                 <input value={draftTitle} onChange={(event) => setDraftTitle(event.target.value)} placeholder={`${selectedDate} 日记`} />
               </div>
               <textarea
+                ref={editorRef}
                 className="daily-log-editor"
                 value={draftContent}
                 onChange={(event) => setDraftContent(event.target.value)}
@@ -380,7 +428,9 @@ function renderDailyMarkdown(content: string, selectedDate: string) {
     sectionIndex += 1;
   }
 
-  content.split(/\r?\n/).forEach((raw, index) => {
+  const normalizedContent = cleanDailyMarkdown(content);
+
+  normalizedContent.split(/\r?\n/).forEach((raw, index) => {
     const line = raw.trim();
     if (!line) return;
     if (line.startsWith("# ")) {
@@ -402,6 +452,22 @@ function renderDailyMarkdown(content: string, selectedDate: string) {
   });
   flushSection();
   return nodes;
+}
+
+function cleanDailyMarkdown(content: string) {
+  let text = content.trim();
+  for (let index = 0; index < 2; index += 1) {
+    const fenced = /^```(?:markdown|md)?\s*\n([\s\S]*?)\n```\s*$/i.exec(text);
+    if (!fenced) break;
+    text = fenced[1].trim();
+  }
+  const lines = text.split(/\r?\n/);
+  if (/^```(?:markdown|md)?\s*$/i.test(lines[0]?.trim() ?? "")) {
+    lines.shift();
+    if (lines[lines.length - 1]?.trim() === "```") lines.pop();
+    text = lines.join("\n").trim();
+  }
+  return text;
 }
 
 function formatDateKey(value = new Date()) {

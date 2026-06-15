@@ -13,13 +13,14 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { CalendarPopover, dateKeyFromIso } from "../components/CalendarPopover";
 import { LearningCardCandidatePanel } from "../components/LearningCardCandidatePanel";
 import { CodeSnippetBlock, MarkdownDocument } from "../components/MarkdownDocument";
 import { api } from "../lib/api";
 import { formatTime } from "../lib/format";
+import { streamPost } from "../lib/stream";
 import type {
   LearningCardCandidate,
   LearningCardItem,
@@ -181,14 +182,69 @@ export function KnowledgeCardsPage({
 
   async function generateMaterial() {
     if (!selectedCard) return;
+    const cardId = selectedCard.id;
+    const previousMaterial = selectedMaterial;
+    const previousCachedMaterial = materialCache[cardId];
+    let completed = false;
+    let streamError = "";
     setMaterialGenerating(true);
     setError("");
+    setNotice("");
+    const placeholderMaterial: LearningCardMaterialItem = {
+      card_id: cardId,
+      content_markdown: "",
+      source_links: [],
+      cached: false,
+    };
+    setSelectedMaterial(placeholderMaterial);
     try {
-      const material = await api.generateLearningCardMaterial(selectedCard.id);
-      setSelectedMaterial(material);
-      setMaterialCache((current) => ({ ...current, [selectedCard.id]: material }));
-      setNotice("学习资料已生成。");
+      await streamPost(`/api/learning/cards/${cardId}/material/generate/stream`, { model: null }, {
+        onStatus: (data) => {
+          if (typeof data.message === "string" && data.message.trim()) {
+            setNotice(data.message);
+          }
+        },
+        onDelta: (text) => {
+          setSelectedMaterial((current) => {
+            const base = current ?? placeholderMaterial;
+            return {
+              ...base,
+              content_markdown: `${base.content_markdown}${text}`,
+            };
+          });
+        },
+        onDone: (data) => {
+          const material = data.item as LearningCardMaterialItem | undefined;
+          if (!material) return;
+          completed = true;
+          setSelectedMaterial(material);
+          setMaterialCache((current) => ({ ...current, [cardId]: material }));
+          setNotice("学习资料已生成。");
+        },
+        onError: (message) => {
+          streamError = message;
+        },
+      });
+      if (!completed) {
+        setSelectedMaterial(previousMaterial);
+        setMaterialCache((current) => {
+          if (previousCachedMaterial) return { ...current, [cardId]: previousCachedMaterial };
+          const next = { ...current };
+          delete next[cardId];
+          return next;
+        });
+        setNotice("");
+        setError(streamError || "生成学习资料失败");
+      }
     } catch (exc) {
+      setSelectedMaterial(previousMaterial);
+      setMaterialCache((current) => {
+        if (previousCachedMaterial) return { ...current, [cardId]: previousCachedMaterial };
+        const next = { ...current };
+        delete next[cardId];
+        return next;
+      });
+      setNotice("");
       setError(exc instanceof Error ? exc.message : "生成学习资料失败");
     } finally {
       setMaterialGenerating(false);
@@ -522,6 +578,8 @@ function KnowledgeCardDetail({
 }) {
   const [splitPercent, setSplitPercent] = useState(58);
   const [resizingSplit, setResizingSplit] = useState(false);
+  const materialDocumentRef = useRef<HTMLDivElement | null>(null);
+  const autoFollowMaterialRef = useRef(true);
   const materialContent = normalizeLearningMaterialMarkdown(material?.content_markdown || card.detail_markdown || card.explanation);
   const hasSourceReport = card.source_type === "report" && Boolean(card.source_id);
 
@@ -563,6 +621,32 @@ function KnowledgeCardDetail({
     };
   }, [resizingSplit]);
 
+  useEffect(() => {
+    autoFollowMaterialRef.current = true;
+  }, [card.id, materialGenerating]);
+
+  useEffect(() => {
+    const container = materialDocumentRef.current;
+    if (!container) return;
+    const scrollContainer = container;
+    function handleScroll() {
+      const distanceFromBottom = scrollContainer.scrollHeight - scrollContainer.scrollTop - scrollContainer.clientHeight;
+      autoFollowMaterialRef.current = distanceFromBottom < 80;
+    }
+    scrollContainer.addEventListener("scroll", handleScroll, { passive: true });
+    handleScroll();
+    return () => scrollContainer.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  useEffect(() => {
+    if (!materialGenerating || !autoFollowMaterialRef.current) return;
+    const container = materialDocumentRef.current;
+    if (!container) return;
+    requestAnimationFrame(() => {
+      container.scrollTop = container.scrollHeight;
+    });
+  }, [material?.content_markdown, materialGenerating]);
+
   const detail = (
     <div className="knowledge-fullscreen-overlay" role="dialog" aria-modal="true" aria-label={`${card.title} 学习详情`}>
       <div className="knowledge-fullscreen-shell">
@@ -594,7 +678,7 @@ function KnowledgeCardDetail({
                 <h2>{card.title}</h2>
               </div>
             </div>
-            <div className="knowledge-material-document">
+            <div className="knowledge-material-document" ref={materialDocumentRef}>
               {materialLoading ? (
                 <p className="learning-empty"><Loader2 className="animate-spin" size={16} /> 正在加载学习资料...</p>
               ) : (

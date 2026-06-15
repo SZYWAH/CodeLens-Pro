@@ -211,13 +211,16 @@ class LLMService:
             base_url=settings.deepseek_base_url,
         )
 
-    def _stream_completion(self, messages: list[dict[str, str]]) -> Iterable[str]:
-        stream = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=0.2,
-            stream=True,
-        )
+    def _stream_completion(self, messages: list[dict[str, str]], max_tokens: int | None = None) -> Iterable[str]:
+        kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.2,
+            "stream": True,
+        }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        stream = self.client.chat.completions.create(**kwargs)
         for chunk in stream:
             text = self.extract_stream_text(chunk)
             if text:
@@ -630,8 +633,8 @@ class LLMService:
         ]
         return clean_generated_title(self._complete_text(messages, max_tokens=256), smart_fallback)
 
-    def generate_daily_work_log(self, log_date: str, context_markdown: str, stats: dict) -> str:
-        messages = [
+    def _daily_work_log_messages(self, log_date: str, context_markdown: str, stats: dict) -> list[dict[str, str]]:
+        return [
             {
                 "role": "system",
                 "content": (
@@ -639,6 +642,8 @@ class LLMService:
                     "请根据当天使用记录生成一张中文 Markdown 日志卡片。"
                     "风格像开发者日记：克制、具体、可回看，不要夸张，不要编造没有发生的事。"
                     "必须包含这些小节：今日概览、完成事项、AI 对话与报告、Agent 实践、知识卡片与学习、明日建议。"
+                    "第一行必须是一级标题：# 📋 CodeLens Pro 日志卡片 — 日期。"
+                    "只输出 Markdown 正文，不要用 ```markdown 或其他代码围栏包裹整篇日志。"
                     "如果某类记录为空，请简短说明当天没有对应活动。不要输出推理过程。"
                 ),
             },
@@ -647,13 +652,20 @@ class LLMService:
                 "content": (
                     f"日期：{log_date}\n"
                     f"统计：{json.dumps(stats, ensure_ascii=False)}\n\n"
+                    f"请以这一行开头：# 📋 CodeLens Pro 日志卡片 — {log_date}\n\n"
                     f"当天记录：\n{_clip_text(context_markdown, 26000)}"
                 ),
             },
         ]
+
+    def generate_daily_work_log(self, log_date: str, context_markdown: str, stats: dict) -> str:
+        messages = self._daily_work_log_messages(log_date, context_markdown, stats)
         return self._complete_text(messages, max_tokens=2200)
 
-    def generate_learning_card_material(
+    def stream_daily_work_log(self, log_date: str, context_markdown: str, stats: dict) -> Iterable[str]:
+        return self._stream_completion(self._daily_work_log_messages(log_date, context_markdown, stats), max_tokens=2200)
+
+    def _learning_card_material_messages(
         self,
         title: str,
         language_label: str,
@@ -662,8 +674,8 @@ class LLMService:
         tags: list[str],
         code_excerpt: str | None,
         source_links: list[dict],
-    ) -> str:
-        messages = [
+    ) -> list[dict[str, str]]:
+        return [
             {
                 "role": "system",
                 "content": (
@@ -687,7 +699,50 @@ class LLMService:
                 ),
             },
         ]
+
+    def generate_learning_card_material(
+        self,
+        title: str,
+        language_label: str,
+        difficulty: str,
+        explanation: str,
+        tags: list[str],
+        code_excerpt: str | None,
+        source_links: list[dict],
+    ) -> str:
+        messages = self._learning_card_material_messages(
+            title,
+            language_label,
+            difficulty,
+            explanation,
+            tags,
+            code_excerpt,
+            source_links,
+        )
         return self._complete_text(messages, max_tokens=1800)
+
+    def stream_learning_card_material(
+        self,
+        title: str,
+        language_label: str,
+        difficulty: str,
+        explanation: str,
+        tags: list[str],
+        code_excerpt: str | None,
+        source_links: list[dict],
+    ) -> Iterable[str]:
+        return self._stream_completion(
+            self._learning_card_material_messages(
+                title,
+                language_label,
+                difficulty,
+                explanation,
+                tags,
+                code_excerpt,
+                source_links,
+            ),
+            max_tokens=1800,
+        )
 
     def suggest_learning_card_tags(self, cards: list[dict]) -> list[dict]:
         compact_cards = [

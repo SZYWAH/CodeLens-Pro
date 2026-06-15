@@ -192,6 +192,7 @@ export function DiffPage({
       error={error}
       learningCards={{
         candidates: learningCardCandidates,
+        reportId,
         savedCards: savedLearningCards,
         notice: learningCardNotice,
         pendingMessage: learningCardPendingMessage,
