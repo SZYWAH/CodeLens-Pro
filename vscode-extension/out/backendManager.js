@@ -42,6 +42,7 @@ class BackendManager {
     extensionUri;
     process = null;
     output = vscode.window.createOutputChannel("CodeLens Pro Backend");
+    agentReadyCache = null;
     constructor(extensionUri) {
         this.extensionUri = extensionUri;
     }
@@ -79,6 +80,36 @@ class BackendManager {
     async isHealthy() {
         const status = await this.getBackendStatus();
         return status.healthy;
+    }
+    async getHealthStatus(timeoutMs = 1200) {
+        try {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), timeoutMs);
+            const response = await fetch(`${this.apiBase}/api/health`, { signal: controller.signal });
+            clearTimeout(timer);
+            return { healthy: response.ok };
+        }
+        catch {
+            return { healthy: false };
+        }
+    }
+    async getCachedBackendStatus(options = {}) {
+        const maxAgeMs = options.maxAgeMs ?? 60000;
+        const now = Date.now();
+        if (!options.force && this.agentReadyCache && now - this.agentReadyCache.checkedAt < maxAgeMs) {
+            const health = await this.getHealthStatus();
+            if (health.healthy) {
+                return {
+                    healthy: true,
+                    agentReady: this.agentReadyCache.agentReady,
+                };
+            }
+            this.agentReadyCache = { healthy: false, agentReady: false, checkedAt: now };
+            return { healthy: false, agentReady: false };
+        }
+        const status = await this.getBackendStatus();
+        this.agentReadyCache = { ...status, checkedAt: now };
+        return status;
     }
     async getBackendStatus() {
         try {

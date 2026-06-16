@@ -18,6 +18,8 @@ type ConversationTurn = {
 };
 
 const CHAT_AUTO_FOLLOW_THRESHOLD = 80;
+const WORKSPACE_HEARTBEAT_DELAYED_SECONDS = 20;
+const WORKSPACE_HEARTBEAT_STALE_SECONDS = 60;
 
 export type ChatPanelProps = {
   settings: SettingsResponse | null;
@@ -912,15 +914,17 @@ function contextModeLabel(mode: AgentContextMode) {
 }
 
 function contextModeHint(mode: AgentContextMode, selectedCount: number, workspace?: WorkspaceSnapshot | null) {
-  if (!workspace?.connected || workspace.stale) return "等待 VS Code 插件同步项目后，计划任务才能读取真实文件。";
-  if (workspace.status === "no_workspace") return "VS Code 已连接，但尚未打开工作区文件夹。";
+  const workspaceState = getWorkspaceConnectionState(workspace ?? null);
+  if (workspaceState === "waiting") return "等待 VS Code 插件同步项目后，计划任务才能读取真实文件。";
+  if (workspaceState === "delayed") return "插件心跳略有延迟，正在等待下一次同步。";
+  if (workspaceState === "blocked") return "VS Code 已连接，但尚未打开工作区文件夹。";
   if (mode === "ai_auto") return "无需勾选文件，插件会让 AI 从项目清单中选择最小上下文。";
   if (mode === "hybrid") return selectedCount ? `保留 ${selectedCount} 个种子文件，再由 AI 补充。` : "可先勾核心文件，也可直接让 AI 补充。";
   return selectedCount ? `已选择 ${selectedCount} 个文件。` : "从当前项目树勾选文件作为上下文。";
 }
 
 type AgentStageState = {
-  workspace: "ready" | "blocked" | "waiting";
+  workspace: "ready" | "delayed" | "blocked" | "waiting";
   context: "ready" | "waiting";
   plan: "idle" | "pending" | "waiting_confirm" | "confirmed" | "applied" | "failed" | "rejected";
   execution: "idle" | "waiting" | "done" | "failed" | "rejected";
@@ -1046,11 +1050,11 @@ function buildAgentStageState(
 ): AgentStageState {
   const latest = [...plans].reverse().find(Boolean);
   const status = latest?.status ?? "";
-  const workspaceReady = Boolean(workspace?.connected && !workspace.stale && workspace.status !== "no_workspace");
+  const workspaceState = getWorkspaceConnectionState(workspace);
   const contextReady = contextMode !== "manual" || selectedCount > 0;
 
   return {
-    workspace: workspaceReady ? "ready" : workspace?.connected ? "blocked" : "waiting",
+    workspace: workspaceState,
     context: contextReady ? "ready" : "waiting",
     plan: normalizePlanStage(status),
     execution: normalizeExecutionStage(status),
@@ -1078,6 +1082,7 @@ function normalizeExecutionStage(status: string): AgentStageState["execution"] {
 function agentStageDetail(step: string, status: string) {
   if (step === "workspace") {
     if (status === "ready") return "已连接";
+    if (status === "delayed") return "同步延迟";
     if (status === "blocked") return "需打开项目";
     return "等插件";
   }
@@ -1096,6 +1101,24 @@ function agentStageDetail(step: string, status: string) {
   if (status === "failed") return "失败";
   if (status === "rejected") return "已拒绝";
   return "未开始";
+}
+
+function getWorkspaceHeartbeatAgeSeconds(snapshot: WorkspaceSnapshot | null) {
+  if (!snapshot?.updated_at) return Number.POSITIVE_INFINITY;
+  const raw = snapshot.updated_at.trim();
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(raw) ? raw : `${raw.replace(/\s+/, "T")}Z`;
+  const time = new Date(normalized).getTime();
+  if (Number.isNaN(time)) return Number.POSITIVE_INFINITY;
+  return Math.max(0, (Date.now() - time) / 1000);
+}
+
+function getWorkspaceConnectionState(snapshot: WorkspaceSnapshot | null): AgentStageState["workspace"] {
+  if (!snapshot?.updated_at || !snapshot.connected) return "waiting";
+  const ageSeconds = getWorkspaceHeartbeatAgeSeconds(snapshot);
+  if (ageSeconds > WORKSPACE_HEARTBEAT_STALE_SECONDS) return "waiting";
+  if (snapshot.status === "no_workspace") return "blocked";
+  if (ageSeconds > WORKSPACE_HEARTBEAT_DELAYED_SECONDS) return "delayed";
+  return "ready";
 }
 
 function AgentPlanCard({

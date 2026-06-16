@@ -315,6 +315,7 @@ export default function App() {
             activity={activity}
             analyticsError={analyticsError}
             analyticsLoading={analyticsLoading}
+            onReloadSettings={loadBootstrap}
             onRefreshAnalytics={loadAnalytics}
             onOpenActivityGalaxy={() => setPage("activityGalaxy")}
           />

@@ -7,25 +7,23 @@ from typing import Any
 import requests
 
 from backend.app.config import PROJECT_ROOT, settings
+from backend.app.services.llm_settings_service import (
+    deepseek_balance_url,
+    effective_deepseek_key,
+)
 
 
 TOKENIZER_DIR = PROJECT_ROOT / "backend" / "app" / "resources" / "deepseek_v3_tokenizer"
 
 
-def deepseek_balance_url() -> str:
-    base_url = settings.deepseek_base_url
-    if base_url.endswith("/v1"):
-        base_url = base_url[:-3]
-    return f"{base_url}/user/balance"
-
-
 def fetch_deepseek_balance() -> dict[str, Any]:
-    if not settings.deepseek_api_key:
+    api_key = effective_deepseek_key()
+    if not api_key:
         return {
             "available": False,
             "key_configured": False,
             "status": "Key 未配置",
-            "detail": "请先在 .env 中配置 DEEPSEEK_API_KEY。",
+            "detail": "请先在设置页填写 DeepSeek 官方 API Key，或在 .env 中配置 DEEPSEEK_API_KEY。",
         }
 
     try:
@@ -33,7 +31,7 @@ def fetch_deepseek_balance() -> dict[str, Any]:
             deepseek_balance_url(),
             headers={
                 "Accept": "application/json",
-                "Authorization": f"Bearer {settings.deepseek_api_key}",
+                "Authorization": f"Bearer {api_key}",
             },
             timeout=8,
         )

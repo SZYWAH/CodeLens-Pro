@@ -49,6 +49,7 @@ class AgentFileContext(BaseModel):
 
 
 AgentContextMode = Literal["manual", "ai_auto", "hybrid"]
+AgentMessageIntent = Literal["auto", "chat", "plan"]
 
 
 class AgentPlanRequest(BaseModel):
@@ -105,6 +106,10 @@ class AgentChatStreamRequest(BaseModel):
     model: str | None = None
     source: str = "plugin"
     workspace_root: str | None = None
+
+
+class AgentMessageStreamRequest(AgentChatStreamRequest):
+    intent: AgentMessageIntent = "auto"
 
 
 class AgentChatContextRequestItem(BaseModel):
@@ -313,7 +318,7 @@ class LearningCardUpdateRequest(BaseModel):
 
 
 class LearningCardGenerateRequest(BaseModel):
-    source_limit: int = Field(default=8, ge=1, le=30)
+    source_limit: int = Field(default=10, ge=1, le=30)
     model: str | None = None
 
 
@@ -379,6 +384,7 @@ class ProjectGuideResponse(BaseModel):
     entry_candidates: list[dict[str, Any]]
     core_areas: list[dict[str, Any]]
     read_order: list[dict[str, Any]]
+    project_structure: dict[str, Any] | None = None
     knowledge_points: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 
@@ -391,6 +397,30 @@ class LearningReviewResponse(BaseModel):
     recurring_topics: list[dict[str, Any]]
     timeline: list[dict[str, Any]]
     recommendations: list[dict[str, Any]]
+
+
+class LLMKeySaveRequest(BaseModel):
+    api_key: str
+
+
+class LLMKeyTestRequest(BaseModel):
+    api_key: str | None = None
+
+
+class LLMKeyStatusResponse(BaseModel):
+    configured: bool
+    source: str
+    masked_key: str = ""
+    updated_at: str | None = None
+    base_url: str
+
+
+class LLMKeyTestResponse(BaseModel):
+    ok: bool
+    status: str
+    detail: str
+    key_status: dict[str, Any] | None = None
+    balance: dict[str, Any] | None = None
 
 
 class DailyWorkLogCalendarItem(BaseModel):

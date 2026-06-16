@@ -7,6 +7,7 @@ from typing import Iterable
 from openai import OpenAI
 
 from backend.app.config import settings
+from backend.app.services.llm_settings_service import effective_deepseek_base_url, effective_deepseek_key
 from backend.app.services.prompt_service import render_template, resolve_language, resolve_model
 
 
@@ -51,6 +52,153 @@ def _attention_rank(item: dict) -> int:
 
 def _ordered_agent_files(files: list[dict] | None) -> list[dict]:
     return sorted(files or [], key=_attention_rank, reverse=True)
+
+
+def _looks_like_edit_instruction(instruction: str) -> bool:
+    return bool(
+        re.search(
+            r"(add|create|update|modify|rewrite|optimi[sz]e|remove|delete|rename|insert|append|"
+            r"添加|新增|增加|修改|更新|优化|删除|移除|重命名|插入|补充|创建|新建)",
+            instruction or "",
+            re.IGNORECASE,
+        )
+    )
+
+
+def _looks_like_followup_apply_instruction(instruction: str) -> bool:
+    return bool(
+        re.search(
+            r"(落实|执行|应用|按上面|按刚才|按这个|就这样|继续改|帮我改|apply|execute|implement|do it)",
+            instruction or "",
+            re.IGNORECASE,
+        )
+    )
+
+
+def _quick_start_readme_operation(instruction: str, files: list[dict] | None, code_context: str) -> dict | None:
+    if not re.search(r"(quick\s*start|快速开始|快速上手|开始使用)", instruction or "", re.IGNORECASE):
+        return None
+
+    candidates = _ordered_agent_files(files)
+    target = next(
+        (
+            item
+            for item in candidates
+            if str(item.get("filePath") or item.get("file_path") or item.get("fileName") or "").lower().endswith((".md", ".markdown"))
+        ),
+        None,
+    )
+    path = str((target or {}).get("filePath") or (target or {}).get("file_path") or (target or {}).get("fileName") or "README.md")
+    name = str((target or {}).get("fileName") or (target or {}).get("file_name") or path)
+    content = str((target or {}).get("code") or code_context or "").strip()
+    if not content or not path.lower().endswith((".md", ".markdown")):
+        return None
+    if re.search(r"^#{1,3}\s*(快速开始|快速上手|Quick Start)", content, re.IGNORECASE | re.MULTILINE):
+        return None
+
+    section = (
+        "\n\n## 快速开始\n\n"
+        "1. 克隆或下载本项目到本地。\n"
+        "2. 根据 `.env.example` 配置数据库和模型 API Key。\n"
+        "3. 启动后端服务，并确认 MySQL 连接正常。\n"
+        "4. 启动前端页面，进入代码工作台或 Agent 工作区体验核心流程。\n"
+        "5. 如需使用插件协作能力，请在 VS Code 中安装并连接 CodeLens Pro 插件。\n"
+    )
+    insert_match = re.search(r"\n##\s+(功能|核心|项目|安装|环境|技术|架构|目录|使用)", content)
+    if insert_match:
+        new_content = content[: insert_match.start()] + section + content[insert_match.start():]
+    else:
+        new_content = content.rstrip() + section + "\n"
+
+    return {
+        "type": "update",
+        "path": path.replace("\\", "/"),
+        "new_path": None,
+        "content": new_content,
+        "reason": f"根据任务在 {name} 中补充快速开始板块，方便新用户按步骤启动和体验项目。",
+    }
+
+
+def _contains_any_term(text: str | None, terms: tuple[str, ...]) -> bool:
+    normalized = str(text or "").lower()
+    return any(term.lower() in normalized for term in terms)
+
+
+def _safe_quick_start_readme_operation(
+    instruction: str,
+    files: list[dict] | None,
+    code_context: str,
+    *,
+    history: list[dict[str, str]] | None = None,
+    force: bool = False,
+) -> dict | None:
+    quick_start_terms = ("\u5feb\u901f\u5f00\u59cb", "\u5feb\u901f\u4e0a\u624b", "\u5f00\u59cb\u4f7f\u7528", "quick start")
+    advice_terms = ("\u5efa\u8bae", "\u4f60\u7684\u5efa\u8bae", "\u4e0a\u9762", "\u521a\u624d", "suggestion")
+    history_text = "\n".join(str(item.get("content") or "") for item in (history or [])[-6:])
+    should_apply = (
+        force
+        or _contains_any_term(instruction, quick_start_terms)
+        or (_contains_any_term(instruction, advice_terms) and _contains_any_term(history_text, quick_start_terms))
+    )
+    if not should_apply:
+        return None
+
+    candidates = _ordered_agent_files(files)
+    target = next(
+        (
+            item
+            for item in candidates
+            if str(item.get("filePath") or item.get("file_path") or item.get("fileName") or "").lower().endswith((".md", ".markdown"))
+        ),
+        None,
+    )
+    path = str((target or {}).get("filePath") or (target or {}).get("file_path") or (target or {}).get("fileName") or "README.md")
+    name = str((target or {}).get("fileName") or (target or {}).get("file_name") or path)
+    content = str((target or {}).get("code") or code_context or "").strip()
+    if not content or not path.lower().endswith((".md", ".markdown")):
+        return None
+    if re.search(r"^#{1,3}\s*(\u5feb\u901f\u5f00\u59cb|\u5feb\u901f\u4e0a\u624b|Quick Start)", content, re.IGNORECASE | re.MULTILINE):
+        return None
+
+    section = (
+        "\n\n## \u5feb\u901f\u5f00\u59cb\n\n"
+        "1. \u514b\u9686\u6216\u4e0b\u8f7d\u672c\u9879\u76ee\u5230\u672c\u5730\u3002\n"
+        "2. \u6839\u636e `.env.example` \u914d\u7f6e\u6570\u636e\u5e93\u548c\u6a21\u578b API Key\u3002\n"
+        "3. \u542f\u52a8\u540e\u7aef\u670d\u52a1\uff0c\u5e76\u786e\u8ba4 MySQL \u8fde\u63a5\u6b63\u5e38\u3002\n"
+        "4. \u542f\u52a8\u524d\u7aef\u9875\u9762\uff0c\u8fdb\u5165\u4ee3\u7801\u5de5\u4f5c\u53f0\u6216 Agent \u5de5\u4f5c\u533a\u4f53\u9a8c\u6838\u5fc3\u6d41\u7a0b\u3002\n"
+        "5. \u5982\u9700\u4f7f\u7528\u63d2\u4ef6\u534f\u4f5c\u80fd\u529b\uff0c\u8bf7\u5728 VS Code \u4e2d\u5b89\u88c5\u5e76\u8fde\u63a5 CodeLens Pro \u63d2\u4ef6\u3002\n"
+    )
+    insert_match = re.search(r"\n##\s+(\u529f\u80fd|\u6838\u5fc3|\u9879\u76ee|\u5b89\u88c5|\u73af\u5883|\u6280\u672f|\u67b6\u6784|\u76ee\u5f55|\u4f7f\u7528)", content)
+    if insert_match:
+        new_content = content[: insert_match.start()] + section + content[insert_match.start():]
+    else:
+        new_content = content.rstrip() + section + "\n"
+
+    return {
+        "type": "update",
+        "path": path.replace("\\", "/"),
+        "new_path": None,
+        "content": new_content,
+        "reason": f"\u6839\u636e\u4efb\u52a1\u5728 {name} \u4e2d\u8865\u5145\u5feb\u901f\u5f00\u59cb\u677f\u5757\uff0c\u65b9\u4fbf\u65b0\u7528\u6237\u6309\u6b65\u9aa4\u542f\u52a8\u548c\u4f53\u9a8c\u9879\u76ee\u3002",
+    }
+
+
+def _normalize_agent_operation_path(path_value: str, selected_file_paths: list[str]) -> str:
+    normalized = str(path_value or "").strip().replace("\\", "/")
+    selected = [str(item or "").strip().replace("\\", "/") for item in selected_file_paths if str(item or "").strip()]
+    if selected:
+        filename = normalized.rsplit("/", 1)[-1].lower()
+        for selected_path in selected:
+            if selected_path.lower() == normalized.lower():
+                return selected_path
+        for selected_path in selected:
+            if selected_path.rsplit("/", 1)[-1].lower() == filename:
+                return selected_path
+
+    drive_match = re.search(r"^[A-Za-z]:/(.+)$", normalized)
+    if drive_match:
+        normalized = drive_match.group(1)
+    return normalized.lstrip("/")
 
 
 def _compact_text(text: str, limit: int = 28) -> str:
@@ -202,13 +350,14 @@ def build_chat_fallback_title(user_message: str, assistant_reply: str, fallback:
 
 class LLMService:
     def __init__(self, model: str | None = None):
-        if not settings.deepseek_api_key:
-            raise RuntimeError("DEEPSEEK_API_KEY 未配置，请在 .env 中填写后重启服务。")
+        api_key = effective_deepseek_key()
+        if not api_key:
+            raise RuntimeError("DeepSeek API Key 未配置，请在设置页填写官方 Key，或在 .env 中配置 DEEPSEEK_API_KEY。")
 
         self.model = resolve_model(model or settings.deepseek_default_model)
         self.client = OpenAI(
-            api_key=settings.deepseek_api_key,
-            base_url=settings.deepseek_base_url,
+            api_key=api_key,
+            base_url=effective_deepseek_base_url(),
         )
 
     def _stream_completion(self, messages: list[dict[str, str]], max_tokens: int | None = None) -> Iterable[str]:
@@ -493,7 +642,55 @@ class LLMService:
         files: list[dict] | None = None,
         history: list[dict[str, str]] | None = None,
         previous_plans: list[dict] | None = None,
+        selected_file_paths: list[str] | None = None,
     ) -> dict:
+        if _looks_like_followup_apply_instruction(instruction) and previous_plans:
+            for previous_plan in reversed(previous_plans):
+                operations = previous_plan.get("operations") if isinstance(previous_plan, dict) else None
+                if isinstance(operations, list) and operations:
+                    normalized_operations: list[dict] = []
+                    for item in operations:
+                        if not isinstance(item, dict):
+                            continue
+                        operation_type = str(item.get("type") or "").lower()
+                        path_value = str(item.get("path") or "").strip()
+                        if operation_type not in {"create", "update", "delete", "rename"} or not path_value:
+                            continue
+                        normalized_operations.append(
+                            {
+                                "type": operation_type,
+                                "path": _normalize_agent_operation_path(path_value, selected_file_paths or []),
+                                "new_path": _normalize_agent_operation_path(str(item.get("new_path") or ""), selected_file_paths or []) if item.get("new_path") else None,
+                                "content": item.get("content"),
+                                "reason": str(item.get("reason") or "").strip() or "沿用上一条 Agent 计划中的文件修改操作。",
+                            }
+                        )
+                    if normalized_operations:
+                        return {
+                            "summary": str(previous_plan.get("summary") or "沿用上一条可执行 Agent 计划。")[:500],
+                            "assumptions": ["用户当前指令是在确认落实上一条 Agent 计划，因此沿用上一条计划的文件操作。"],
+                            "warnings": [],
+                            "operations": normalized_operations[:24],
+                        }
+
+        safe_fallback_operation = _safe_quick_start_readme_operation(
+            instruction,
+            files,
+            code_context,
+            history=history,
+        )
+        if safe_fallback_operation:
+            safe_fallback_operation["path"] = _normalize_agent_operation_path(
+                str(safe_fallback_operation.get("path") or ""),
+                selected_file_paths or [],
+            )
+            return {
+                "summary": "\u4e3a README \u8865\u5145\u5feb\u901f\u5f00\u59cb\u677f\u5757\u3002",
+                "assumptions": ["\u7528\u6237\u8981\u6c42\u843d\u5b9e\u4e0a\u4e00\u6761\u5efa\u8bae\uff0c\u4e14\u8ba8\u8bba\u4e2d\u5df2\u660e\u786e\u63d0\u5230\u7f3a\u5c11\u5feb\u901f\u5f00\u59cb\u677f\u5757\u3002"],
+                "warnings": [],
+                "operations": [safe_fallback_operation],
+            }
+
         file_sections: list[str] = []
         for index, item in enumerate(_ordered_agent_files(files), start=1):
             item_name = str(item.get("fileName") or item.get("file_name") or f"file-{index}")
@@ -537,6 +734,10 @@ class LLMService:
                     "You are the planning engine for CodeLens Pro Agent. "
                     "Return one strict JSON object and nothing else. "
                     "Do not apply changes. Produce a reviewable file operation plan. "
+                    "Never return Markdown, prose, or an empty response. "
+                    "The user may write instructions in Chinese or English; understand both. "
+                    "If the instruction asks to add, update, rewrite, optimize, remove, rename, or create content, "
+                    "you must produce concrete file operations whenever enough file context is provided. "
                     "All paths must be workspace-relative paths, never absolute paths. "
                     "Allowed operation types are create, update, delete, rename. "
                     "For create and update operations, content must contain the complete final file content. "
@@ -554,8 +755,20 @@ class LLMService:
             },
         ]
 
-        raw = self._complete_text(messages, max_tokens=3200)
-        value = _parse_json_object(raw)
+        raw = self._complete_text(messages, max_tokens=8000)
+        try:
+            value = _parse_json_object(raw)
+        except ValueError:
+            fallback_operation = _quick_start_readme_operation(instruction, files, code_context)
+            if fallback_operation:
+                fallback_operation["path"] = _normalize_agent_operation_path(str(fallback_operation.get("path") or ""), selected_file_paths or [])
+                return {
+                    "summary": "为 README 补充快速开始板块。",
+                    "assumptions": [],
+                    "warnings": ["模型返回的计划 JSON 不完整，已使用本地规则生成一个可确认的 README 修改计划。"],
+                    "operations": [fallback_operation],
+                }
+            raise
         operations = value.get("operations")
         if not isinstance(operations, list):
             operations = []
@@ -571,12 +784,22 @@ class LLMService:
             normalized_operations.append(
                 {
                     "type": operation_type,
-                    "path": path_value.replace("\\", "/"),
-                    "new_path": str(item.get("new_path") or "").replace("\\", "/") or None,
+                    "path": _normalize_agent_operation_path(path_value, selected_file_paths or []),
+                    "new_path": _normalize_agent_operation_path(str(item.get("new_path") or ""), selected_file_paths or []) if item.get("new_path") else None,
                     "content": item.get("content"),
                     "reason": str(item.get("reason") or "").strip() or None,
                 }
             )
+
+        if not normalized_operations and _looks_like_edit_instruction(instruction):
+            fallback_operation = _quick_start_readme_operation(instruction, files, code_context)
+            if fallback_operation:
+                fallback_operation["path"] = _normalize_agent_operation_path(str(fallback_operation.get("path") or ""), selected_file_paths or [])
+                normalized_operations.append(fallback_operation)
+                value["summary"] = "为 README 补充快速开始板块。"
+                warnings = value.get("warnings")
+                if not isinstance(warnings, list):
+                    value["warnings"] = []
 
         return {
             "summary": str(value.get("summary") or instruction).strip()[:500],

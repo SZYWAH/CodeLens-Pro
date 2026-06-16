@@ -21,7 +21,7 @@ export function AppShell({
         onChange={onNavigate}
         onToggle={() => setSidebarCollapsed((value) => !value)}
       />
-      <main className="h-screen min-w-0 flex-1 overflow-hidden">{children}</main>
+      <main className="min-w-0 flex-1">{children}</main>
     </div>
   );
 }

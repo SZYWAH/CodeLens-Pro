@@ -22,6 +22,8 @@ import type {
   LearningCardTagSuggestionResponse,
   LearningCenterResponse,
   LearningReviewResponse,
+  LLMKeyStatusResponse,
+  LLMKeyTestResponse,
   ProjectGuideResponse,
   ReportOutlineItem,
   ReportDetail,
@@ -52,6 +54,21 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 export const api = {
   health: () => request<HealthResponse>("/api/health"),
   settings: () => request<SettingsResponse>("/api/settings"),
+  llmKeyStatus: () => request<LLMKeyStatusResponse>("/api/llm/key"),
+  saveLlmKey: (api_key: string) =>
+    request<LLMKeyTestResponse>("/api/llm/key", {
+      method: "POST",
+      body: JSON.stringify({ api_key })
+    }),
+  clearLlmKey: () =>
+    request<LLMKeyStatusResponse>("/api/llm/key", {
+      method: "DELETE"
+    }),
+  testLlmKey: (api_key?: string | null) =>
+    request<LLMKeyTestResponse>("/api/llm/key/test", {
+      method: "POST",
+      body: JSON.stringify({ api_key: api_key || null })
+    }),
   analytics: () => request<AnalyticsResponse>("/api/analytics"),
   bootstrap: () => request<BootstrapResponse>("/api/ui/bootstrap"),
   recentActivity: (limit = 16) => request<ActivityItem[]>(`/api/activity/recent?limit=${limit}`),

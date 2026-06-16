@@ -1,4 +1,5 @@
-import { BarChart3, FileText, MessageSquare, RefreshCw, ShieldAlert, WalletCards } from "lucide-react";
+import { BarChart3, CheckCircle2, FileText, KeyRound, MessageSquare, RefreshCw, ShieldAlert, Trash2, WalletCards } from "lucide-react";
+import { useEffect, useState } from "react";
 import {
   Area,
   AreaChart,
@@ -9,7 +10,8 @@ import {
   YAxis,
 } from "recharts";
 import { ActivityFeed } from "../components/ActivityFeed";
-import type { ActivityItem, AnalyticsDatum, AnalyticsResponse } from "../types";
+import { api } from "../lib/api";
+import type { ActivityItem, AnalyticsDatum, AnalyticsResponse, LLMKeyStatusResponse } from "../types";
 import { Button, Metric, Surface } from "../ui";
 
 const palette = ["#5d8cff", "#35d0ff", "#f7c96b", "#74d69a", "#b9a6ff", "#ff8a8a"];
@@ -19,6 +21,7 @@ type SettingsPageProps = {
   activity: ActivityItem[];
   analyticsError: string;
   analyticsLoading: boolean;
+  onReloadSettings: () => void | Promise<void>;
   onRefreshAnalytics: () => void | Promise<void>;
   onOpenActivityGalaxy: () => void;
 };
@@ -28,6 +31,7 @@ export function SettingsPage({
   activity,
   analyticsError,
   analyticsLoading,
+  onReloadSettings,
   onRefreshAnalytics,
   onOpenActivityGalaxy,
 }: SettingsPageProps) {
@@ -103,6 +107,12 @@ export function SettingsPage({
         </main>
 
         <aside className="analytics-side">
+          <DeepSeekKeyPanel
+            onChanged={async () => {
+              await onReloadSettings();
+              await onRefreshAnalytics();
+            }}
+          />
           <ActivityFeed items={activity} onOpenGalaxy={onOpenActivityGalaxy} />
           <Surface className="analytics-risk-panel">
             <ShieldAlert size={18} />
@@ -112,6 +122,131 @@ export function SettingsPage({
         </aside>
       </div>
     </div>
+  );
+}
+
+function DeepSeekKeyPanel({ onChanged }: { onChanged: () => void | Promise<void> }) {
+  const [status, setStatus] = useState<LLMKeyStatusResponse | null>(null);
+  const [apiKey, setApiKey] = useState("");
+  const [busy, setBusy] = useState<"" | "load" | "save" | "test" | "clear">("load");
+  const [message, setMessage] = useState("");
+  const [ok, setOk] = useState<boolean | null>(null);
+
+  async function loadStatus() {
+    setBusy("load");
+    try {
+      setStatus(await api.llmKeyStatus());
+    } catch (exc) {
+      setMessage(exc instanceof Error ? exc.message : "DeepSeek Key 状态加载失败");
+      setOk(false);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  useEffect(() => {
+    void loadStatus();
+  }, []);
+
+  async function save() {
+    const value = apiKey.trim();
+    if (!value) {
+      setMessage("请先填写 DeepSeek 官方 API Key。");
+      setOk(false);
+      return;
+    }
+    setBusy("save");
+    setMessage("");
+    try {
+      const result = await api.saveLlmKey(value);
+      setMessage(result.detail || result.status);
+      setOk(result.ok);
+      if (result.ok) {
+        setApiKey("");
+        await loadStatus();
+        await onChanged();
+      }
+    } catch (exc) {
+      setMessage(exc instanceof Error ? exc.message : "保存失败");
+      setOk(false);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function test() {
+    setBusy("test");
+    setMessage("");
+    try {
+      const result = await api.testLlmKey(apiKey.trim() || null);
+      setMessage(result.detail || result.status);
+      setOk(result.ok);
+    } catch (exc) {
+      setMessage(exc instanceof Error ? exc.message : "测试失败");
+      setOk(false);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function clear() {
+    setBusy("clear");
+    setMessage("");
+    try {
+      const nextStatus = await api.clearLlmKey();
+      setStatus(nextStatus);
+      setApiKey("");
+      setMessage(nextStatus.configured ? "已清除页面保存的 Key，当前回退到 .env 配置。" : "已清除页面保存的 Key，当前未配置。");
+      setOk(true);
+      await onChanged();
+    } catch (exc) {
+      setMessage(exc instanceof Error ? exc.message : "清除失败");
+      setOk(false);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  const configured = Boolean(status?.configured);
+  const sourceLabel = status?.source === "user" ? "页面保存" : status?.source === "env" ? ".env 回退" : "未配置";
+
+  return (
+    <Surface className="llm-key-panel">
+      <div className="llm-key-panel-head">
+        <div>
+          <span><KeyRound size={14} /> DeepSeek Key</span>
+          <strong>{configured ? "已配置" : "未配置"}</strong>
+        </div>
+        <em>{sourceLabel}</em>
+      </div>
+      <p>仅支持 DeepSeek 官方 API Key，Base URL 固定为官方地址，避免模型、余额与 Token 统计逻辑错位。</p>
+      <div className="llm-key-status">
+        <span>{status?.masked_key || "未保存 Key"}</span>
+        <small>{status?.base_url || "https://api.deepseek.com/v1"}</small>
+      </div>
+      <input
+        className="control-field llm-key-input"
+        onChange={(event) => setApiKey(event.target.value)}
+        placeholder="粘贴 DeepSeek 官方 API Key"
+        type="password"
+        value={apiKey}
+      />
+      <div className="llm-key-actions">
+        <Button disabled={Boolean(busy)} onClick={save} tone="primary" type="button">
+          {busy === "save" ? <RefreshCw className="animate-spin" size={14} /> : <CheckCircle2 size={14} />}
+          保存并测试
+        </Button>
+        <Button disabled={Boolean(busy)} onClick={test} type="button">
+          {busy === "test" ? <RefreshCw className="animate-spin" size={14} /> : <RefreshCw size={14} />}
+          测试
+        </Button>
+        <Button disabled={Boolean(busy) || status?.source !== "user"} onClick={clear} type="button">
+          <Trash2 size={14} />
+          清除
+        </Button>
+      </div>
+      {message ? <div className={["llm-key-message", ok ? "llm-key-message-ok" : "llm-key-message-bad"].filter(Boolean).join(" ")}>{message}</div> : null}
+    </Surface>
   );
 }
 

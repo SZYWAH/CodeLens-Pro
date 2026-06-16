@@ -1,127 +1,291 @@
-import { BarChart3, FileText, LineChart, MessageSquare, PieChart, RefreshCw, WalletCards } from "lucide-react";
-import type { ReactNode } from "react";
-import { StatusPill } from "../components/StatusPill";
-import type { AnalyticsDatum, AnalyticsResponse } from "../types";
+import { BarChart3, CheckCircle2, FileText, KeyRound, MessageSquare, RefreshCw, ShieldAlert, Trash2, WalletCards } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
+import { ActivityFeed } from "../components/ActivityFeed";
+import { api } from "../lib/api";
+import type { ActivityItem, AnalyticsDatum, AnalyticsResponse, LLMKeyStatusResponse } from "../types";
+import { Button, Metric, Surface } from "../ui";
 
-const palette = ["#60a5fa", "#38bdf8", "#ffc66d", "#a5c261", "#b9a6ff", "#ff8a63", "#cc7832", "#8f8f8f"];
+const palette = ["#5d8cff", "#35d0ff", "#f7c96b", "#74d69a", "#b9a6ff", "#ff8a8a"];
 
 type SettingsPageProps = {
   analytics: AnalyticsResponse | null;
+  activity: ActivityItem[];
   analyticsError: string;
   analyticsLoading: boolean;
+  onReloadSettings: () => void | Promise<void>;
   onRefreshAnalytics: () => void | Promise<void>;
+  onOpenActivityGalaxy: () => void;
 };
 
-export function SettingsPage({ analytics, analyticsError, analyticsLoading, onRefreshAnalytics }: SettingsPageProps) {
+export function SettingsPage({
+  analytics,
+  activity,
+  analyticsError,
+  analyticsLoading,
+  onReloadSettings,
+  onRefreshAnalytics,
+  onOpenActivityGalaxy,
+}: SettingsPageProps) {
   const totals = analytics?.totals ?? {};
-  const tokenItems = analytics?.token_usage.items ?? [];
   const daily = analytics?.daily_activity ?? [];
+  const toolUsage = analytics?.tool_usage ?? [];
+  const chatTypes = analytics?.chat_type_counts ?? [];
   const totalTokens = analytics?.token_usage.total_tokens ?? 0;
-  const tokenMethod = analytics?.token_usage.tokenizer_available ? "DeepSeek tokenizer 精确统计" : "字符估算回退";
   const balanceValue = analytics?.api_balance.available
     ? `${analytics.api_balance.currency ? `${analytics.api_balance.currency} ` : ""}${formatBalance(analytics.api_balance.total_balance ?? 0)}`
     : analytics?.api_balance.status ?? "等待余额数据";
+  const tokenMethod = analytics?.token_usage.tokenizer_available ? "DeepSeek tokenizer" : "字符估算";
+  const tokenDetail = analytics?.token_usage.refreshed_at
+    ? `${tokenMethod} · ${formatTimeOnly(analytics.token_usage.refreshed_at)} 刷新`
+    : tokenMethod;
 
   return (
-    <div className="page-scroll">
-      <section>
-        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
-          <div>
-            <div className="text-xs font-black uppercase tracking-[0.2em] text-pine">Usage Analytics</div>
-            <h2 className="mt-1 text-xl font-black text-[#f8fbff]">本地使用数据分析</h2>
-          </div>
-          <div className="flex items-center gap-2">
-            <button className="btn btn-secondary h-9" onClick={onRefreshAnalytics} type="button">
-              <RefreshCw className={analyticsLoading ? "animate-spin" : ""} size={15} />
-              刷新数据
-            </button>
-            <StatusPill ok={!analyticsError} label={analyticsError ? "统计异常" : "实时读取 MySQL"} subtle />
-          </div>
+    <div className="page-scroll analytics-cockpit analytics-cockpit-redesign">
+      <section className="analytics-header">
+        <div>
+          <span>Usage Overview</span>
+          <h2>复盘看板</h2>
+          <p>作为演示收尾层，汇总报告、知识沉淀、Agent 任务与 Token 使用情况。</p>
         </div>
-        {analyticsError ? <div className="mb-3 rounded-md border border-[#5c3024] bg-[#241713] p-3 text-sm text-coral">{analyticsError}</div> : null}
-
-        <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-          <MetricStat icon={<WalletCards size={18} />} label="API余额分析" value={balanceValue} detail={analytics?.api_balance.status ?? "等待余额数据"} />
-          <MetricStat icon={<BarChart3 size={18} />} label="Token 统计" value={totalTokens} detail={tokenMethod} />
-          <MetricStat icon={<FileText size={18} />} label="历史报告" value={totals.reports ?? 0} detail="工作台 + 代码对比" />
-          <MetricStat icon={<MessageSquare size={18} />} label="AI 对话" value={totals.chat_sessions ?? 0} detail={`${totals.chat_messages ?? 0} 条消息`} />
-        </div>
-
-        <div className="mt-4">
-          <ChartCard icon={<WalletCards size={18} />} title="Token 使用分析" subtitle={tokenMethod}>
-            <BarChart items={tokenItems} compact />
-          </ChartCard>
-        </div>
-
-        <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
-          <ChartCard icon={<BarChart3 size={18} />} title="功能使用分布" subtitle="工作台、代码对比、AI 对话">
-            <BarChart items={analytics?.tool_usage ?? []} />
-          </ChartCard>
-          <ChartCard icon={<LineChart size={18} />} title="近 14 天活跃趋势" subtitle="报告生成与 AI 提问">
-            <LineTrend items={daily} />
-          </ChartCard>
-          <ChartCard icon={<PieChart size={18} />} title="对话类型占比" subtitle="报告对话与普通对话">
-            <DonutChart items={analytics?.chat_type_counts ?? []} centerLabel={`${totals.chat_sessions ?? 0}`} />
-          </ChartCard>
-          <ChartCard icon={<BarChart3 size={18} />} title="报告模式排行" subtitle="按生成次数统计">
-            <BarChart items={analytics?.report_mode_counts ?? []} compact />
-          </ChartCard>
-        </div>
+        <Button onClick={onRefreshAnalytics} type="button" tone="primary">
+          <RefreshCw className={analyticsLoading ? "animate-spin" : ""} size={16} />
+          刷新
+        </Button>
       </section>
+
+      {analyticsError ? <div className="mb-3 rounded-md border border-[#5c3024] bg-[#241713] p-3 text-sm text-coral">{analyticsError}</div> : null}
+
+      <div className="analytics-layout">
+        <main className="analytics-main">
+          <div className="analytics-metric-grid">
+            <Metric icon={<WalletCards size={18} />} label="API 余额" value={balanceValue} detail={analytics?.api_balance.status ?? "等待余额数据"} tone="blue" />
+            <Metric icon={<BarChart3 size={18} />} label="Token" value={formatNumber(totalTokens)} detail={tokenDetail} tone="cyan" />
+            <Metric icon={<FileText size={18} />} label="历史报告" value={totals.reports ?? 0} detail="工作台 + 代码对比" tone="violet" />
+            <Metric icon={<MessageSquare size={18} />} label="AI 会话" value={totals.chat_sessions ?? 0} detail={`${totals.chat_messages ?? 0} 条消息`} tone="amber" />
+          </div>
+
+          <Surface className="analytics-trend-panel">
+            <ChartHeader title="近 14 天学习与协作趋势" subtitle="报告生成、AI 提问和 Agent 任务的总体活跃度" />
+            <div className="analytics-trend-chart">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={daily}>
+                  <defs>
+                    <linearGradient id="activityGradient" x1="0" x2="0" y1="0" y2="1">
+                      <stop offset="0%" stopColor="#5d8cff" stopOpacity={0.42} />
+                      <stop offset="100%" stopColor="#5d8cff" stopOpacity={0.02} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid stroke="var(--chart-grid)" vertical={false} />
+                  <XAxis dataKey="date" tickFormatter={(value) => String(value).slice(5)} stroke="var(--chart-axis)" fontSize={12} />
+                  <YAxis stroke="var(--chart-axis)" fontSize={12} width={32} />
+                  <Tooltip contentStyle={tooltipStyle} />
+                  <Area type="monotone" dataKey="total" stroke="#5d8cff" strokeWidth={3} fill="url(#activityGradient)" />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          </Surface>
+
+          <div className="analytics-distribution-grid">
+            <Surface className="analytics-distribution-panel">
+              <ChartHeader title="主线入口使用排行" subtitle="分析、沉淀、协作入口的使用频次" />
+              <DistributionList items={toolUsage} emptyText="暂无功能使用数据" />
+            </Surface>
+            <Surface className="analytics-distribution-panel">
+              <ChartHeader title="对话类型分布" subtitle="普通问答、报告追问与 Agent 协作" />
+              <DistributionList items={chatTypes} emptyText="暂无对话类型数据" />
+            </Surface>
+          </div>
+        </main>
+
+        <aside className="analytics-side">
+          <DeepSeekKeyPanel
+            onChanged={async () => {
+              await onReloadSettings();
+              await onRefreshAnalytics();
+            }}
+          />
+          <ActivityFeed items={activity} onOpenGalaxy={onOpenActivityGalaxy} />
+          <Surface className="analytics-risk-panel">
+            <ShieldAlert size={18} />
+            <strong>{totals.security_risks ?? 0} 个风险提示</strong>
+            <span>{totals.code_lines ?? 0} 行代码已进入本地分析记录</span>
+          </Surface>
+        </aside>
+      </div>
     </div>
   );
 }
 
-function MetricStat({ icon, label, value, detail }: { icon: ReactNode; label: string; value: number | string; detail: string }) {
-  const displayValue = typeof value === "number" ? formatNumber(value) : value;
+function DeepSeekKeyPanel({ onChanged }: { onChanged: () => void | Promise<void> }) {
+  const [status, setStatus] = useState<LLMKeyStatusResponse | null>(null);
+  const [apiKey, setApiKey] = useState("");
+  const [busy, setBusy] = useState<"" | "load" | "save" | "test" | "clear">("load");
+  const [message, setMessage] = useState("");
+  const [ok, setOk] = useState<boolean | null>(null);
+
+  async function loadStatus() {
+    setBusy("load");
+    try {
+      setStatus(await api.llmKeyStatus());
+    } catch (exc) {
+      setMessage(exc instanceof Error ? exc.message : "DeepSeek Key 状态加载失败");
+      setOk(false);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  useEffect(() => {
+    void loadStatus();
+  }, []);
+
+  async function save() {
+    const value = apiKey.trim();
+    if (!value) {
+      setMessage("请先填写 DeepSeek 官方 API Key。");
+      setOk(false);
+      return;
+    }
+    setBusy("save");
+    setMessage("");
+    try {
+      const result = await api.saveLlmKey(value);
+      setMessage(result.detail || result.status);
+      setOk(result.ok);
+      if (result.ok) {
+        setApiKey("");
+        await loadStatus();
+        await onChanged();
+      }
+    } catch (exc) {
+      setMessage(exc instanceof Error ? exc.message : "保存失败");
+      setOk(false);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function test() {
+    setBusy("test");
+    setMessage("");
+    try {
+      const result = await api.testLlmKey(apiKey.trim() || null);
+      setMessage(result.detail || result.status);
+      setOk(result.ok);
+    } catch (exc) {
+      setMessage(exc instanceof Error ? exc.message : "测试失败");
+      setOk(false);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function clear() {
+    setBusy("clear");
+    setMessage("");
+    try {
+      const nextStatus = await api.clearLlmKey();
+      setStatus(nextStatus);
+      setApiKey("");
+      setMessage(nextStatus.configured ? "已清除页面保存的 Key，当前回退到 .env 配置。" : "已清除页面保存的 Key，当前未配置。");
+      setOk(true);
+      await onChanged();
+    } catch (exc) {
+      setMessage(exc instanceof Error ? exc.message : "清除失败");
+      setOk(false);
+    } finally {
+      setBusy("");
+    }
+  }
+
+  const configured = Boolean(status?.configured);
+  const sourceLabel = status?.source === "user" ? "页面保存" : status?.source === "env" ? ".env 回退" : "未配置";
 
   return (
-    <section className="analytics-stat-card">
-      <div className="text-pine">{icon}</div>
-      <div className="mt-2 text-xs font-bold text-[#b8c9e6]">{label}</div>
-      <div className="mt-1 break-words text-2xl font-black text-[#f8fbff]">{displayValue}</div>
-      <div className="mt-1 text-xs text-[#c5d7f2]">{detail}</div>
-    </section>
-  );
-}
-
-function ChartCard({ icon, title, subtitle, children }: { icon: ReactNode; title: string; subtitle: string; children: ReactNode }) {
-  return (
-    <section className="tool-panel p-4">
-      <div className="mb-4 flex items-start justify-between gap-3">
+    <Surface className="llm-key-panel">
+      <div className="llm-key-panel-head">
         <div>
-          <div className="flex items-center gap-2 text-[#f8fbff]">
-            <span className="text-pine">{icon}</span>
-            <h3 className="text-sm font-black">{title}</h3>
-          </div>
-          <p className="mt-1 text-xs text-[#b8c9e6]">{subtitle}</p>
+          <span><KeyRound size={14} /> DeepSeek Key</span>
+          <strong>{configured ? "已配置" : "未配置"}</strong>
         </div>
+        <em>{sourceLabel}</em>
       </div>
-      {children}
-    </section>
+      <p>仅支持 DeepSeek 官方 API Key，Base URL 固定为官方地址，避免模型、余额与 Token 统计逻辑错位。</p>
+      <div className="llm-key-status">
+        <span>{status?.masked_key || "未保存 Key"}</span>
+        <small>{status?.base_url || "https://api.deepseek.com/v1"}</small>
+      </div>
+      <input
+        className="control-field llm-key-input"
+        onChange={(event) => setApiKey(event.target.value)}
+        placeholder="粘贴 DeepSeek 官方 API Key"
+        type="password"
+        value={apiKey}
+      />
+      <div className="llm-key-actions">
+        <Button disabled={Boolean(busy)} onClick={save} tone="primary" type="button">
+          {busy === "save" ? <RefreshCw className="animate-spin" size={14} /> : <CheckCircle2 size={14} />}
+          保存并测试
+        </Button>
+        <Button disabled={Boolean(busy)} onClick={test} type="button">
+          {busy === "test" ? <RefreshCw className="animate-spin" size={14} /> : <RefreshCw size={14} />}
+          测试
+        </Button>
+        <Button disabled={Boolean(busy) || status?.source !== "user"} onClick={clear} type="button">
+          <Trash2 size={14} />
+          清除
+        </Button>
+      </div>
+      {message ? <div className={["llm-key-message", ok ? "llm-key-message-ok" : "llm-key-message-bad"].filter(Boolean).join(" ")}>{message}</div> : null}
+    </Surface>
   );
 }
 
-function BarChart({ items, compact = false }: { items: AnalyticsDatum[]; compact?: boolean }) {
-  const max = Math.max(1, ...items.map((item) => item.value ?? 0));
+function ChartHeader({ title, subtitle }: { title: string; subtitle: string }) {
+  return (
+    <div className="analytics-chart-head">
+      <h3>{title}</h3>
+      <p>{subtitle}</p>
+    </div>
+  );
+}
+
+function DistributionList({ items, emptyText }: { items: AnalyticsDatum[]; emptyText: string }) {
+  const total = items.reduce((sum, item) => sum + (item.value ?? 0), 0);
+  const max = Math.max(...items.map((item) => item.value ?? 0), 1);
 
   if (!items.length) {
-    return <div className="empty-state min-h-[180px]">暂无统计数据</div>;
+    return <div className="analytics-data-empty">{emptyText}</div>;
   }
 
   return (
-    <div className={compact ? "space-y-2" : "space-y-3"}>
+    <div className="analytics-data-list">
       {items.map((item, index) => {
         const value = item.value ?? 0;
-        const percent = Math.max(4, (value / max) * 100);
+        const color = palette[index % palette.length];
         return (
-          <div key={`${item.label}-${index}`} className="analytics-bar-row">
-            <div className="flex items-center justify-between gap-3 text-xs">
-              <span className="truncate font-bold text-[#eaf2ff]">{item.label}</span>
-              <span className="font-mono text-[#b8c9e6]">{formatNumber(value)}</span>
+          <div className="analytics-data-row" key={item.label ?? index}>
+            <div className="analytics-data-row-head">
+              <span className="analytics-data-name">
+                <i style={{ background: color }} />
+                {item.label ?? "未命名"}
+              </span>
+              <span className="analytics-data-value">
+                <strong>{formatNumber(value)}</strong>
+                <small>{formatPercent(value, total)}</small>
+              </span>
             </div>
-            <div className="analytics-bar-track">
-              <div className="analytics-bar-fill" style={{ width: `${percent}%`, background: palette[index % palette.length] }} />
+            <div className="analytics-data-track">
+              <span style={{ width: `${Math.max(4, (value / max) * 100)}%`, background: color }} />
             </div>
           </div>
         );
@@ -130,73 +294,29 @@ function BarChart({ items, compact = false }: { items: AnalyticsDatum[]; compact
   );
 }
 
-function DonutChart({ items, centerLabel }: { items: AnalyticsDatum[]; centerLabel: string }) {
-  const total = items.reduce((sum, item) => sum + (item.value ?? 0), 0);
-  let cursor = 0;
-  const gradient = total
-    ? items.map((item, index) => {
-        const start = cursor;
-        cursor += ((item.value ?? 0) / total) * 100;
-        return `${palette[index % palette.length]} ${start}% ${cursor}%`;
-      }).join(", ")
-    : "#1e2a44 0% 100%";
-
-  return (
-    <div className="analytics-donut-wrap">
-      <div className="analytics-donut" style={{ background: `conic-gradient(${gradient})` }}>
-        <div>
-          <div className="text-xl font-black text-[#f8fbff]">{centerLabel}</div>
-          <div className="text-[0.66rem] font-bold text-[#b8c9e6]">会话</div>
-        </div>
-      </div>
-      <div className="min-w-0 flex-1 space-y-2">
-        {items.map((item, index) => (
-          <div key={`${item.label}-${index}`} className="flex items-center justify-between gap-3 text-sm">
-            <div className="flex min-w-0 items-center gap-2">
-              <span className="h-2.5 w-2.5 shrink-0 rounded-full" style={{ background: palette[index % palette.length] }} />
-              <span className="truncate font-bold text-[#eaf2ff]">{item.label}</span>
-            </div>
-            <span className="font-mono text-xs text-[#b8c9e6]">{formatNumber(item.value ?? 0)}</span>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function LineTrend({ items }: { items: AnalyticsDatum[] }) {
-  const width = 560;
-  const height = 190;
-  const padding = 24;
-  const max = Math.max(1, ...items.map((item) => item.total ?? 0));
-  const points = items.map((item, index) => {
-    const x = padding + (index / Math.max(1, items.length - 1)) * (width - padding * 2);
-    const y = height - padding - ((item.total ?? 0) / max) * (height - padding * 2);
-    return `${x},${y}`;
-  }).join(" ");
-
-  return (
-    <div className="analytics-line-wrap">
-      <svg className="analytics-line-chart" viewBox={`0 0 ${width} ${height}`} role="img" aria-label="近 14 天活跃趋势">
-        <path d={`M ${padding} ${height - padding} H ${width - padding}`} className="analytics-axis" />
-        <path d={`M ${padding} ${padding} V ${height - padding}`} className="analytics-axis" />
-        <polyline points={points} className="analytics-line" />
-        {items.map((item, index) => {
-          const [x, y] = points.split(" ")[index].split(",").map(Number);
-          return <circle key={`${item.date}-${index}`} cx={x} cy={y} r="3.5" className="analytics-dot" />;
-        })}
-      </svg>
-      <div className="grid grid-cols-3 gap-2 text-xs text-[#b8c9e6]">
-        <span>{items[0]?.date?.slice(5) ?? "-"}</span>
-        <span className="text-center">峰值 {formatNumber(max)}</span>
-        <span className="text-right">{items[items.length - 1]?.date?.slice(5) ?? "-"}</span>
-      </div>
-    </div>
-  );
-}
+const tooltipStyle = {
+  background: "var(--chart-tooltip-bg)",
+  border: "1px solid var(--chart-tooltip-border)",
+  borderRadius: "10px",
+  color: "var(--chart-tooltip-text)",
+};
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+function formatTimeOnly(value: string) {
+  return new Intl.DateTimeFormat("zh-CN", {
+    timeZone: "Asia/Shanghai",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  }).format(new Date(`${value.replace(/\s+/, "T")}Z`));
+}
+
+function formatPercent(value: number, total: number) {
+  if (!total) return "0%";
+  return `${Math.round((value / total) * 100)}%`;
 }
 
 function formatBalance(value: number) {

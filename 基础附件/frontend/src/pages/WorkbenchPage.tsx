@@ -1,5 +1,5 @@
-import { Play, RotateCcw } from "lucide-react";
-import { useState, type Dispatch, type SetStateAction } from "react";
+import { Play, RotateCcw, Sparkles } from "lucide-react";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import { EditorPanel } from "../components/EditorPanel";
 import { MetricsPanel } from "../components/MetricsPanel";
 import { ReportViewer } from "../components/ReportViewer";
@@ -7,7 +7,7 @@ import { SelectField } from "../components/SelectField";
 import { WorkspaceSplit } from "../components/WorkspaceSplit";
 import { api } from "../lib/api";
 import { streamPost } from "../lib/stream";
-import type { SettingsResponse, StaticMetrics } from "../types";
+import type { LearningCardCandidate, LearningCardItem, SettingsResponse, StaticMetrics } from "../types";
 
 const sampleCode = `def memoize(func):
     cache = {}
@@ -29,47 +29,77 @@ export function WorkbenchPage({
   setCode,
   report,
   setReport,
-  setCurrentReport,
   reportId,
   setReportId,
+  externalLanguageLabel,
   contextChatSessionId,
-  setContextChatSessionId
+  setContextChatSessionId,
+  onActivityChanged,
+  onOpenLearningCard
 }: {
   settings: SettingsResponse | null;
   code: string;
   setCode: (value: string) => void;
   report: string;
   setReport: Dispatch<SetStateAction<string>>;
-  setCurrentReport: Dispatch<SetStateAction<string>>;
   reportId: string | null;
   setReportId: Dispatch<SetStateAction<string | null>>;
+  externalLanguageLabel?: string | null;
   contextChatSessionId: string | null;
   setContextChatSessionId: Dispatch<SetStateAction<string | null>>;
+  onActivityChanged?: () => void;
+  onOpenLearningCard?: (card: LearningCardItem) => void;
 }) {
   const [languageLabel, setLanguageLabel] = useState(settings?.default_language_label ?? "Python");
   const [modeGroup, setModeGroup] = useState<"function" | "script">("function");
   const [mode, setMode] = useState("func_comment");
-  const [model, setModel] = useState(settings?.default_model_label ?? "dsV4flash");
+  const [model, setModel] = useState(settings?.default_model_label ?? "DeepSeek-V4-Flash");
   const [metrics, setMetrics] = useState<StaticMetrics | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [generateLearningCards, setGenerateLearningCards] = useState(false);
+  const [learningCardCandidates, setLearningCardCandidates] = useState<LearningCardCandidate[]>([]);
+  const [savedLearningCards, setSavedLearningCards] = useState<LearningCardItem[]>([]);
+  const [learningCardNotice, setLearningCardNotice] = useState("");
+  const [learningCardPendingMessage, setLearningCardPendingMessage] = useState("");
 
   const languages = settings?.languages ?? { Python: "python" };
   const modes = settings?.report_modes?.[modeGroup] ?? [];
-  const models = settings?.models ?? { dsV4flash: "deepseek-v4-flash" };
+  const models = settings?.models ?? { "DeepSeek-V4-Flash": "deepseek-v4-flash" };
   const languageCode = languages[languageLabel] ?? "python";
+
+  useEffect(() => {
+    if (externalLanguageLabel && languages[externalLanguageLabel]) {
+      setLanguageLabel(externalLanguageLabel);
+    }
+  }, [externalLanguageLabel, languages]);
 
   async function analyze() {
     setMetrics(await api.staticAnalyze(code, languageCode));
   }
 
+  async function loadSavedLearningCards(nextReportId = reportId) {
+    if (!nextReportId) {
+      setSavedLearningCards([]);
+      return;
+    }
+    setSavedLearningCards(await api.reportLearningCards(nextReportId));
+  }
+
+  useEffect(() => {
+    void loadSavedLearningCards(reportId);
+  }, [reportId]);
+
   async function generate() {
     setLoading(true);
     setError("");
     setReport("");
-    setCurrentReport("");
     setReportId(null);
     setContextChatSessionId(null);
+    setLearningCardCandidates([]);
+    setSavedLearningCards([]);
+    setLearningCardNotice("");
+    setLearningCardPendingMessage("");
 
     try {
       await analyze();
@@ -80,107 +110,155 @@ export function WorkbenchPage({
           mode,
           language_code: languageCode,
           language_label: languageLabel,
-          model
+          model,
+          generate_learning_card_candidates: generateLearningCards
         },
         {
           onDelta: (text) => {
             setReport((previous) => previous + text);
           },
+          onStatus: (data) => {
+            if (data.phase === "learning_cards") {
+              setLearningCardPendingMessage(String(data.message ?? "知识卡片正在生成中..."));
+            }
+          },
           onDone: (data) => {
-            setReportId(String(data.id ?? "") || null);
+            setLearningCardPendingMessage("");
+            const nextReportId = String(data.id ?? "") || null;
+            setReportId(nextReportId);
+            if (nextReportId) void loadSavedLearningCards(nextReportId);
+            const candidates = Array.isArray(data.learning_card_candidates) ? data.learning_card_candidates as LearningCardCandidate[] : [];
+            setLearningCardCandidates(candidates);
+            if (data.learning_card_candidate_error) {
+              setLearningCardNotice("报告已生成，但知识卡片候选生成失败。可以稍后到知识卡片页从历史报告智能提炼。");
+            } else if (generateLearningCards) {
+              setLearningCardNotice(candidates.length ? `发现 ${candidates.length} 个知识卡片候选。` : "报告已生成，但这次没有发现明确的知识卡片候选。");
+            }
+            onActivityChanged?.();
             setLoading(false);
           },
           onError: (message) => {
+            setLearningCardPendingMessage("");
             setError(message);
             setLoading(false);
           }
         }
       );
     } catch (exc) {
+      setLearningCardPendingMessage("");
       setError(exc instanceof Error ? exc.message : "生成失败");
       setLoading(false);
     }
   }
 
   const inputPanel = (
-      <section className="flex min-h-0 flex-col gap-3">
-        <div className="control-row grid grid-cols-2 gap-2">
-          <SelectField
-            ariaLabel="选择语言"
-            value={languageLabel}
-            onChange={setLanguageLabel}
-            options={Object.keys(languages).map((item) => ({ label: item, value: item }))}
-          />
-          <SelectField
-            ariaLabel="选择分析类型"
-            value={modeGroup}
-            onChange={(value) => {
-              const next = value as "function" | "script";
-              setModeGroup(next);
-              setMode((settings?.report_modes?.[next] ?? [])[0]?.id ?? "");
-            }}
-            options={[
-              { label: "函数分析", value: "function" },
-              { label: "脚本分析", value: "script" }
-            ]}
-          />
-          <SelectField
-            ariaLabel="选择分析模式"
-            value={mode}
-            onChange={setMode}
-            options={modes.map((item) => ({ label: item.label, value: item.id }))}
-          />
-          <SelectField
-            ariaLabel="选择模型"
-            value={model}
-            onChange={setModel}
-            options={Object.keys(models).map((item) => ({ label: item, value: item }))}
-          />
-        </div>
-
-        <div className="min-h-[440px] flex-1 xl:min-h-0">
-          <EditorPanel value={code} language={languageCode} onChange={setCode} />
-        </div>
-
-        <MetricsPanel metrics={metrics} />
-
-        <div className="flex gap-2">
-          <button className="btn btn-secondary" onClick={() => setCode(sampleCode)} type="button">
-            <RotateCcw size={16} />
-            载入样例
-          </button>
-          <button className="btn btn-secondary" onClick={analyze} type="button">
-            静态分析
-          </button>
-          <button className="btn btn-primary" disabled={loading || !code.trim()} onClick={generate} type="button">
-            <Play size={16} />
-            生成报告
-          </button>
-        </div>
-      </section>
+    <section className="flex min-h-0 flex-col gap-3">
+      <div className="control-row grid grid-cols-2 gap-2">
+            <SelectField
+              ariaLabel="选择语言"
+              value={languageLabel}
+              onChange={setLanguageLabel}
+              options={Object.keys(languages).map((item) => ({ label: item, value: item }))}
+            />
+            <SelectField
+              ariaLabel="选择分析类型"
+              value={modeGroup}
+              onChange={(value) => {
+                const next = value as "function" | "script";
+                setModeGroup(next);
+                setMode((settings?.report_modes?.[next] ?? [])[0]?.id ?? "");
+              }}
+              options={[
+                { label: "函数分析", value: "function" },
+                { label: "脚本分析", value: "script" }
+              ]}
+            />
+            <SelectField
+              ariaLabel="选择分析模式"
+              value={mode}
+              onChange={setMode}
+              options={modes.map((item) => ({ label: item.label, value: item.id }))}
+            />
+            <SelectField
+              ariaLabel="选择模型"
+              value={model}
+              onChange={setModel}
+              options={Object.keys(models).map((item) => ({ label: item, value: item }))}
+            />
+      </div>
+      <div className="min-h-[440px] flex-1 xl:min-h-0">
+        <EditorPanel value={code} language={languageCode} onChange={setCode} />
+      </div>
+      <MetricsPanel metrics={metrics} />
+      <label className="workbench-learning-toggle">
+        <input
+          checked={generateLearningCards}
+          onChange={(event) => setGenerateLearningCards(event.target.checked)}
+          type="checkbox"
+        />
+        <span><Sparkles size={14} /> 同步生成知识卡片候选</span>
+      </label>
+      <div className="flex gap-2">
+        <button className="btn btn-secondary" onClick={() => setCode(sampleCode)} type="button">
+          <RotateCcw size={16} />
+          载入样例
+        </button>
+        <button className="btn btn-secondary" onClick={analyze} type="button">
+          静态分析
+        </button>
+        <button className="btn btn-primary" disabled={loading || !code.trim()} onClick={generate} type="button">
+          <Play size={16} />
+          生成报告
+        </button>
+      </div>
+    </section>
   );
 
   const reportPanel = (
-      <ReportViewer
-        title="当前报告"
-        content={report}
-        loading={loading}
-        error={error}
-        contextChat={{
-          settings,
-          reportId,
-          codeContext: code,
-          reportContext: report,
-          sessionId: contextChatSessionId,
-          onSessionIdChange: setContextChatSessionId
-        }}
-        onClear={() => {
-          setReport("");
-          setCurrentReport("");
-          setReportId(null);
-          setContextChatSessionId(null);
-        }}
-      />
+    <ReportViewer
+      title="当前报告"
+      content={report}
+      loading={loading}
+      error={error}
+      learningCards={{
+        candidates: learningCardCandidates,
+        reportId,
+        savedCards: savedLearningCards,
+        notice: learningCardNotice,
+        pendingMessage: learningCardPendingMessage,
+        onOpenCard: onOpenLearningCard,
+        onDismiss: () => setLearningCardCandidates([]),
+        onSaved: (created, skipped, cards) => {
+          setLearningCardNotice(`已保存 ${created} 张知识卡片，跳过 ${skipped} 张重复卡片。`);
+          if (cards.length) {
+            setSavedLearningCards((current) => {
+              const seen = new Set(current.map((card) => card.id));
+              return [...cards.filter((card) => !seen.has(card.id)), ...current];
+            });
+          }
+          void loadSavedLearningCards();
+          onActivityChanged?.();
+        }
+      }}
+      contextChat={{
+        settings,
+        reportId,
+        codeContext: code,
+        reportContext: report,
+        sessionId: contextChatSessionId,
+        onSessionIdChange: setContextChatSessionId,
+        onSessionSaved: () => onActivityChanged?.()
+      }}
+      onClear={() => {
+        setReport("");
+        setReportId(null);
+        setContextChatSessionId(null);
+        setLearningCardCandidates([]);
+        setSavedLearningCards([]);
+        setLearningCardNotice("");
+        setLearningCardPendingMessage("");
+      }}
+    />
   );
 
   return (
@@ -188,7 +266,7 @@ export function WorkbenchPage({
       defaultPercent={56}
       minPercent={18}
       maxPercent={56}
-      leftMin="280px"
+      leftMin="400px"
       rightMin="460px"
       storageKey="codelens.workbench.splitPercent"
       left={inputPanel}

@@ -1,21 +1,25 @@
+import { apiUrl } from "./runtime";
+
 type StreamHandlers = {
   onDelta: (text: string) => void;
+  onStatus?: (data: Record<string, unknown>) => void;
+  onPlan?: (data: Record<string, unknown>) => void;
   onDone?: (data: Record<string, unknown>) => void;
   onError?: (message: string) => void;
 };
 
+function normalizeLineEndings(value: string) {
+  return value.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
 function parseEvent(raw: string): { event: string; data: Record<string, unknown> } | null {
-  const lines = raw.split("\n");
+  const lines = normalizeLineEndings(raw).split("\n");
   let event = "message";
   const dataLines: string[] = [];
 
   for (const line of lines) {
-    if (line.startsWith("event:")) {
-      event = line.slice(6).trim();
-    }
-    if (line.startsWith("data:")) {
-      dataLines.push(line.slice(5).trim());
-    }
+    if (line.startsWith("event:")) event = line.slice(6).trim();
+    if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
   }
 
   if (!dataLines.length) return null;
@@ -26,14 +30,42 @@ function parseEvent(raw: string): { event: string; data: Record<string, unknown>
   }
 }
 
+function drainEventBlocks(buffer: string) {
+  const normalized = normalizeLineEndings(buffer);
+  const parts = normalized.split(/\n{2,}/);
+  return {
+    events: parts.slice(0, -1),
+    rest: parts[parts.length - 1] ?? "",
+  };
+}
+
+function dispatchEvent(raw: string, handlers: StreamHandlers) {
+  const parsed = parseEvent(raw);
+  if (!parsed) return;
+
+  if (parsed.event === "delta") {
+    handlers.onDelta(String(parsed.data.text ?? ""));
+  } else if (parsed.event === "status") {
+    handlers.onStatus?.(parsed.data);
+  } else if (parsed.event === "plan") {
+    handlers.onPlan?.(parsed.data);
+  } else if (parsed.event === "done") {
+    handlers.onDone?.(parsed.data);
+  } else if (parsed.event === "error") {
+    const message = String(parsed.data.message ?? parsed.data.detail ?? "Stream request failed");
+    const hint = String(parsed.data.hint ?? "");
+    handlers.onError?.(hint ? `${message}\n${hint}` : message);
+  }
+}
+
 export async function streamPost(url: string, body: unknown, handlers: StreamHandlers) {
-  const response = await fetch(url, {
+  const response = await fetch(apiUrl(url), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Accept: "text/event-stream"
+      Accept: "text/event-stream",
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(body),
   });
 
   if (!response.ok || !response.body) {
@@ -49,20 +81,16 @@ export async function streamPost(url: string, body: unknown, handlers: StreamHan
     if (done) break;
 
     buffer += decoder.decode(value, { stream: true });
-    const events = buffer.split("\n\n");
-    buffer = events.pop() ?? "";
+    const { events, rest } = drainEventBlocks(buffer);
+    buffer = rest;
 
     for (const raw of events) {
-      const parsed = parseEvent(raw);
-      if (!parsed) continue;
-
-      if (parsed.event === "delta") {
-        handlers.onDelta(String(parsed.data.text ?? ""));
-      } else if (parsed.event === "done") {
-        handlers.onDone?.(parsed.data);
-      } else if (parsed.event === "error") {
-        handlers.onError?.(String(parsed.data.message ?? "流式请求失败"));
-      }
+      dispatchEvent(raw, handlers);
     }
+  }
+
+  buffer += decoder.decode();
+  if (buffer.trim()) {
+    dispatchEvent(buffer, handlers);
   }
 }

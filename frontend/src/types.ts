@@ -23,6 +23,25 @@ export type SettingsResponse = {
   report_modes: Record<string, ReportMode[]>;
 };
 
+export type LLMKeyStatusResponse = {
+  configured: boolean;
+  source: "user" | "env" | "none" | string;
+  masked_key: string;
+  updated_at?: string | null;
+  base_url: string;
+};
+
+export type LLMKeyTestResponse = {
+  ok: boolean;
+  status: string;
+  detail: string;
+  key_status?: LLMKeyStatusResponse | null;
+  balance?: {
+    currency?: string;
+    total_balance?: number;
+  } | null;
+};
+
 export type StaticMetrics = {
   lines: number;
   functions: {

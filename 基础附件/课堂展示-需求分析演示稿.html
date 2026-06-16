@@ -1,0 +1,456 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>CodeLens Pro 需求分析演示稿</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0b0d11;
+      --panel: rgba(232, 238, 246, 0.06);
+      --line: rgba(232, 238, 246, 0.13);
+      --text: #f2f5f8;
+      --muted: #9aa3ad;
+      --soft: #d4dae1;
+      --accent: #a9bed8;
+      --accent-2: #87c9bd;
+      --danger: #d7b0ad;
+      --shadow: rgba(0, 0, 0, 0.42);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+      background:
+        radial-gradient(circle at 18% 22%, rgba(169, 190, 216, 0.12), transparent 26rem),
+        radial-gradient(circle at 82% 74%, rgba(135, 201, 189, 0.08), transparent 28rem),
+        linear-gradient(135deg, #090b0f 0%, #11161d 56%, #08090c 100%);
+      color: var(--text);
+      font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    }
+
+    body::before {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      content: "";
+      background-image:
+        linear-gradient(rgba(255,255,255,0.022) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255,255,255,0.022) 1px, transparent 1px);
+      background-size: 44px 44px;
+      mask-image: radial-gradient(circle at center, black 0%, transparent 76%);
+    }
+
+    body::after {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      content: "";
+      background: radial-gradient(circle at center, transparent 0%, rgba(0,0,0,0.5) 92%);
+    }
+
+    .deck {
+      position: relative;
+      z-index: 1;
+      width: 100vw;
+      height: 100dvh;
+    }
+
+    .slide {
+      position: absolute;
+      inset: 0;
+      display: grid;
+      grid-template-columns: minmax(0, 0.95fr) minmax(360px, 1.05fr);
+      gap: clamp(24px, 4vw, 72px);
+      align-items: center;
+      padding: clamp(32px, 6vw, 82px);
+      opacity: 0;
+      transform: translate3d(36px, 0, 0) scale(0.988);
+      transition: opacity 460ms cubic-bezier(.2,.7,.2,1), transform 620ms cubic-bezier(.16,1,.3,1);
+      pointer-events: none;
+    }
+
+    .slide.active {
+      opacity: 1;
+      transform: translate3d(0, 0, 0) scale(1);
+      pointer-events: auto;
+    }
+
+    .slide.center {
+      grid-template-columns: minmax(0, 1fr);
+      place-items: center;
+      text-align: center;
+    }
+
+    .kicker {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 22px;
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 800;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+    }
+
+    .kicker::before {
+      width: 36px;
+      height: 1px;
+      content: "";
+      background: currentColor;
+    }
+
+    h1, h2 {
+      max-width: 960px;
+      margin: 0;
+      font-weight: 900;
+      letter-spacing: 0;
+      line-height: .98;
+    }
+
+    h1 { font-size: clamp(64px, 9vw, 124px); }
+    h2 { font-size: clamp(42px, 6.2vw, 82px); }
+
+    p {
+      margin: 0;
+      color: var(--soft);
+      font-size: clamp(16px, 1.55vw, 21px);
+      line-height: 1.74;
+    }
+
+    .lead {
+      max-width: 820px;
+      margin-top: 24px;
+      color: var(--soft);
+      font-size: clamp(19px, 2vw, 27px);
+      line-height: 1.6;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      background: linear-gradient(145deg, rgba(255,255,255,.1), rgba(255,255,255,.04)), var(--panel);
+      box-shadow: 0 30px 88px var(--shadow), inset 0 1px 0 rgba(255,255,255,.14);
+    }
+
+    .pain-list, .need-list {
+      display: grid;
+      gap: 14px;
+    }
+
+    .pain {
+      display: grid;
+      grid-template-columns: 54px minmax(0, 1fr);
+      gap: 16px;
+      align-items: start;
+      border-bottom: 1px solid var(--line);
+      padding: 20px 0;
+    }
+
+    .pain:last-child { border-bottom: 0; }
+
+    .num {
+      color: var(--accent);
+      font-family: "Cascadia Mono", Consolas, monospace;
+      font-size: 20px;
+      font-weight: 900;
+    }
+
+    .pain strong, .need strong, .feature strong {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--text);
+      font-size: 19px;
+    }
+
+    .pain span, .need span, .feature span {
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.66;
+    }
+
+    .needs {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .need {
+      min-height: 170px;
+      border: 1px solid var(--line);
+      border-radius: 20px;
+      padding: 22px;
+      background: rgba(255,255,255,.05);
+    }
+
+    .need b {
+      display: inline-block;
+      margin-bottom: 18px;
+      color: var(--accent-2);
+      font-family: "Cascadia Mono", Consolas, monospace;
+      font-size: 12px;
+      letter-spacing: .1em;
+    }
+
+    .features {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+      width: min(1180px, 100%);
+      margin-top: 34px;
+    }
+
+    .feature {
+      position: relative;
+      min-height: 212px;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      padding: 20px;
+      background: rgba(255,255,255,.05);
+      text-align: left;
+    }
+
+    .feature::after {
+      position: absolute;
+      right: -44px;
+      bottom: -44px;
+      width: 116px;
+      height: 116px;
+      border: 1px solid rgba(169, 190, 216, .18);
+      border-radius: 50%;
+      content: "";
+    }
+
+    .feature b {
+      color: var(--accent);
+      font-family: "Cascadia Mono", Consolas, monospace;
+      font-size: 12px;
+      letter-spacing: .12em;
+    }
+
+    .summary {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 32px;
+      width: min(940px, 100%);
+    }
+
+    .summary div {
+      border-top: 2px solid var(--accent);
+      padding: 18px 16px 0;
+      text-align: left;
+    }
+
+    .summary div:nth-child(2) { border-top-color: var(--accent-2); }
+    .summary div:nth-child(3) { border-top-color: var(--danger); }
+
+    .summary strong {
+      display: block;
+      margin-bottom: 9px;
+      color: var(--text);
+      font-size: 18px;
+    }
+
+    .summary span {
+      color: var(--muted);
+      font-size: 15px;
+      line-height: 1.65;
+    }
+
+    .feature-stage {
+      width: min(1220px, 100%);
+      margin-inline: auto;
+    }
+
+    .feature-stage h2 {
+      margin-inline: auto;
+    }
+
+    .feature-stage .lead {
+      margin-inline: auto;
+    }
+
+    .feature-stage .features,
+    .feature-stage .summary {
+      margin-inline: auto;
+    }
+
+    .progress {
+      position: fixed;
+      z-index: 3;
+      right: clamp(20px, 3vw, 42px);
+      bottom: clamp(20px, 3vw, 34px);
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      color: var(--muted);
+      font-family: "Cascadia Mono", Consolas, monospace;
+      font-size: 12px;
+      font-weight: 800;
+    }
+
+    .bar {
+      width: 150px;
+      height: 2px;
+      overflow: hidden;
+      background: rgba(255,255,255,.18);
+    }
+
+    .bar i {
+      display: block;
+      width: 0;
+      height: 100%;
+      background: var(--accent);
+      transition: width 380ms cubic-bezier(.16,1,.3,1);
+    }
+
+    .hint {
+      position: fixed;
+      z-index: 3;
+      left: clamp(20px, 3vw, 42px);
+      bottom: clamp(20px, 3vw, 34px);
+      color: rgba(244,247,251,.45);
+      font-size: 12px;
+      letter-spacing: .08em;
+    }
+
+    @media (max-width: 900px) {
+      body { overflow: auto; }
+      .deck { height: auto; }
+      .slide {
+        position: relative;
+        display: none;
+        min-height: 100dvh;
+        grid-template-columns: 1fr;
+        padding: 28px 18px 86px;
+      }
+      .slide.active { display: grid; }
+      .needs, .features, .summary { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="deck" aria-live="polite">
+    <section class="slide center active">
+      <div>
+        <div class="kicker">Requirement Analysis</div>
+        <h1>CodeLens Pro</h1>
+        <p class="lead">一个帮助学生读懂代码逻辑、追问 AI 报告、沉淀知识，并通过 VS Code 插件参与项目协作的智能编程学习工具。</p>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div>
+        <div class="kicker">Background</div>
+        <h2>时代现状</h2>
+        <p class="lead">AI 让很多人不再需要手敲代码，但如果看不懂代码逻辑、改不了现有项目，竞争力还是不够。</p>
+      </div>
+      <div class="panel" style="padding: 10px 28px;">
+        <div class="pain-list">
+          <div class="pain">
+            <div class="num">01</div>
+            <div><strong>会生成，不会理解</strong><span>代码是跑出来了，但不知道每一段为什么这样写，也不知道它具体在做什么。</span></div>
+          </div>
+          <div class="pain">
+            <div class="num">02</div>
+            <div><strong>会复制，不会修改</strong><span>遇到已有项目时，只能照着 AI 提示改，不能自己定位问题和调整逻辑。</span></div>
+          </div>
+          <div class="pain">
+            <div class="num">03</div>
+            <div><strong>会提问，不会复盘</strong><span>问完 AI 就结束了，没有把理解、知识点和经验沉淀下来。</span></div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="slide">
+      <div>
+        <div class="kicker">Need</div>
+        <h2>核心需求</h2>
+        <p class="lead">真正有竞争力的不是“会不会让 AI 写”，而是“能不能读懂、改懂、讲清楚代码”。</p>
+      </div>
+      <div class="needs">
+        <div class="need"><b>Need 01</b><strong>读懂代码本质</strong><span>至少要知道每行代码的作用、函数之间的关系，以及程序整体的运行流程。</span></div>
+        <div class="need"><b>Need 02</b><strong>看懂后能追问</strong><span>当报告解释不清时，可以继续追问，直到把逻辑真正弄明白。</span></div>
+        <div class="need"><b>Need 03</b><strong>理解后可沉淀</strong><span>把关键知识保存成卡片、资料和笔记，后面复习时能快速回看。</span></div>
+        <div class="need"><b>Need 04</b><strong>学习过程可展示</strong><span>用报告、日志和统计数据说明自己不是“只会生成”，而是“真正学会了”。</span></div>
+      </div>
+    </section>
+
+    <section class="slide center">
+      <div class="feature-stage">
+        <div class="kicker">Application</div>
+        <h2>功能简介</h2>
+        <p class="lead">工具围绕“看懂代码、持续追问、沉淀知识、协作修改”四个环节设计。</p>
+        <div class="features">
+          <div class="feature"><b>01</b><strong>代码分析</strong><span>输入代码后先做静态分析，再生成流式报告，帮助快速理解逻辑和风险。</span></div>
+          <div class="feature"><b>02</b><strong>报告追问</strong><span>围绕当前报告继续提问，补齐看不懂的地方，直到理解为止。</span></div>
+          <div class="feature"><b>03</b><strong>知识沉淀</strong><span>把关键结论保存成知识卡片，再生成学习资料、笔记和复习状态。</span></div>
+          <div class="feature"><b>04</b><strong>Agent 插件</strong><span>通过 VS Code 插件同步项目上下文，生成修改计划，用户确认后再执行。</span></div>
+        </div>
+        <div class="summary">
+          <div><strong>完整性</strong><span>有前端、后端、数据库和 AI 接口，能形成完整闭环。</span></div>
+          <div><strong>智能性</strong><span>AI 参与分析、问答、卡片和日志生成，不只是单次回答。</span></div>
+          <div><strong>美观度</strong><span>提供亮色与暗色两套主题，兼顾课堂投影、长时间阅读和不同使用偏好。</span></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <div class="hint">方向键 / 空格翻页</div>
+  <div class="progress">
+    <span id="pageLabel">01 / 04</span>
+    <div class="bar"><i id="bar"></i></div>
+  </div>
+
+  <script>
+    const slides = Array.from(document.querySelectorAll(".slide"));
+    const pageLabel = document.getElementById("pageLabel");
+    const bar = document.getElementById("bar");
+    let index = 0;
+
+    function render() {
+      slides.forEach((slide, i) => slide.classList.toggle("active", i === index));
+      pageLabel.textContent = `${String(index + 1).padStart(2, "0")} / ${String(slides.length).padStart(2, "0")}`;
+      bar.style.width = `${((index + 1) / slides.length) * 100}%`;
+    }
+
+    function go(next) {
+      index = Math.max(0, Math.min(slides.length - 1, next));
+      render();
+    }
+
+    window.addEventListener("keydown", (event) => {
+      if (["ArrowRight", "PageDown", " "].includes(event.key)) {
+        event.preventDefault();
+        go(index + 1);
+      }
+      if (["ArrowLeft", "PageUp", "Backspace"].includes(event.key)) {
+        event.preventDefault();
+        go(index - 1);
+      }
+      if (event.key === "Home") go(0);
+      if (event.key === "End") go(slides.length - 1);
+    });
+
+    let touchStartX = 0;
+    window.addEventListener("touchstart", (event) => {
+      touchStartX = event.changedTouches[0].clientX;
+    }, { passive: true });
+    window.addEventListener("touchend", (event) => {
+      const delta = event.changedTouches[0].clientX - touchStartX;
+      if (Math.abs(delta) > 48) go(index + (delta < 0 ? 1 : -1));
+    }, { passive: true });
+
+    render();
+  </script>
+</body>
+</html>

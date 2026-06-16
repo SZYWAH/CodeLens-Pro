@@ -1152,6 +1152,7 @@ select.control-field:focus {
 }
 
 .agent-header-stage-chip-pending,
+.agent-header-stage-chip-delayed,
 .agent-header-stage-chip-waiting,
 .agent-header-stage-chip-waiting_confirm,
 .agent-header-stage-chip-confirmed {
@@ -6717,6 +6718,128 @@ body {
   min-height: 0;
   flex: 1;
   overflow: auto;
+}
+
+.llm-key-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px;
+}
+
+.llm-key-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.llm-key-panel-head div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.llm-key-panel-head span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.72rem;
+  font-weight: 760;
+  text-transform: uppercase;
+}
+
+.llm-key-panel-head strong {
+  color: var(--ink);
+  font-size: 1rem;
+}
+
+.llm-key-panel-head em {
+  flex-shrink: 0;
+  border: 1px solid color-mix(in srgb, var(--pine) 26%, var(--line));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--pine) 10%, transparent);
+  color: var(--pine);
+  padding: 3px 8px;
+  font-size: 0.68rem;
+  font-style: normal;
+  font-weight: 820;
+}
+
+.llm-key-panel p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.55;
+}
+
+.llm-key-status {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--field-bg) 78%, transparent);
+  padding: 8px 10px;
+}
+
+.llm-key-status span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+  font-weight: 780;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-key-status small {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.llm-key-input {
+  width: 100%;
+  min-width: 0;
+}
+
+.llm-key-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.llm-key-actions .ui-button {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 0.74rem;
+}
+
+.llm-key-message {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 8px 9px;
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.llm-key-message-ok {
+  border-color: color-mix(in srgb, var(--teal) 38%, var(--line));
+  background: color-mix(in srgb, var(--teal) 10%, transparent);
+  color: var(--teal);
+}
+
+.llm-key-message-bad {
+  border-color: color-mix(in srgb, var(--coral) 42%, var(--line));
+  background: color-mix(in srgb, var(--coral) 10%, transparent);
+  color: var(--coral);
 }
 
 .analytics-metric-grid {
@@ -14061,6 +14184,7 @@ body {
 }
 
 .agent-workflow-step-pending,
+.agent-workflow-step-delayed,
 .agent-workflow-step-waiting,
 .agent-workflow-step-waiting_confirm,
 .agent-workflow-step-confirmed {

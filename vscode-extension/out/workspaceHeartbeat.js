@@ -62,6 +62,7 @@ class WorkspaceHeartbeatService {
     timer = null;
     running = false;
     disposed = false;
+    lastReadyCheckFailed = false;
     lastWorkspaceRoot = "";
     lastWorkspaceTree = null;
     lastWorkspaceTreeAt = 0;
@@ -88,11 +89,15 @@ class WorkspaceHeartbeatService {
             return;
         this.running = true;
         try {
-            const status = await this.backend.getBackendStatus();
+            const status = await this.backend.getCachedBackendStatus({
+                force: reason === "start" || this.lastReadyCheckFailed,
+            });
             if (!status.healthy || !status.agentReady) {
+                this.lastReadyCheckFailed = true;
                 this.logHeartbeatIssue("backend-not-ready", `[CodeLens Pro] Workspace heartbeat skipped (${reason}). API=${this.backend.apiBase}, healthy=${status.healthy}, agentReady=${status.agentReady}`);
                 return;
             }
+            this.lastReadyCheckFailed = false;
             const payload = await this.buildHeartbeatPayload(forceTreeRefresh);
             await this.postWorkspaceHeartbeat(payload, reason);
             if (this.lastErrorKey) {
@@ -137,19 +142,25 @@ class WorkspaceHeartbeatService {
             || !this.lastWorkspaceTree
             || now - this.lastWorkspaceTreeAt > WORKSPACE_TREE_REFRESH_MS;
         if (shouldRefreshTree) {
-            const result = await this.buildWorkspaceTree(workspaceFolder);
-            this.lastWorkspaceRoot = workspaceRoot;
-            this.lastWorkspaceTree = result.tree;
-            this.lastWorkspaceTreeAt = now;
-            this.lastWorkspaceNodeCount = result.nodeCount;
-            this.lastWorkspaceTreeTruncated = result.truncated;
+            try {
+                const result = await this.buildWorkspaceTree(workspaceFolder);
+                this.lastWorkspaceRoot = workspaceRoot;
+                this.lastWorkspaceTree = result.tree;
+                this.lastWorkspaceTreeAt = now;
+                this.lastWorkspaceNodeCount = result.nodeCount;
+                this.lastWorkspaceTreeTruncated = result.truncated;
+            }
+            catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                this.logHeartbeatIssue(`tree-refresh:${message}`, `[CodeLens Pro] Workspace tree refresh failed (${message}). Reusing cached tree for heartbeat.`);
+            }
         }
         return {
             workspace_name: workspaceFolder.name,
             workspace_root: workspaceRoot,
             status: "connected",
             tree: this.lastWorkspaceTree,
-            node_count: this.lastWorkspaceNodeCount,
+            node_count: this.lastWorkspaceNodeCount || (this.lastWorkspaceTree ? 1 : 0),
             truncated: this.lastWorkspaceTreeTruncated,
             plugin_version: this.pluginVersion,
         };

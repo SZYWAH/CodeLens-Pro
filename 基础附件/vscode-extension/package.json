@@ -1,0 +1,145 @@
+{
+  "name": "codelens-pro-vscode",
+  "displayName": "CodeLens Pro",
+  "description": "Local AI code analysis workspace powered by the CodeLens Pro FastAPI backend.",
+  "version": "0.1.1",
+  "publisher": "local-demo",
+  "private": true,
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished",
+    "onCommand:codelensPro.openPanel",
+    "onCommand:codelensPro.openSidebar",
+    "onCommand:codelensPro.analyzeCurrentFile",
+    "onCommand:codelensPro.analyzeSelection",
+    "onCommand:codelensPro.analyzeFile",
+    "onCommand:codelensPro.openChat",
+    "onCommand:codelensPro.openHistory",
+    "onCommand:codelensPro.openStats",
+    "onView:codelensPro.sidebar"
+  ],
+  "main": "./out/extension.js",
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "build:webview": "cd webview-mini && npm install && npm run build",
+    "prepare-package": "npm run build:webview && node scripts/prepare-package.js",
+    "vscode:prepublish": "npm run compile && npm run prepare-package",
+    "package": "vsce package --no-dependencies --allow-missing-repository"
+  },
+  "contributes": {
+    "commands": [
+      {
+        "command": "codelensPro.openPanel",
+        "title": "CodeLens Pro: 打开右侧面板"
+      },
+      {
+        "command": "codelensPro.openSidebar",
+        "title": "CodeLens Pro: 打开侧边栏视图"
+      },
+      {
+        "command": "codelensPro.analyzeCurrentFile",
+        "title": "CodeLens Pro: 分析当前文件"
+      },
+      {
+        "command": "codelensPro.analyzeSelection",
+        "title": "CodeLens Pro: 分析选中代码"
+      },
+      {
+        "command": "codelensPro.analyzeFile",
+        "title": "CodeLens Pro: 分析文件"
+      },
+      {
+        "command": "codelensPro.openChat",
+        "title": "CodeLens Pro: 打开 AI 对话"
+      },
+      {
+        "command": "codelensPro.openHistory",
+        "title": "CodeLens Pro: 打开历史报告"
+      },
+      {
+        "command": "codelensPro.openStats",
+        "title": "CodeLens Pro: 打开统计面板"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codelensProContainer",
+          "title": "CodeLens Pro",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "codelensProContainer": [
+        {
+          "id": "codelensPro.sidebar",
+          "name": "CodeLens Pro",
+          "type": "webview"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "codelensPro.analyzeSelection",
+          "when": "editorTextFocus && editorHasSelection",
+          "group": "navigation@10"
+        },
+        {
+          "command": "codelensPro.analyzeCurrentFile",
+          "when": "editorTextFocus && !editorHasSelection",
+          "group": "navigation@11"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "codelensPro.analyzeFile",
+          "when": "resourceScheme == file",
+          "group": "navigation@10"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "CodeLens Pro",
+      "properties": {
+        "codelens.backendPort": {
+          "type": "number",
+          "default": 8000,
+          "description": "CodeLens Pro FastAPI backend port."
+        },
+        "codelens.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Python executable used to start the local FastAPI backend. When left as python, CodeLens Pro prefers the project .venv if it exists."
+        },
+        "codelens.autoStartBackend": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically start the local FastAPI backend when opening CodeLens Pro."
+        },
+        "codelens.frontendMode": {
+          "type": "string",
+          "default": "webview",
+          "enum": [
+            "webview"
+          ],
+          "description": "Frontend mode for CodeLens Pro."
+        }
+      }
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.10",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^2.32.0",
+    "typescript": "^5.5.4"
+  }
+}

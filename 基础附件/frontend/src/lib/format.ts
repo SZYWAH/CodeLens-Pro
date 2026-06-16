@@ -19,6 +19,7 @@ export function modeLabel(mode: string) {
     func_design: "设计思路",
     func_optimize: "优化建议",
     func_knowledge: "知识点提炼",
+    func_trace: "代码运行推演",
     script_structure: "结构分析",
     script_api: "接口整理",
     script_complexity: "复杂度分析",
