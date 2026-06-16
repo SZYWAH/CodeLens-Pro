@@ -58,7 +58,7 @@ def _looks_like_edit_instruction(instruction: str) -> bool:
     return bool(
         re.search(
             r"(add|create|update|modify|rewrite|optimi[sz]e|remove|delete|rename|insert|append|"
-            r"添加|新增|增加|修改|更新|优化|删除|移除|重命名|插入|补充|创建|新建)",
+            r"implement|添加|新增|增加|修改|更新|优化|删除|移除|重命名|插入|补充|创建|新建|实现|落地|生成|编写)",
             instruction or "",
             re.IGNORECASE,
         )
@@ -183,6 +183,144 @@ def _safe_quick_start_readme_operation(
     }
 
 
+def _agent_history_text(history: list[dict[str, str]] | None, limit: int = 6) -> str:
+    return "\n".join(str(item.get("content") or "") for item in (history or [])[-limit:])
+
+
+def _looks_like_reproduce_doc_instruction(instruction: str, history: list[dict[str, str]] | None = None) -> bool:
+    instruction_text = str(instruction or "")
+    history_text = _agent_history_text(history)
+    combined = f"{instruction_text}\n{history_text}".lower()
+    reproduce_terms = (
+        "复现",
+        "可复现",
+        "复现实验",
+        "从零运行",
+        "reproduce",
+        "reproducible",
+        "run_experiment",
+    )
+    if any(term.lower() in combined for term in reproduce_terms):
+        return True
+
+    followup_terms = (
+        "这一点不错",
+        "这点不错",
+        "这个不错",
+        "按这个",
+        "就这个",
+        "采纳",
+        "帮我实现",
+        "实现一下",
+        "落地",
+        "do it",
+        "implement it",
+    )
+    return any(term.lower() in instruction_text.lower() for term in followup_terms) and any(
+        term.lower() in history_text.lower() for term in reproduce_terms
+    )
+
+
+def _file_identity_text(item: dict) -> str:
+    return " ".join(
+        str(item.get(key) or "")
+        for key in ("fileName", "file_name", "filePath", "file_path", "languageId", "language_id")
+    )
+
+
+def _looks_like_openalex_context(files: list[dict] | None, code_context: str) -> bool:
+    chunks = [str(code_context or "")]
+    for item in files or []:
+        chunks.append(_file_identity_text(item))
+        chunks.append(_clip_text(str(item.get("code") or ""), 3000))
+    text = "\n".join(chunks).lower()
+    if "openalex" not in text:
+        return False
+    return any(
+        term in text
+        for term in (
+            "openalex-mcp",
+            "modelscope-openalex",
+            "build_openalex_docx",
+            "mcp-call-records",
+            "parameter-summary",
+            "openalex api",
+        )
+    )
+
+
+def _first_context_path(files: list[dict] | None, predicates: tuple[str, ...], fallback: str) -> str:
+    for item in files or []:
+        path_value = str(item.get("filePath") or item.get("file_path") or item.get("fileName") or "").replace("\\", "/")
+        lower_path = path_value.lower()
+        if path_value and any(predicate.lower() in lower_path for predicate in predicates):
+            return path_value
+    return fallback
+
+
+def _build_openalex_reproduce_markdown(files: list[dict] | None) -> str:
+    report_path = _first_context_path(files, (".md",), "OpenAlex-MCP实验报告.md")
+    config_path = _first_context_path(files, ("modelscope-openalex-mcp.json",), "modelscope-openalex-mcp.json")
+    script_path = _first_context_path(files, ("build_openalex_docx.py",), "build_openalex_docx.py")
+    return (
+        "# OpenAlex MCP 实验复现说明\n\n"
+        "本文档用于从零复现 OpenAlex MCP 实验，包括 MCP 配置、工具调用验证、结果留存和报告生成。\n\n"
+        "## 1. 环境准备\n\n"
+        "- 准备可访问外网的本地环境，确认可以访问 `https://api.openalex.org`。\n"
+        "- 安装 Node.js 18 或更高版本，用于运行 OpenAlex MCP Server。\n"
+        "- 安装 Python 3.10 或更高版本，用于生成 Word 报告。\n"
+        "- 如需生成 `.docx`，先安装脚本依赖：`pip install python-docx`。\n\n"
+        "## 2. MCP 配置\n\n"
+        f"- 查看 `{config_path}`，确认 OpenAlex MCP Server 的包名、启动命令和环境变量。\n"
+        "- 将配置写入 Codex Desktop 或目标 MCP Client 的 MCP 配置文件。\n"
+        "- 重启客户端后，确认工具列表中可以看到 OpenAlex 相关工具。\n\n"
+        "## 3. 调用链验证\n\n"
+        "- 执行一次初始化检查，确认 JSON-RPC `initialize` 返回成功。\n"
+        "- 执行 `tools/list`，保存工具列表返回结果。\n"
+        "- 分别使用 keyword、semantic、exact 三种检索模式发起 `tools/call`。\n"
+        "- 将关键请求和响应保存到 `artifacts/mcp-call-records.json`。\n\n"
+        "## 4. 实验结果复现\n\n"
+        "- 按报告中的问题重新检索：LLM Agent 辅助自动化文献综述和科研发现。\n"
+        "- 保存 semantic search 的 Top 1 完整结果到 `artifacts/openalex-top-result.json`。\n"
+        "- 保存三种模式的 Top 3 对比结果到 `artifacts/parameter-summary.json`。\n"
+        "- 截图保存到 `screenshots/`，文件名保持和报告引用一致。\n\n"
+        "## 5. 报告生成\n\n"
+        f"- 检查 Markdown 报告 `{report_path}` 是否引用了最新 artifacts 和 screenshots。\n"
+        f"- 运行 `python {script_path}` 生成 Word 版报告。\n"
+        "- 生成后检查 `docx_a11y_report.json`，确认高、中、低优先级问题均为 0。\n\n"
+        "## 6. 验收清单\n\n"
+        "- `artifacts/mcp-call-records.json` 包含 initialize、tools/list、tools/call 记录。\n"
+        "- `artifacts/openalex-top-result.json` 包含论文标题、作者、机构、年份、引用量和 DOI。\n"
+        "- `artifacts/parameter-summary.json` 能对比 keyword、semantic、exact 三种模式。\n"
+        "- `screenshots/` 中截图能对应报告中的配置、工具调用和返回结果。\n"
+        "- Word 版报告已重新生成，且无障碍检查通过。\n\n"
+        "## 7. 常见问题\n\n"
+        "- 如果工具列表为空，优先检查 MCP 配置路径、Node.js 版本和包名是否正确。\n"
+        "- 如果检索结果偏离主题，优先改用 semantic 模式，并收窄查询词。\n"
+        "- 如果 Word 生成失败，确认 Python 依赖已安装，并检查截图路径是否存在。\n"
+    )
+
+
+def _openalex_reproduce_doc_operation(
+    instruction: str,
+    files: list[dict] | None,
+    code_context: str,
+    *,
+    history: list[dict[str, str]] | None = None,
+) -> dict | None:
+    if not _looks_like_reproduce_doc_instruction(instruction, history):
+        return None
+    if not _looks_like_openalex_context(files, code_context):
+        return None
+    return {
+        "type": "create",
+        "path": "reproduce.md",
+        "new_path": None,
+        "content": _build_openalex_reproduce_markdown(files),
+        "reason": "为 OpenAlex MCP 实验补充可复现说明，方便按同一配置和数据留存路径复跑实验。",
+    }
+
+
 def _normalize_agent_operation_path(path_value: str, selected_file_paths: list[str]) -> str:
     normalized = str(path_value or "").strip().replace("\\", "/")
     selected = [str(item or "").strip().replace("\\", "/") for item in selected_file_paths if str(item or "").strip()]
@@ -219,18 +357,28 @@ def _first_markdown_heading(text: str) -> str:
 
 
 def _parse_json_object(text: str) -> dict:
-    candidate = text.strip()
+    candidate = str(text or "").lstrip("\ufeff").strip()
+    if not candidate:
+        raise ValueError("Agent 计划不是有效 JSON")
     fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", candidate, re.IGNORECASE)
     if fenced:
-        candidate = fenced.group(1).strip()
+        candidate = fenced.group(1).lstrip("\ufeff").strip()
 
     try:
         value = json.loads(candidate)
     except json.JSONDecodeError:
-        match = re.search(r"\{[\s\S]*\}", candidate)
-        if not match:
+        decoder = json.JSONDecoder()
+        value = None
+        for match in re.finditer(r"\{", candidate):
+            try:
+                decoded, _ = decoder.raw_decode(candidate[match.start():])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(decoded, dict):
+                value = decoded
+                break
+        if value is None:
             raise ValueError("Agent 计划不是有效 JSON")
-        value = json.loads(match.group(0))
 
     if not isinstance(value, dict):
         raise ValueError("Agent 计划必须是 JSON 对象")
@@ -264,6 +412,11 @@ def _parse_json_array_or_object(text: str) -> list:
     if isinstance(value, list):
         return value
     raise ValueError("知识卡片候选必须是 JSON 数组")
+
+
+def _log_agent_plan_json_failure(stage: str, raw: str, exc: Exception) -> None:
+    preview = _clip_text(str(raw or "").replace("\r\n", "\n"), 1200)
+    print(f"[agent-plan-json] {stage} failed: {exc.__class__.__name__}: {exc}; raw_preview={preview!r}", flush=True)
 
 
 def _extract_code_names(code: str, limit: int = 2) -> list[str]:
@@ -375,13 +528,26 @@ class LLMService:
             if text:
                 yield text
 
-    def _complete_text(self, messages: list[dict[str, str]], max_tokens: int = 64) -> str:
-        response = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=0.1,
-            max_tokens=max_tokens,
-        )
+    def _complete_text(self, messages: list[dict[str, str]], max_tokens: int = 64, json_object: bool = False) -> str:
+        kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.1,
+            "max_tokens": max_tokens,
+        }
+        if json_object:
+            kwargs["response_format"] = {"type": "json_object"}
+        try:
+            response = self.client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if not json_object:
+                raise
+            print(
+                f"[llm-json] response_format=json_object unavailable, fallback to plain completion: {exc.__class__.__name__}: {exc}",
+                flush=True,
+            )
+            kwargs.pop("response_format", None)
+            response = self.client.chat.completions.create(**kwargs)
         choices = getattr(response, "choices", None) or []
         if not choices:
             return ""
@@ -389,6 +555,34 @@ class LLMService:
         message = getattr(choices[0], "message", None)
         content = getattr(message, "content", "") if message else ""
         return content or ""
+
+    def _repair_agent_plan_json(self, raw: str, instruction: str, max_tokens: int = 4000) -> dict:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You repair malformed CodeLens Pro Agent plans. "
+                    "Return one strict JSON object and nothing else. "
+                    "Do not invent extra commentary. "
+                    "Use this exact schema: "
+                    '{"summary":"short summary","assumptions":["..."],"warnings":["..."],'
+                    '"operations":[{"type":"create","path":"relative/path","new_path":null,'
+                    '"content":"complete file text or null","reason":"why"}]}. '
+                    "Allowed operation types are create, update, delete, rename. "
+                    "All paths must be workspace-relative."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"User instruction:\n{instruction}\n\n"
+                    "Malformed model output to repair:\n"
+                    f"{_clip_text(raw, 6000)}"
+                ),
+            },
+        ]
+        repaired = self._complete_text(messages, max_tokens=max_tokens, json_object=True)
+        return _parse_json_object(repaired)
 
     @staticmethod
     def extract_stream_text(chunk) -> str:
@@ -755,20 +949,43 @@ class LLMService:
             },
         ]
 
-        raw = self._complete_text(messages, max_tokens=8000)
+        raw = self._complete_text(messages, max_tokens=8000, json_object=True)
         try:
             value = _parse_json_object(raw)
-        except ValueError:
-            fallback_operation = _quick_start_readme_operation(instruction, files, code_context)
-            if fallback_operation:
-                fallback_operation["path"] = _normalize_agent_operation_path(str(fallback_operation.get("path") or ""), selected_file_paths or [])
-                return {
-                    "summary": "为 README 补充快速开始板块。",
-                    "assumptions": [],
-                    "warnings": ["模型返回的计划 JSON 不完整，已使用本地规则生成一个可确认的 README 修改计划。"],
-                    "operations": [fallback_operation],
-                }
-            raise
+        except ValueError as first_error:
+            _log_agent_plan_json_failure("initial_parse", raw, first_error)
+            try:
+                value = self._repair_agent_plan_json(raw, instruction)
+            except Exception as repair_error:
+                reproduce_operation = _openalex_reproduce_doc_operation(
+                    instruction,
+                    files,
+                    code_context,
+                    history=history,
+                )
+                if reproduce_operation:
+                    reproduce_operation["path"] = _normalize_agent_operation_path(
+                        str(reproduce_operation.get("path") or ""),
+                        selected_file_paths or [],
+                    )
+                    return {
+                        "summary": "创建 OpenAlex 实验复现说明文档。",
+                        "assumptions": ["用户希望落实上一条关于可复现脚本或复现文档的建议。"],
+                        "warnings": ["模型返回的计划 JSON 不完整，已使用本地规则生成 reproduce.md 的可确认计划。"],
+                        "operations": [reproduce_operation],
+                    }
+                fallback_operation = _quick_start_readme_operation(instruction, files, code_context)
+                if fallback_operation:
+                    fallback_operation["path"] = _normalize_agent_operation_path(str(fallback_operation.get("path") or ""), selected_file_paths or [])
+                    return {
+                        "summary": "为 README 补充快速开始板块。",
+                        "assumptions": [],
+                        "warnings": ["模型返回的计划 JSON 不完整，已使用本地规则生成一个可确认的 README 修改计划。"],
+                        "operations": [fallback_operation],
+                    }
+                if isinstance(repair_error, ValueError):
+                    raise first_error
+                raise repair_error
         operations = value.get("operations")
         if not isinstance(operations, list):
             operations = []
@@ -792,14 +1009,25 @@ class LLMService:
             )
 
         if not normalized_operations and _looks_like_edit_instruction(instruction):
-            fallback_operation = _quick_start_readme_operation(instruction, files, code_context)
+            fallback_operation = _openalex_reproduce_doc_operation(
+                instruction,
+                files,
+                code_context,
+                history=history,
+            ) or _quick_start_readme_operation(instruction, files, code_context)
             if fallback_operation:
                 fallback_operation["path"] = _normalize_agent_operation_path(str(fallback_operation.get("path") or ""), selected_file_paths or [])
                 normalized_operations.append(fallback_operation)
-                value["summary"] = "为 README 补充快速开始板块。"
+                value["summary"] = (
+                    "创建 OpenAlex 实验复现说明文档。"
+                    if str(fallback_operation.get("path") or "") == "reproduce.md"
+                    else "为 README 补充快速开始板块。"
+                )
                 warnings = value.get("warnings")
                 if not isinstance(warnings, list):
                     value["warnings"] = []
+                if str(fallback_operation.get("path") or "") == "reproduce.md":
+                    value["warnings"].append("模型未生成具体文件操作，已使用本地规则生成 reproduce.md 的可确认计划。")
 
         return {
             "summary": str(value.get("summary") or instruction).strip()[:500],

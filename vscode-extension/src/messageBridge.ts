@@ -31,6 +31,7 @@ export type AgentPlanPayload = {
   operations: AgentPlanOperation[];
   selected_file_paths?: string[];
   context_mode?: "manual" | "ai_auto" | "hybrid";
+  workspace_root?: string | null;
   status?: string;
   source?: string;
 };

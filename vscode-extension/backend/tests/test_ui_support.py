@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine, text
 from sqlmodel import Session
 
+import backend.app.api.routes as routes
 from backend.app.api.routes import (
     _analytics_summary,
     _agent_plan_item,
@@ -21,7 +22,11 @@ from backend.app.api.routes import (
     _metric_summary,
     _project_guide,
     _recent_activity,
+    _agent_chat_context_requests,
+    _create_agent_chat_context_request,
     select_agent_context,
+    list_pending_agent_chat_contexts,
+    list_pending_agent_tasks,
     read_current_agent_workspace,
     update_daily_work_log,
     update_agent_workspace_heartbeat,
@@ -30,6 +35,7 @@ from backend.app.api.routes import (
 )
 from backend.app.models import AgentPlan, AnalysisMetric, ChatMessage, ChatSession, DailyWorkLog, LearningCard, LearningCardMaterial, Report
 from backend.app.schemas import AgentContextFileCandidate, AgentContextSelectRequest, AgentWorkspaceHeartbeatRequest, AgentWorkspaceTreeNode, DailyWorkLogUpdateRequest
+from backend.app.services.llm_service import LLMService, _parse_json_object
 
 
 def test_parse_report_outline_extracts_markdown_headings():
@@ -128,6 +134,7 @@ def test_recent_activity_and_summary_use_existing_tables():
                 operations_json TEXT,
                 selected_files_json TEXT,
                 context_mode VARCHAR(24),
+                workspace_root VARCHAR(1024),
                 status VARCHAR(24) NOT NULL,
                 source VARCHAR(24) NOT NULL,
                 apply_result TEXT,
@@ -226,6 +233,7 @@ def test_recent_activity_and_summary_use_existing_tables():
             summary="优化缓存逻辑",
             selected_files_json='["backend/app/main.py", "../secret.py", "backend/app/main.py"]',
             context_mode="hybrid",
+            workspace_root="d:/demo",
             status="waiting_confirm",
             source="plugin",
             created_at=now - timedelta(minutes=1),
@@ -306,6 +314,7 @@ def test_recent_activity_and_summary_use_existing_tables():
     assert activity[2]["route"]["report_type"] == "single"
     assert plan_item.selected_file_paths == ["backend/app/main.py"]
     assert plan_item.context_mode == "hybrid"
+    assert plan_item.workspace_root == "d:/demo"
     assert card_item.tags == ["Python", "异常处理"]
     assert card_item.resource_links
     assert "概念解释" in placeholder_material.content_markdown
@@ -438,7 +447,190 @@ def test_agent_context_select_filters_to_candidate_paths(monkeypatch):
     assert response.skipped == [{"path": "README.md", "reason": "docs only"}]
 
 
+def test_parse_json_object_handles_utf8_bom_fenced_and_surrounding_text():
+    fenced = "\ufeff说明文字\n```json\n{\"summary\":\"创建复现文档\",\"operations\":[]}\n```\n结束"
+    surrounded = "模型说明：{\"summary\":\"中文计划\",\"operations\":[]}。"
+
+    assert _parse_json_object(fenced)["summary"] == "创建复现文档"
+    assert _parse_json_object(surrounded)["summary"] == "中文计划"
+    with pytest.raises(ValueError):
+        _parse_json_object("\ufeff这不是 JSON")
+
+
+def test_agent_plan_repairs_non_json_model_response():
+    service = object.__new__(LLMService)
+    responses = iter([
+        "我会创建一个复现说明文档，但这不是 JSON。",
+        (
+            '{"summary":"创建复现文档","assumptions":[],"warnings":[],'
+            '"operations":[{"type":"create","path":"reproduce.md","new_path":null,'
+            '"content":"# 复现\\n中文内容","reason":"补充复现说明"}]}'
+        ),
+    ])
+    json_flags: list[bool] = []
+
+    def fake_complete_text(messages, max_tokens=64, json_object=False):
+        json_flags.append(json_object)
+        return next(responses)
+
+    service._complete_text = fake_complete_text
+    plan = service.generate_agent_plan(
+        instruction="请创建 reproduce.md 复现说明",
+        code_context="",
+        language_code="text",
+        language_label="多文件",
+        files=[
+            {
+                "fileName": "OpenAlex-MCP实验报告.md",
+                "filePath": "OpenAlex-MCP实验报告.md",
+                "languageId": "markdown",
+                "code": "# OpenAlex MCP 实验报告\n",
+            }
+        ],
+    )
+
+    assert json_flags == [True, True]
+    assert plan["summary"] == "创建复现文档"
+    assert plan["operations"][0]["path"] == "reproduce.md"
+    assert "中文内容" in plan["operations"][0]["content"]
+
+
+def test_agent_plan_falls_back_to_openalex_reproduce_doc_after_json_failures():
+    service = object.__new__(LLMService)
+    responses = iter(["不是 JSON", "仍然不是 JSON"])
+
+    def fake_complete_text(messages, max_tokens=64, json_object=False):
+        return next(responses)
+
+    service._complete_text = fake_complete_text
+    plan = service.generate_agent_plan(
+        instruction="这一点不错，帮我实现",
+        code_context="",
+        language_code="text",
+        language_label="多文件",
+        files=[
+            {
+                "fileName": "modelscope-openalex-mcp.json",
+                "filePath": "modelscope-openalex-mcp.json",
+                "languageId": "json",
+                "code": "{\"name\":\"@cyanheads/openalex-mcp-server\"}",
+            },
+            {
+                "fileName": "OpenAlex-MCP实验报告.md",
+                "filePath": "OpenAlex-MCP实验报告.md",
+                "languageId": "markdown",
+                "code": "# OpenAlex MCP 实验报告\n",
+            },
+            {
+                "fileName": "build_openalex_docx.py",
+                "filePath": "build_openalex_docx.py",
+                "languageId": "python",
+                "code": "from docx import Document\n",
+            },
+        ],
+        history=[
+            {"role": "assistant", "content": "建议增加一个 reproduce.md，指导如何用同一配置从零运行实验。"},
+        ],
+    )
+
+    operation = plan["operations"][0]
+    assert plan["summary"] == "创建 OpenAlex 实验复现说明文档。"
+    assert operation["type"] == "create"
+    assert operation["path"] == "reproduce.md"
+    assert "环境准备" in operation["content"]
+    assert "OpenAlex MCP 实验复现说明" in operation["content"]
+    assert "模型返回的计划 JSON 不完整" in plan["warnings"][0]
+
+
+def test_agent_plan_keeps_json_failure_when_no_fallback_matches():
+    service = object.__new__(LLMService)
+    responses = iter(["不是 JSON", "仍然不是 JSON"])
+
+    def fake_complete_text(messages, max_tokens=64, json_object=False):
+        return next(responses)
+
+    service._complete_text = fake_complete_text
+    with pytest.raises(ValueError, match="Agent 计划不是有效 JSON"):
+        service.generate_agent_plan(
+            instruction="帮我实现",
+            code_context="# Demo\n",
+            language_code="markdown",
+            language_label="Markdown",
+            files=[
+                {
+                    "fileName": "README.md",
+                    "filePath": "README.md",
+                    "languageId": "markdown",
+                    "code": "# Demo\n",
+                }
+            ],
+        )
+
+
+def test_agent_chat_context_pending_filters_workspace_root():
+    _agent_chat_context_requests.clear()
+    try:
+        first_id = _create_agent_chat_context_request(
+            session_id="s1",
+            message="分析当前项目",
+            selected_file_paths=[],
+            context_mode="ai_auto",
+            workspace_root="D:\\ProjectA",
+        )
+        _create_agent_chat_context_request(
+            session_id="s2",
+            message="分析另一个项目",
+            selected_file_paths=[],
+            context_mode="ai_auto",
+            workspace_root="D:\\ProjectB",
+        )
+
+        items = list_pending_agent_chat_contexts(limit=20, workspace_root="d:/projecta")
+
+        assert [item.request_id for item in items] == [first_id]
+        assert items[0].workspace_root == "d:/projecta"
+    finally:
+        _agent_chat_context_requests.clear()
+
+
+def test_pending_agent_tasks_filter_workspace_root():
+    engine = create_engine("sqlite:///:memory:")
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE agent_plans (
+                id VARCHAR(32) PRIMARY KEY,
+                session_id VARCHAR(32) NOT NULL,
+                instruction TEXT NOT NULL,
+                summary VARCHAR(500) NOT NULL,
+                assumptions_json TEXT,
+                warnings_json TEXT,
+                operations_json TEXT,
+                selected_files_json TEXT,
+                context_mode VARCHAR(24),
+                workspace_root VARCHAR(1024),
+                status VARCHAR(24) NOT NULL,
+                source VARCHAR(24) NOT NULL,
+                apply_result TEXT,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL
+            )
+        """))
+
+    now = datetime.utcnow()
+    with Session(engine) as session:
+        session.add(AgentPlan(id="a1", session_id="s1", instruction="分析", summary="A", workspace_root="d:/projecta", status="pending", source="web", created_at=now, updated_at=now))
+        session.add(AgentPlan(id="a2", session_id="s2", instruction="分析", summary="B", workspace_root="d:/projectb", status="pending", source="web", created_at=now, updated_at=now))
+        session.commit()
+
+        items = list_pending_agent_tasks(limit=20, workspace_root="D:\\ProjectA", session=session)
+
+    assert [item.id for item in items] == ["a1"]
+    assert items[0].workspace_root == "d:/projecta"
+
+
 def test_agent_workspace_heartbeat_returns_current_snapshot():
+    routes._agent_workspace_snapshot = None
+    routes._agent_workspace_snapshots.clear()
     payload = AgentWorkspaceHeartbeatRequest(
         workspace_name="demo",
         workspace_root="D:/demo",
@@ -470,3 +662,36 @@ def test_agent_workspace_heartbeat_returns_current_snapshot():
     assert guide.workspace["name"] == "demo"
     assert any(item["path"] == "README.md" for item in guide.entry_candidates)
     assert "Python 模块组织" in guide.knowledge_points
+
+
+def test_empty_workspace_heartbeat_does_not_override_current_project():
+    routes._agent_workspace_snapshot = None
+    routes._agent_workspace_snapshots.clear()
+    project_payload = AgentWorkspaceHeartbeatRequest(
+        workspace_name="ProjectA",
+        workspace_root="D:/ProjectA",
+        status="connected",
+        tree=AgentWorkspaceTreeNode(name="ProjectA", path="", type="directory"),
+        node_count=1,
+        truncated=False,
+        plugin_version="0.1.0",
+    )
+    empty_payload = AgentWorkspaceHeartbeatRequest(
+        workspace_name="",
+        workspace_root="",
+        status="no_workspace",
+        tree=None,
+        node_count=0,
+        truncated=False,
+        plugin_version="0.1.0",
+    )
+
+    update_agent_workspace_heartbeat(project_payload)
+    empty_snapshot = update_agent_workspace_heartbeat(empty_payload)
+    current = read_current_agent_workspace()
+    current_by_root = read_current_agent_workspace("D:\\ProjectA")
+
+    assert empty_snapshot.status == "no_workspace"
+    assert current.workspace_name == "ProjectA"
+    assert current.workspace_root == "d:/projecta"
+    assert current_by_root.workspace_name == "ProjectA"

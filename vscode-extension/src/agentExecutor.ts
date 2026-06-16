@@ -16,6 +16,7 @@ type AgentPlanItem = AgentPlanPayload & {
   apply_result?: string | null;
   selected_file_paths?: string[];
   context_mode?: AgentContextMode;
+  workspace_root?: string | null;
 };
 
 type AgentContextSelectResponse = {
@@ -30,6 +31,7 @@ type AgentChatContextRequest = {
   message: string;
   selected_file_paths?: string[];
   context_mode?: AgentContextMode;
+  workspace_root?: string | null;
 };
 
 export class AgentWorkspaceExecutor implements vscode.Disposable {
@@ -62,6 +64,7 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
     try {
       const status = await this.backend.getBackendStatus();
       if (!status.healthy || !status.agentReady) return;
+      if (!currentWorkspaceRoot()) return;
       await this.processPendingChatContexts();
       await this.processPendingTasks();
       await this.processConfirmedPlans();
@@ -71,7 +74,7 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
   }
 
   private async processPendingChatContexts() {
-    const requests = await this.fetchJson<AgentChatContextRequest[]>(`${this.backend.apiBase}/api/agent/chat-context/pending`);
+    const requests = await this.fetchJson<AgentChatContextRequest[]>(this.workspaceScopedUrl("/api/agent/chat-context/pending"));
     for (const request of requests) {
       const requestId = request.request_id || "";
       if (!requestId || this.processing.has(requestId)) continue;
@@ -88,7 +91,7 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
   }
 
   private async processPendingTasks() {
-    const tasks = await this.fetchJson<AgentPlanItem[]>(`${this.backend.apiBase}/api/agent/pending`);
+    const tasks = await this.fetchJson<AgentPlanItem[]>(this.workspaceScopedUrl("/api/agent/pending"));
     for (const task of tasks) {
       const taskId = task.plan_id || task.id || "";
       if (!taskId || this.processing.has(taskId)) continue;
@@ -105,7 +108,7 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
   }
 
   private async processConfirmedPlans() {
-    const plans = await this.fetchJson<AgentPlanItem[]>(`${this.backend.apiBase}/api/agent/confirmed`);
+    const plans = await this.fetchJson<AgentPlanItem[]>(this.workspaceScopedUrl("/api/agent/confirmed"));
     for (const plan of plans) {
       const planId = plan.plan_id || plan.id || "";
       if (!planId || this.processing.has(planId) || this.completed.has(planId)) continue;
@@ -126,6 +129,9 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (!workspaceFolder) {
       await this.reportTaskResult(task, "failed", "未打开 VS Code 工作区，无法自动收集项目文件。").catch(() => undefined);
+      return;
+    }
+    if (!workspaceMatches(task.workspace_root, workspaceFolder.uri.fsPath)) {
       return;
     }
 
@@ -186,6 +192,9 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (!workspaceFolder) {
       await this.reportChatContextResult(request.request_id, "failed", "未打开 VS Code 工作区，无法读取所选文件。").catch(() => undefined);
+      return;
+    }
+    if (!workspaceMatches(request.workspace_root, workspaceFolder.uri.fsPath)) {
       return;
     }
 
@@ -263,6 +272,10 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
     if (!workspaceFolder) {
       await this.reportPlanResult(plan, "failed", "未打开 VS Code 工作区，无法应用计划。").catch(() => undefined);
+      return;
+    }
+    if (!workspaceMatches(plan.workspace_root, workspaceFolder.uri.fsPath)) {
+      await this.reportPlanResult(plan, "failed", "当前 Web 任务绑定的 VS Code 工作区未在线，或与当前窗口不一致。").catch(() => undefined);
       return;
     }
 
@@ -374,6 +387,15 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
     return response.json() as Promise<T>;
   }
 
+  private workspaceScopedUrl(pathname: string) {
+    const workspaceRoot = currentWorkspaceRoot();
+    const url = new URL(pathname, `${this.backend.apiBase}/`);
+    if (workspaceRoot) {
+      url.searchParams.set("workspace_root", workspaceRoot);
+    }
+    return url.toString();
+  }
+
   private isInsideWorkspace(rootPath: string, targetPath: string) {
     return targetPath === rootPath || targetPath.startsWith(`${rootPath}${path.sep}`);
   }
@@ -381,6 +403,24 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
 
 function normalizeContextMode(value: unknown): AgentContextMode {
   return value === "ai_auto" || value === "hybrid" ? value : "manual";
+}
+
+function currentWorkspaceRoot(): string {
+  return normalizeWorkspaceRoot(vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? "");
+}
+
+function normalizeWorkspaceRoot(value: unknown): string {
+  let normalized = String(value || "").trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  if (/^[A-Za-z]:\//.test(normalized)) {
+    normalized = normalized.toLowerCase();
+  }
+  return normalized;
+}
+
+function workspaceMatches(expectedRoot: unknown, actualRoot: string): boolean {
+  const expected = normalizeWorkspaceRoot(expectedRoot);
+  if (!expected) return true;
+  return expected === normalizeWorkspaceRoot(actualRoot);
 }
 
 function sanitizeRelativePaths(paths: string[]): string[] {

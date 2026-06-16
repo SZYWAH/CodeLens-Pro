@@ -155,6 +155,12 @@ export class CodeLensWebviewViewProvider implements vscode.WebviewViewProvider {
       await this.reportAgentPlanResult(plan, "failed", "未打开 VS Code 工作区，无法应用计划。");
       return;
     }
+    if (plan.workspace_root && !workspaceRootMatches(plan.workspace_root, workspaceFolder.uri.fsPath)) {
+      const message = "当前 Web 任务绑定的 VS Code 工作区未在线，或与当前窗口不一致。";
+      vscode.window.showWarningMessage(message);
+      await this.reportAgentPlanResult(plan, "failed", message);
+      return;
+    }
 
     const confirmation = await vscode.window.showWarningMessage(
       `应用 Agent 计划：${plan.summary || "未命名计划"}。将执行 ${plan.operations.length} 个文件操作。`,
@@ -249,4 +255,16 @@ export class CodeLensWebviewViewProvider implements vscode.WebviewViewProvider {
       void this.view.webview.postMessage(message);
     }
   }
+}
+
+function normalizeWorkspaceRoot(value: unknown): string {
+  let normalized = String(value || "").trim().replace(/\\/g, "/").replace(/\/+$/, "");
+  if (/^[A-Za-z]:\//.test(normalized)) {
+    normalized = normalized.toLowerCase();
+  }
+  return normalized;
+}
+
+function workspaceRootMatches(expectedRoot: unknown, actualRoot: string): boolean {
+  return normalizeWorkspaceRoot(expectedRoot) === normalizeWorkspaceRoot(actualRoot);
 }

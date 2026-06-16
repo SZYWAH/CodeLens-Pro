@@ -84,6 +84,7 @@ class AgentPlan(SQLModel, table=True):
     operations_json: str = Field(default="[]", sa_column=Column(LONGTEXT))
     selected_files_json: str = Field(default="[]", sa_column=Column(LONGTEXT))
     context_mode: str = Field(default="manual", max_length=24, index=True)
+    workspace_root: str = Field(default="", max_length=1024, index=True)
     status: str = Field(default="pending", max_length=24, index=True)
     source: str = Field(default="plugin", max_length=24, index=True)
     apply_result: str | None = Field(default=None, sa_column=Column(LONGTEXT))

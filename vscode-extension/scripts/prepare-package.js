@@ -7,7 +7,6 @@ const projectRoot = path.resolve(extensionRoot, "..");
 const entries = [
   ["vscode-extension/webview-mini/dist", "webview-mini-dist"],
   ["backend", "backend"],
-  ["CodeLens", "CodeLens"],
   ["alembic.ini", "alembic.ini"],
   ["requirements.txt", "requirements.txt"],
   [".env.example", ".env.example"],

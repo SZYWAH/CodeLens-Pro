@@ -54,10 +54,11 @@ export function AgentPage({
   const [projectGuideLoading, setProjectGuideLoading] = useState(false);
   const [projectGuideError, setProjectGuideError] = useState("");
   const workspaceAnchorRef = useRef<HTMLDivElement | null>(null);
+  const selectedWorkspaceRootRef = useRef<string | null>(null);
   const [workspacePopoverStyle, setWorkspacePopoverStyle] = useState<CSSProperties>({});
   const [expandedTreePaths, setExpandedTreePaths] = useState<Set<string>>(() => new Set([""]));
   const [selectedFilePaths, setSelectedFilePaths] = useState<string[]>([]);
-  const [contextMode, setContextMode] = useState<AgentContextMode>("manual");
+  const [contextMode, setContextMode] = useState<AgentContextMode>("ai_auto");
   const workspacePanelOpen = workspaceOpen || workspaceHoverOpen;
   const webApiBase = getApiBase() || "同源 /api";
   const workspaceState = getWorkspaceConnectionState(workspace);
@@ -93,7 +94,19 @@ export function AgentPage({
     setWorkspaceError("");
     setWorkspaceNotice("");
     try {
-      setWorkspace(await api.currentWorkspace());
+      const lockedRoot = selectedWorkspaceRootRef.current;
+      const snapshot = await api.currentWorkspace(lockedRoot);
+      if (!lockedRoot && snapshot.workspace_root) {
+        selectedWorkspaceRootRef.current = snapshot.workspace_root;
+      }
+      if (lockedRoot && !snapshot.workspace_root) {
+        setWorkspace({
+          ...snapshot,
+          workspace_root: lockedRoot,
+        });
+      } else {
+        setWorkspace(snapshot);
+      }
     } catch (exc) {
       setWorkspaceError(exc instanceof Error ? exc.message : "当前项目状态加载失败");
     } finally {
@@ -105,7 +118,7 @@ export function AgentPage({
     setProjectGuideLoading(true);
     setProjectGuideError("");
     try {
-      setProjectGuide(await api.projectGuide());
+      setProjectGuide(await api.projectGuide(workspace?.workspace_root ?? null));
     } catch (exc) {
       setProjectGuideError(exc instanceof Error ? exc.message : "项目导读加载失败");
     } finally {
@@ -127,6 +140,7 @@ export function AgentPage({
   useEffect(() => {
     setExpandedTreePaths(new Set([""]));
     setSelectedFilePaths([]);
+    selectedWorkspaceRootRef.current = workspace?.workspace_root ?? null;
   }, [workspace?.workspace_root]);
 
   useEffect(() => {

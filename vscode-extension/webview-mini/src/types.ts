@@ -121,6 +121,7 @@ export type AgentPlan = {
   assumptions: string[];
   warnings: string[];
   operations: AgentOperation[];
+  workspace_root?: string | null;
   status?: "pending" | "applied" | "failed" | "rejected" | string;
   source?: "web" | "plugin" | string;
   instruction?: string;

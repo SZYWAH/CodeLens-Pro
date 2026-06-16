@@ -348,6 +348,13 @@ export function ChatPanel({
   async function sendMessage(rawMessage: string, options: { clearInput?: boolean } = {}) {
     const message = rawMessage.trim();
     if (!message || loading || (isReportMode && !reportId)) return;
+    if (isAgentMode) {
+      const workspaceState = getWorkspaceConnectionState(workspace);
+      if (!workspace?.workspace_root || workspaceState === "waiting" || workspaceState === "blocked") {
+        setError("请先打开 CodeLens Pro VS Code 插件，并确认当前项目已同步到 Web Agent。");
+        return;
+      }
+    }
 
     setError("");
     setAgentStatusMessage("");
@@ -421,7 +428,7 @@ export function ChatPanel({
               },
               onError: (messageText) => {
                 setAgentStatusMessage("");
-                setError(messageText);
+                setError(agentFriendlyError(messageText, true));
                 setLoading(false);
               }
             }
@@ -491,13 +498,13 @@ export function ChatPanel({
             setLoading(false);
           },
           onError: (messageText) => {
-            setError(messageText);
+            setError(agentFriendlyError(messageText, isAgentMode));
             setLoading(false);
           }
         }
       );
     } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "发送失败");
+      setError(agentFriendlyError(exc instanceof Error ? exc.message : "发送失败", isAgentMode));
       setLoading(false);
     }
   }
@@ -1119,6 +1126,11 @@ function getWorkspaceConnectionState(snapshot: WorkspaceSnapshot | null): AgentS
   if (snapshot.status === "no_workspace") return "blocked";
   if (ageSeconds > WORKSPACE_HEARTBEAT_DELAYED_SECONDS) return "delayed";
   return "ready";
+}
+
+function agentFriendlyError(message: string, isAgentMode: boolean) {
+  if (!isAgentMode || !message.includes("Agent 计划不是有效 JSON")) return message;
+  return `${message}\n插件已读取上下文，失败发生在模型生成可确认修改计划阶段。请重试，或缩小上下文后再生成。`;
 }
 
 function AgentPlanCard({

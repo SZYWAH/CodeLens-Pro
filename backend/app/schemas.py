@@ -118,6 +118,7 @@ class AgentChatContextRequestItem(BaseModel):
     message: str
     selected_file_paths: list[str] = Field(default_factory=list)
     context_mode: AgentContextMode = "manual"
+    workspace_root: str | None = None
     created_at: datetime
 
 
@@ -146,6 +147,7 @@ class AgentPlanResponse(BaseModel):
     operations: list[AgentOperation] = Field(default_factory=list)
     selected_file_paths: list[str] = Field(default_factory=list)
     context_mode: AgentContextMode = "manual"
+    workspace_root: str | None = None
     status: str = "pending"
     source: str = "plugin"
 

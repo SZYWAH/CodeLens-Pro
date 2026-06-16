@@ -73,7 +73,10 @@ export const api = {
   bootstrap: () => request<BootstrapResponse>("/api/ui/bootstrap"),
   recentActivity: (limit = 16) => request<ActivityItem[]>(`/api/activity/recent?limit=${limit}`),
   activityConstellation: (limit = 300) => request<ActivityStarItem[]>(`/api/activity/constellation?limit=${limit}`),
-  currentWorkspace: () => request<WorkspaceSnapshot>("/api/agent/workspace/current"),
+  currentWorkspace: (workspace_root?: string | null) => {
+    const suffix = workspace_root ? `?workspace_root=${encodeURIComponent(workspace_root)}` : "";
+    return request<WorkspaceSnapshot>(`/api/agent/workspace/current${suffix}`);
+  },
   dailyLogCalendar: (days = 30) => request<DailyWorkLogCalendarItem[]>(`/api/daily-logs/calendar?days=${days}`),
   dailyLogCalendarMonth: (month: string) => request<DailyWorkLogCalendarItem[]>(`/api/daily-logs/calendar?month=${encodeURIComponent(month)}`),
   dailyLog: (date: string) => request<DailyWorkLogItem>(`/api/daily-logs/${date}`),
@@ -137,7 +140,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ suggestions })
     }),
-  projectGuide: () => request<ProjectGuideResponse>("/api/learning/project-guide"),
+  projectGuide: (workspace_root?: string | null) => {
+    const suffix = workspace_root ? `?workspace_root=${encodeURIComponent(workspace_root)}` : "";
+    return request<ProjectGuideResponse>(`/api/learning/project-guide${suffix}`);
+  },
   learningReview: (period: "week" | "month" | "all" = "week") => request<LearningReviewResponse>(`/api/learning/review?period=${period}`),
   reportOutline: (id: string) => request<{ report_id: string; outline: ReportOutlineItem[] }>(`/api/reports/${id}/outline`),
   staticAnalyze: (code: string, language_code: string) =>

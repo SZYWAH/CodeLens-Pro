@@ -110,6 +110,7 @@ export type AgentPlan = {
   operations: AgentOperation[];
   selected_file_paths?: string[];
   context_mode?: AgentContextMode;
+  workspace_root?: string | null;
   status?: "pending" | "planned" | "waiting_confirm" | "confirmed" | "applied" | "failed" | "rejected" | string;
   source?: "web" | "plugin" | string;
   apply_result?: string | null;

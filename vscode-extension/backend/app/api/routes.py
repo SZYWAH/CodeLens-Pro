@@ -100,6 +100,7 @@ WORKSPACE_STALE_SECONDS = 60
 AGENT_CHAT_CONTEXT_TIMEOUT_SECONDS = 30
 AGENT_CHAT_CONTEXT_TTL_SECONDS = 120
 _agent_workspace_snapshot: AgentWorkspaceSnapshot | None = None
+_agent_workspace_snapshots: dict[str, AgentWorkspaceSnapshot] = {}
 _agent_chat_context_requests: dict[str, dict[str, Any]] = {}
 
 
@@ -601,8 +602,11 @@ def apply_learning_card_tag_suggestions(
 
 
 @router.get("/learning/project-guide", response_model=ProjectGuideResponse)
-def read_project_guide(session: Session = Depends(get_session)) -> ProjectGuideResponse:
-    return _project_guide(session)
+def read_project_guide(
+    workspace_root: str | None = None,
+    session: Session = Depends(get_session),
+) -> ProjectGuideResponse:
+    return _project_guide(session, workspace_root=workspace_root)
 
 
 @router.get("/learning/review", response_model=LearningReviewResponse)
@@ -787,17 +791,30 @@ def update_daily_work_log(
 def update_agent_workspace_heartbeat(payload: AgentWorkspaceHeartbeatRequest) -> AgentWorkspaceSnapshot:
     global _agent_workspace_snapshot
     now = datetime.utcnow()
-    _agent_workspace_snapshot = AgentWorkspaceSnapshot(
-        **payload.model_dump(),
+    normalized_workspace_root = _normalize_workspace_root(payload.workspace_root)
+    payload_data = payload.model_dump()
+    payload_data["workspace_root"] = normalized_workspace_root
+    snapshot = AgentWorkspaceSnapshot(
+        **payload_data,
         connected=True,
         stale=False,
         updated_at=now,
     )
-    return _agent_workspace_snapshot
+    if normalized_workspace_root:
+        _agent_workspace_snapshot = snapshot
+        _agent_workspace_snapshots[normalized_workspace_root] = snapshot
+    elif _agent_workspace_snapshot is None:
+        _agent_workspace_snapshot = snapshot
+    return snapshot
 
 
 @router.get("/agent/workspace/current", response_model=AgentWorkspaceSnapshot)
-def read_current_agent_workspace() -> AgentWorkspaceSnapshot:
+def read_current_agent_workspace(
+    workspace_root: str | None = None,
+) -> AgentWorkspaceSnapshot:
+    normalized_workspace_root = _normalize_workspace_root(workspace_root)
+    if normalized_workspace_root:
+        return _workspace_snapshot_response(_agent_workspace_snapshots.get(normalized_workspace_root))
     return _workspace_snapshot_response(_agent_workspace_snapshot)
 
 
@@ -886,7 +903,12 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
             session.flush()
             created_session = True
 
+        workspace_root = _normalize_workspace_root(payload.workspace_root)
         if payload.defer_to_plugin and payload.source == "web" and not existing_plan:
+            if not workspace_root:
+                raise HTTPException(status_code=400, detail="当前 Web Agent 没有关联 VS Code 工作区，无法交给插件处理。")
+            if not _agent_workspace_root_is_online(workspace_root):
+                raise HTTPException(status_code=409, detail="当前 Web 任务绑定的 VS Code 工作区未在线，请检查是否打开了正确的 VS Code 窗口。")
             selected_file_paths = _normalize_selected_file_paths(payload.selected_file_paths)
             session.add(ChatMessage(session_id=chat_session.id, role="user", content=instruction))
             plan_row = AgentPlan(
@@ -898,6 +920,7 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
                 operations_json=json.dumps([], ensure_ascii=False),
                 selected_files_json=json.dumps(selected_file_paths, ensure_ascii=False),
                 context_mode=payload.context_mode,
+                workspace_root=workspace_root,
                 status="pending",
                 source="web",
                 apply_result="任务已保存，等待 VS Code 插件处理。",
@@ -929,6 +952,7 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
                 operations=_safe_json_list(plan_row.operations_json),
                 selected_file_paths=_selected_file_paths(plan_row),
                 context_mode=_context_mode(plan_row),
+                workspace_root=plan_row.workspace_root or None,
             )
 
         history_rows = list(
@@ -1007,6 +1031,8 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
                 if payload.selected_file_paths:
                     plan_row.selected_files_json = json.dumps(_normalize_selected_file_paths(payload.selected_file_paths), ensure_ascii=False)
                 plan_row.context_mode = payload.context_mode
+                if workspace_root or not plan_row.workspace_root:
+                    plan_row.workspace_root = workspace_root
                 plan_row.status = "failed"
                 plan_row.source = plan_row.source or source
                 plan_row.apply_result = failure_message
@@ -1021,6 +1047,7 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
                     operations_json=json.dumps([], ensure_ascii=False),
                     selected_files_json=json.dumps(_normalize_selected_file_paths(payload.selected_file_paths), ensure_ascii=False),
                     context_mode=payload.context_mode,
+                    workspace_root=workspace_root,
                     status="failed",
                     source=source,
                     apply_result=failure_message,
@@ -1046,6 +1073,7 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
             operations=_safe_json_list(plan_row.operations_json),
             selected_file_paths=_selected_file_paths(plan_row),
             context_mode=_context_mode(plan_row),
+            workspace_root=plan_row.workspace_root or None,
         )
 
     with Session(engine) as session:
@@ -1065,6 +1093,8 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
             if payload.selected_file_paths:
                 plan_row.selected_files_json = json.dumps(_normalize_selected_file_paths(payload.selected_file_paths), ensure_ascii=False)
             plan_row.context_mode = payload.context_mode
+            if workspace_root or not plan_row.workspace_root:
+                plan_row.workspace_root = workspace_root
             plan_row.status = "waiting_confirm" if source == "web" else "pending"
             plan_row.source = source
             plan_row.apply_result = "网页已确认前的插件计划，等待下一步处理。" if source == "web" else "VS Code 插件已生成计划，等待用户确认应用。"
@@ -1079,6 +1109,7 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
                 operations_json=json.dumps(plan.get("operations", []), ensure_ascii=False),
                 selected_files_json=json.dumps(_normalize_selected_file_paths(payload.selected_file_paths), ensure_ascii=False),
                 context_mode=payload.context_mode,
+                workspace_root=workspace_root,
                 status="pending",
                 source=source,
             )
@@ -1112,6 +1143,7 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
         operations=_safe_json_list(plan_row.operations_json),
         selected_file_paths=_selected_file_paths(plan_row),
         context_mode=_context_mode(plan_row),
+        workspace_root=plan_row.workspace_root or None,
     )
 
 
@@ -1126,8 +1158,29 @@ def stream_agent_message(payload: AgentMessageStreamRequest) -> StreamingRespons
                 return
 
             selected_paths = _normalize_selected_file_paths(payload.selected_file_paths)
+            workspace_root = _normalize_workspace_root(payload.workspace_root)
             should_plan = _agent_message_should_plan(payload.intent, payload.message)
             if should_plan:
+                if payload.source == "web" and not workspace_root:
+                    yield sse_event(
+                        "error",
+                        error_payload(
+                            "AGENT_WORKSPACE_MISSING",
+                            "当前 Web Agent 没有关联 VS Code 工作区，无法交给插件处理。",
+                            "请先打开 CodeLens Pro VS Code 插件，并确认当前项目已同步到 Web Agent。",
+                        ),
+                    )
+                    return
+                if payload.source == "web" and not _agent_workspace_root_is_online(workspace_root):
+                    yield sse_event(
+                        "error",
+                        error_payload(
+                            "AGENT_WORKSPACE_OFFLINE",
+                            "当前 Web 任务绑定的 VS Code 工作区未在线，无法交给插件处理。",
+                            "请检查 VS Code 是否打开了 Web Agent 当前显示的项目，并等待插件心跳同步后重试。",
+                        ),
+                    )
+                    return
                 with Session(engine) as session:
                     chat_session = session.get(ChatSession, payload.session_id) if payload.session_id else None
                     if chat_session and chat_session.context_type != "agent":
@@ -1152,6 +1205,7 @@ def stream_agent_message(payload: AgentMessageStreamRequest) -> StreamingRespons
                         operations_json=json.dumps([], ensure_ascii=False),
                         selected_files_json=json.dumps(selected_paths, ensure_ascii=False),
                         context_mode=payload.context_mode,
+                        workspace_root=workspace_root,
                         status="pending",
                         source="web",
                         apply_result="任务已保存，等待 VS Code 插件读取上下文并生成计划。",
@@ -1229,19 +1283,45 @@ def stream_agent_message(payload: AgentMessageStreamRequest) -> StreamingRespons
                 session_id = chat_session.id
 
             files = [item.model_dump() for item in payload.files]
-            if payload.source == "web" and selected_paths and not files:
+            needs_plugin_context = (
+                payload.source == "web"
+                and not files
+                and (bool(selected_paths) or payload.context_mode != "manual")
+            )
+            if needs_plugin_context:
+                if not workspace_root:
+                    yield sse_event(
+                        "error",
+                        error_payload(
+                            "AGENT_WORKSPACE_MISSING",
+                            "当前 Web Agent 没有关联 VS Code 工作区，无法读取真实项目文件。",
+                            "请先打开 CodeLens Pro VS Code 插件，等待当前项目同步后再发送。",
+                        ),
+                    )
+                    return
+                if not _agent_workspace_root_is_online(workspace_root):
+                    yield sse_event(
+                        "error",
+                        error_payload(
+                            "AGENT_WORKSPACE_OFFLINE",
+                            "当前 Web 任务绑定的 VS Code 工作区未在线，无法读取真实项目文件。",
+                            "请检查 VS Code 是否打开了 Web Agent 当前显示的项目，并等待插件心跳同步后重试。",
+                        ),
+                    )
+                    return
                 request_id = _create_agent_chat_context_request(
                     session_id=session_id,
                     message=payload.message,
                     selected_file_paths=selected_paths,
                     context_mode=payload.context_mode,
+                    workspace_root=workspace_root,
                 )
                 yield sse_event(
                     "status",
                     {
                         "phase": "agent_context",
                         "request_id": request_id,
-                        "message": "正在等待 VS Code 插件读取所选文件...",
+                        "message": "正在等待 VS Code 插件读取当前项目文件...",
                     },
                 )
                 context_result = _wait_agent_chat_context_result(request_id)
@@ -1251,7 +1331,7 @@ def stream_agent_message(payload: AgentMessageStreamRequest) -> StreamingRespons
                         error_payload(
                             "AGENT_CONTEXT_READ_FAILED",
                             str(context_result.get("message") or "所选文件读取失败，无法继续 Agent 对话。"),
-                            "请确认 VS Code 插件已连接、当前工作区已打开，并重新选择可读取的文件。",
+                            "请确认 VS Code 插件已连接到当前 Web 页面显示的工作区，并重新选择可读取的文件。",
                         ),
                     )
                     return
@@ -1339,19 +1419,46 @@ def stream_agent_chat(payload: AgentChatStreamRequest) -> StreamingResponse:
 
             files = [item.model_dump() for item in payload.files]
             selected_paths = _normalize_selected_file_paths(payload.selected_file_paths)
-            if payload.source == "web" and selected_paths and not files:
+            workspace_root = _normalize_workspace_root(payload.workspace_root)
+            needs_plugin_context = (
+                payload.source == "web"
+                and not files
+                and (bool(selected_paths) or payload.context_mode != "manual")
+            )
+            if needs_plugin_context:
+                if not workspace_root:
+                    yield sse_event(
+                        "error",
+                        error_payload(
+                            "AGENT_WORKSPACE_MISSING",
+                            "当前 Web Agent 没有关联 VS Code 工作区，无法读取真实项目文件。",
+                            "请先打开 CodeLens Pro VS Code 插件，等待当前项目同步后再发送。",
+                        ),
+                    )
+                    return
+                if not _agent_workspace_root_is_online(workspace_root):
+                    yield sse_event(
+                        "error",
+                        error_payload(
+                            "AGENT_WORKSPACE_OFFLINE",
+                            "当前 Web 任务绑定的 VS Code 工作区未在线，无法读取真实项目文件。",
+                            "请检查 VS Code 是否打开了 Web Agent 当前显示的项目，并等待插件心跳同步后重试。",
+                        ),
+                    )
+                    return
                 request_id = _create_agent_chat_context_request(
                     session_id=session_id,
                     message=payload.message,
                     selected_file_paths=selected_paths,
                     context_mode=payload.context_mode,
+                    workspace_root=workspace_root,
                 )
                 yield sse_event(
                     "status",
                     {
                         "phase": "agent_context",
                         "request_id": request_id,
-                        "message": "正在等待 VS Code 插件读取所选文件...",
+                        "message": "正在等待 VS Code 插件读取当前项目文件...",
                     },
                 )
                 context_result = _wait_agent_chat_context_result(request_id)
@@ -1361,7 +1468,7 @@ def stream_agent_chat(payload: AgentChatStreamRequest) -> StreamingResponse:
                         error_payload(
                             "AGENT_CONTEXT_READ_FAILED",
                             str(context_result.get("message") or "所选文件读取失败，无法继续 Agent 讨论。"),
-                            "请确认 VS Code 插件已连接、当前工作区已打开，并重新选择可读取的文件。",
+                            "请确认 VS Code 插件已连接到当前 Web 页面显示的工作区，并重新选择可读取的文件。",
                         ),
                     )
                     return
@@ -1413,8 +1520,12 @@ def stream_agent_chat(payload: AgentChatStreamRequest) -> StreamingResponse:
 
 
 @router.get("/agent/chat-context/pending", response_model=list[AgentChatContextRequestItem])
-def list_pending_agent_chat_contexts(limit: int = Query(default=20, ge=1, le=50)) -> list[AgentChatContextRequestItem]:
+def list_pending_agent_chat_contexts(
+    limit: int = Query(default=20, ge=1, le=50),
+    workspace_root: str | None = None,
+) -> list[AgentChatContextRequestItem]:
     _prune_agent_chat_context_requests()
+    normalized_workspace_root = _normalize_workspace_root(workspace_root)
     items = [
         AgentChatContextRequestItem(
             request_id=request_id,
@@ -1422,10 +1533,15 @@ def list_pending_agent_chat_contexts(limit: int = Query(default=20, ge=1, le=50)
             message=str(item["message"]),
             selected_file_paths=_normalize_selected_file_paths(item.get("selected_file_paths") or []),
             context_mode=item.get("context_mode") if item.get("context_mode") in {"manual", "ai_auto", "hybrid"} else "manual",
+            workspace_root=str(item.get("workspace_root") or "") or None,
             created_at=item["created_at"],
         )
         for request_id, item in _agent_chat_context_requests.items()
         if item.get("status") == "pending"
+        and (
+            not normalized_workspace_root
+            or _normalize_workspace_root(item.get("workspace_root")) == normalized_workspace_root
+        )
     ]
     items.sort(key=lambda item: item.created_at)
     return items[:limit]
@@ -1452,16 +1568,20 @@ def update_agent_chat_context_result(request_id: str, payload: AgentChatContextR
 @router.get("/agent/pending", response_model=list[AgentPlanItem])
 def list_pending_agent_tasks(
     limit: int = Query(default=20, ge=1, le=50),
+    workspace_root: str | None = None,
     session: Session = Depends(get_session),
 ) -> list[AgentPlanItem]:
+    normalized_workspace_root = _normalize_workspace_root(workspace_root)
+    statement = (
+        select(AgentPlan)
+        .where(AgentPlan.source == "web")
+        .where(AgentPlan.status == "pending")
+    )
+    if normalized_workspace_root:
+        statement = statement.where(AgentPlan.workspace_root == normalized_workspace_root)
+    statement = statement.order_by(AgentPlan.updated_at.desc()).limit(limit)
     plans = list(
-        session.exec(
-            select(AgentPlan)
-            .where(AgentPlan.source == "web")
-            .where(AgentPlan.status == "pending")
-            .order_by(AgentPlan.updated_at.desc())
-            .limit(limit)
-        ).all()
+        session.exec(statement).all()
     )
     return [_agent_plan_item(item) for item in plans]
 
@@ -1469,15 +1589,19 @@ def list_pending_agent_tasks(
 @router.get("/agent/confirmed", response_model=list[AgentPlanItem])
 def list_confirmed_agent_tasks(
     limit: int = Query(default=20, ge=1, le=50),
+    workspace_root: str | None = None,
     session: Session = Depends(get_session),
 ) -> list[AgentPlanItem]:
+    normalized_workspace_root = _normalize_workspace_root(workspace_root)
+    statement = (
+        select(AgentPlan)
+        .where(AgentPlan.status == "confirmed")
+    )
+    if normalized_workspace_root:
+        statement = statement.where(AgentPlan.workspace_root == normalized_workspace_root)
+    statement = statement.order_by(AgentPlan.updated_at.desc()).limit(limit)
     plans = list(
-        session.exec(
-            select(AgentPlan)
-            .where(AgentPlan.status == "confirmed")
-            .order_by(AgentPlan.updated_at.desc())
-            .limit(limit)
-        ).all()
+        session.exec(statement).all()
     )
     return [_agent_plan_item(item) for item in plans]
 
@@ -1597,6 +1721,14 @@ def _stream_headers() -> dict[str, str]:
     }
 
 
+def _normalize_workspace_root(value: Any) -> str:
+    text = str(value or "").strip().replace("\\", "/")
+    text = re.sub(r"/+$", "", text)
+    if re.match(r"^[A-Za-z]:/", text):
+        text = text.lower()
+    return text
+
+
 def _chat_report_context(report: Report) -> tuple[str, str]:
     if report.report_type == "diff":
         code_context = (
@@ -1678,6 +1810,7 @@ def _create_agent_chat_context_request(
     message: str,
     selected_file_paths: list[str],
     context_mode: str,
+    workspace_root: str | None = None,
 ) -> str:
     request_id = uuid.uuid4().hex
     _agent_chat_context_requests[request_id] = {
@@ -1686,6 +1819,7 @@ def _create_agent_chat_context_request(
         "message": message,
         "selected_file_paths": _normalize_selected_file_paths(selected_file_paths),
         "context_mode": context_mode if context_mode in {"manual", "ai_auto", "hybrid"} else "manual",
+        "workspace_root": _normalize_workspace_root(workspace_root),
         "status": "pending",
         "files": [],
         "created_at": datetime.utcnow(),
@@ -1693,7 +1827,7 @@ def _create_agent_chat_context_request(
     }
     print(
         f"[agent-chat-context] created request={request_id} session={session_id} "
-        f"mode={context_mode} files={len(selected_file_paths)}",
+        f"mode={context_mode} files={len(selected_file_paths)} workspace={_normalize_workspace_root(workspace_root)}",
         flush=True,
     )
     return request_id
@@ -1720,9 +1854,17 @@ def _wait_agent_chat_context_result(request_id: str) -> dict[str, Any]:
         time.sleep(0.3)
     item = _agent_chat_context_requests.pop(request_id, None)
     print(f"[agent-chat-context] timeout request={request_id}", flush=True)
+    workspace_root = _normalize_workspace_root(item.get("workspace_root") if item else "")
     return {
         "status": "failed",
-        "message": str(item.get("message") if item else "") or "等待 VS Code 插件读取上下文超时。",
+        "message": (
+            str(item.get("message") if item else "")
+            or (
+                f"当前 Web 任务绑定的 VS Code 工作区未在线，或 VS Code 插件未在 {AGENT_CHAT_CONTEXT_TIMEOUT_SECONDS} 秒内返回上下文。"
+                if workspace_root
+                else "等待 VS Code 插件读取上下文超时。"
+            )
+        ),
         "files": [],
         "selected_file_paths": [],
     }
@@ -2350,8 +2492,10 @@ def _flatten_workspace_tree(node: dict | None, depth: int = 0) -> list[dict]:
     return result
 
 
-def _project_guide(session: Session | None) -> ProjectGuideResponse:
-    snapshot = _workspace_snapshot_response(_agent_workspace_snapshot)
+def _project_guide(session: Session | None, workspace_root: str | None = None) -> ProjectGuideResponse:
+    normalized_workspace_root = _normalize_workspace_root(workspace_root)
+    snapshot_source = _agent_workspace_snapshots.get(normalized_workspace_root) if normalized_workspace_root else _agent_workspace_snapshot
+    snapshot = _workspace_snapshot_response(snapshot_source)
     workspace_root = Path(snapshot.workspace_root).expanduser() if snapshot.workspace_root else None
     project_structure = _build_project_structure(workspace_root) if workspace_root and workspace_root.exists() else None
     tree_data = project_structure or (snapshot.tree.model_dump() if snapshot.tree else None)
@@ -3289,6 +3433,14 @@ def _workspace_snapshot_response(snapshot: AgentWorkspaceSnapshot | None) -> Age
     return snapshot.model_copy(update={"connected": not stale, "stale": stale})
 
 
+def _agent_workspace_root_is_online(workspace_root: str) -> bool:
+    normalized_workspace_root = _normalize_workspace_root(workspace_root)
+    if not normalized_workspace_root:
+        return False
+    snapshot = _workspace_snapshot_response(_agent_workspace_snapshots.get(normalized_workspace_root))
+    return bool(snapshot.workspace_root and snapshot.connected and not snapshot.stale)
+
+
 def _chat_type_label(context_type: str) -> str:
     if context_type == "report":
         return "报告上下文对话"
@@ -3325,6 +3477,7 @@ def _agent_plan_item(plan: AgentPlan) -> AgentPlanItem:
         operations=_safe_json_list(plan.operations_json),
         selected_file_paths=_selected_file_paths(plan),
         context_mode=_context_mode(plan),
+        workspace_root=plan.workspace_root or None,
         status=plan.status,
         source=plan.source,
         apply_result=plan.apply_result,

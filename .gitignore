@@ -9,3 +9,5 @@ __pycache__/
 logs/
 *.log
 storage/
+CodeLens/report_history/
+vscode-extension/CodeLens/report_history/

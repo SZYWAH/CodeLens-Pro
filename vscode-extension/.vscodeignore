@@ -11,4 +11,5 @@ backend/**/__pycache__/**
 backend/**/*.pyc
 CodeLens/**/__pycache__/**
 CodeLens/**/*.pyc
+CodeLens/report_history/**
 .env
