@@ -33,20 +33,25 @@ class CodeLensAI:
         将页面展示名转换为真实模型名。
 
         例如：
-        - dsV4flash -> deepseek-v4-flash
-        - dsV4pro   -> deepseek-v4-pro
+        - DeepSeek-V4-Flash / dsV4flash -> deepseek-v4-flash
+        - DeepSeek-V4-Pro / dsV4pro     -> deepseek-v4-pro
 
         如果传入的本来就是真实模型名，则直接返回。
         """
         model_options = getattr(config, "MODEL_OPTIONS", {})
+        model_aliases = {
+            "dsV4flash": "DeepSeek-V4-Flash",
+            "dsV4pro": "DeepSeek-V4-Pro",
+        }
+        normalized = model_aliases.get(model, model)
 
-        if model in model_options:
-            return model_options[model]
+        if normalized in model_options:
+            return model_options[normalized]
 
-        if model in model_options.values():
-            return model
+        if normalized in model_options.values():
+            return normalized
 
-        return model
+        return normalized
 
     def set_model(self, model: str):
         """供前端切换模型时调用。"""
@@ -59,7 +64,7 @@ class CodeLensAI:
     def rebuild_client(self):
         """
         如果后续切换供应商、base_url 或 api_key，可以调用这个方法重建客户端。
-        目前切换 dsV4pro / dsV4flash 只需要改 self.model，不需要重建 client。
+        目前切换 DeepSeek-V4-Pro / DeepSeek-V4-Flash 只需要改 self.model，不需要重建 client。
         """
         self.client = OpenAI(
             api_key=getattr(config, "API_KEY", ""),

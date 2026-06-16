@@ -15,11 +15,11 @@ BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1").strip()
 #  模型配置
 # ============================================================
 DEFAULT_MODEL = os.getenv("DEEPSEEK_DEFAULT_MODEL", "deepseek-v4-flash")
-DEFAULT_MODEL_LABEL = os.getenv("DEEPSEEK_DEFAULT_MODEL_LABEL", "dsV4flash")
+DEFAULT_MODEL_LABEL = os.getenv("DEEPSEEK_DEFAULT_MODEL_LABEL", "DeepSeek-V4-Flash")
 
 MODEL_OPTIONS = {
-    "dsV4flash": "deepseek-v4-flash",
-    "dsV4pro": "deepseek-v4-pro",
+    "DeepSeek-V4-Flash": "deepseek-v4-flash",
+    "DeepSeek-V4-Pro": "deepseek-v4-pro",
 }
 
 # 预留：后续如果接入多个供应商，可以在这里扩展。
@@ -168,6 +168,27 @@ FUNCTION_PROMPTS = {
         "### 1. 相关代码摘录\n"
         "### 2. 知识点说明\n"
         "### 3. 学习建议\n\n"
+        "代码如下：\n"
+    ),
+    "func_trace": (
+        "你是一名编程运行过程讲解助手。请对下面 {language_label} 函数或方法做代码运行推演，帮助初学者理解程序如何一步步执行。\n\n"
+        f"{COMMON_REPORT_RULES}\n"
+        "第一部分必须先输出一个 fenced code block，语言标记必须是 ```{language_code}。"
+        "在代码块中尽量保留原代码结构，用中文注释标出执行顺序、关键变量变化、数据流动、循环/递归进入与退出、返回值如何产生。"
+        "如果原代码较长，可以截取最关键路径，但必须让注释能串起完整运行过程。\n\n"
+        "输出格式：\n"
+        "### 1. 运行注释版代码\n"
+        "```{language_code}\n"
+        "{comment_marker} 在这里输出带执行流/数据流注释的代码\n"
+        "```\n\n"
+        "### 2. 执行路径\n"
+        "按真实运行顺序分步骤说明，从入口、分支、循环或递归一直到返回结果。\n\n"
+        "### 3. 关键变量时间线\n"
+        "用表格或列表展示关键变量在不同阶段的值或状态变化。\n\n"
+        "### 4. 易误解点\n"
+        "指出初学者容易看错的执行顺序、边界条件、作用域或数据流。\n\n"
+        "### 5. 可手动调试的方法\n"
+        "给出 2-4 条可以用断点、print/log 或小输入样例验证运行过程的方法。\n\n"
         "代码如下：\n"
     ),
 }

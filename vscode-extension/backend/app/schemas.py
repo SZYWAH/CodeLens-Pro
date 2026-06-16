@@ -17,6 +17,7 @@ class ReportStreamRequest(BaseModel):
     language_code: str = "python"
     language_label: str = "Python"
     model: str | None = None
+    generate_learning_card_candidates: bool = False
 
 
 class DiffStreamRequest(BaseModel):
@@ -26,6 +27,7 @@ class DiffStreamRequest(BaseModel):
     language_code: str = "python"
     language_label: str = "Python"
     model: str | None = None
+    generate_learning_card_candidates: bool = False
 
 
 class ChatStreamRequest(BaseModel):
@@ -98,9 +100,27 @@ class AgentChatStreamRequest(BaseModel):
     code_context: str = ""
     report_context: str | None = None
     files: list[AgentFileContext] = Field(default_factory=list)
+    selected_file_paths: list[str] = Field(default_factory=list)
+    context_mode: AgentContextMode = "manual"
     model: str | None = None
     source: str = "plugin"
     workspace_root: str | None = None
+
+
+class AgentChatContextRequestItem(BaseModel):
+    request_id: str
+    session_id: str
+    message: str
+    selected_file_paths: list[str] = Field(default_factory=list)
+    context_mode: AgentContextMode = "manual"
+    created_at: datetime
+
+
+class AgentChatContextResultRequest(BaseModel):
+    status: Literal["ok", "failed"]
+    message: str = ""
+    files: list[AgentFileContext] = Field(default_factory=list)
+    selected_file_paths: list[str] = Field(default_factory=list)
 
 
 class AgentOperation(BaseModel):
@@ -254,6 +274,31 @@ class LearningCardCreateRequest(BaseModel):
     status: str = "new"
 
 
+class LearningCardCandidate(BaseModel):
+    title: str
+    explanation: str
+    language_label: str = "通用"
+    difficulty: str = "入门"
+    tags: list[str] = Field(default_factory=list)
+    source_type: str = "report"
+    source_id: str | None = None
+    code_excerpt: str | None = None
+    detail_markdown: str | None = None
+    resource_links: list[dict[str, str]] = Field(default_factory=list)
+    source_reason: str | None = None
+    confidence: float | None = None
+
+
+class LearningCardBulkCreateRequest(BaseModel):
+    cards: list[LearningCardCandidate] = Field(default_factory=list)
+
+
+class LearningCardBulkCreateResponse(BaseModel):
+    created: int
+    skipped: int
+    cards: list[LearningCardItem] = Field(default_factory=list)
+
+
 class LearningCardUpdateRequest(BaseModel):
     title: str | None = None
     explanation: str | None = None
@@ -269,11 +314,41 @@ class LearningCardUpdateRequest(BaseModel):
 
 class LearningCardGenerateRequest(BaseModel):
     source_limit: int = Field(default=8, ge=1, le=30)
+    model: str | None = None
 
 
 class LearningCardGenerateResponse(BaseModel):
     created: int
     skipped: int
+    cards: list[LearningCardItem] = Field(default_factory=list)
+    candidates: list[LearningCardCandidate] = Field(default_factory=list)
+
+
+class LearningCardTagSuggestion(BaseModel):
+    id: str
+    action: str
+    title: str
+    reason: str
+    card_ids: list[str] = Field(default_factory=list)
+    from_tags: list[str] = Field(default_factory=list)
+    to_tags: list[str] = Field(default_factory=list)
+
+
+class LearningCardTagSuggestionRequest(BaseModel):
+    limit: int = Field(default=120, ge=1, le=300)
+    model: str | None = None
+
+
+class LearningCardTagSuggestionResponse(BaseModel):
+    suggestions: list[LearningCardTagSuggestion] = Field(default_factory=list)
+
+
+class LearningCardApplyTagSuggestionsRequest(BaseModel):
+    suggestions: list[LearningCardTagSuggestion] = Field(default_factory=list)
+
+
+class LearningCardApplyTagSuggestionsResponse(BaseModel):
+    updated: int
     cards: list[LearningCardItem] = Field(default_factory=list)
 
 

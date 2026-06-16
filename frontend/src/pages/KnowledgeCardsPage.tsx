@@ -37,6 +37,14 @@ const statusOptions: Array<{ value: LearningCardStatus | ""; label: string }> = 
   { value: "mastered", label: "已掌握" },
 ];
 
+const difficultyOptions: Array<{ value: string; label: string }> = [
+  { value: "", label: "全部" },
+  { value: "入门", label: "入门" },
+  { value: "进阶", label: "进阶" },
+  { value: "项目", label: "项目" },
+  { value: "面试", label: "面试" },
+];
+
 export function KnowledgeCardsPage({
   openCardId,
   onOpenCardConsumed,
@@ -49,8 +57,10 @@ export function KnowledgeCardsPage({
   const [cards, setCards] = useState<LearningCardItem[]>([]);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<LearningCardStatus | "">("");
+  const [difficulty, setDifficulty] = useState("");
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
   const [statusMenuOpen, setStatusMenuOpen] = useState(false);
+  const [difficultyMenuOpen, setDifficultyMenuOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState("");
@@ -72,24 +82,33 @@ export function KnowledgeCardsPage({
   const [tagSuggesting, setTagSuggesting] = useState(false);
   const [tagApplying, setTagApplying] = useState(false);
 
+  const filteredCardsWithoutDate = useMemo(
+    () => cards.filter((card) => {
+      if (status && card.status !== status) return false;
+      if (difficulty && card.difficulty.trim() !== difficulty) return false;
+      return true;
+    }),
+    [cards, difficulty, status],
+  );
   const dateMarkers = useMemo(() => {
-    return cards.reduce<Record<string, number>>((acc, card) => {
+    return filteredCardsWithoutDate.reduce<Record<string, number>>((acc, card) => {
       const key = dateKeyFromIso(card.created_at);
       acc[key] = (acc[key] ?? 0) + 1;
       return acc;
     }, {});
-  }, [cards]);
+  }, [filteredCardsWithoutDate]);
   const visibleCards = useMemo(
-    () => selectedDate ? cards.filter((card) => dateKeyFromIso(card.created_at) === selectedDate) : cards,
-    [cards, selectedDate],
+    () => selectedDate ? filteredCardsWithoutDate.filter((card) => dateKeyFromIso(card.created_at) === selectedDate) : filteredCardsWithoutDate,
+    [filteredCardsWithoutDate, selectedDate],
   );
   const statusLabelText = statusOptions.find((option) => option.value === status)?.label ?? "全部";
+  const difficultyLabelText = difficultyOptions.find((option) => option.value === difficulty)?.label ?? "全部";
 
   async function load() {
     setLoading(true);
     setError("");
     try {
-      setCards(await api.learningCards({ query, status: status || undefined }));
+      setCards(await api.learningCards({ query }));
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "知识卡片加载失败");
     } finally {
@@ -99,7 +118,7 @@ export function KnowledgeCardsPage({
 
   useEffect(() => {
     void load();
-  }, [status]);
+  }, []);
 
   useEffect(() => {
     if (!openCardId || !cards.length) return;
@@ -116,9 +135,9 @@ export function KnowledgeCardsPage({
     setError("");
     setCandidateCards([]);
     try {
-      const result = await api.generateLearningCards(12);
+      const result = await api.generateLearningCards(10);
       setCandidateCards(result.candidates ?? []);
-      setNotice(result.candidates?.length ? `已从历史报告提炼 ${result.candidates.length} 张候选卡片，跳过 ${result.skipped} 个重复知识点。` : "未从历史报告中提炼到新的候选卡片。");
+      setNotice(result.candidates?.length ? `已从未沉淀报告提炼 ${result.candidates.length} 张候选卡片，跳过 ${result.skipped} 个重复知识点。` : "未从未沉淀报告中提炼到新的候选卡片。");
     } catch (exc) {
       setError(exc instanceof Error ? exc.message : "生成知识卡片失败");
     } finally {
@@ -312,7 +331,7 @@ export function KnowledgeCardsPage({
         <div className="learning-hero-actions learning-card-hero-actions">
           <button className="btn btn-primary" onClick={generate} disabled={generating} type="button">
             {generating ? <Loader2 className="animate-spin" size={15} /> : <RefreshCw size={15} />}
-            从历史报告智能提炼
+            从未沉淀报告智能提炼
           </button>
           <button className="btn btn-secondary" onClick={suggestTags} disabled={tagSuggesting} type="button">
             {tagSuggesting ? <Loader2 className="animate-spin" size={15} /> : <Sparkles size={15} />}
@@ -335,7 +354,14 @@ export function KnowledgeCardsPage({
         </div>
         <div className="knowledge-filter-cluster">
           <div className="filter-popover-wrap">
-            <button className="filter-popover-trigger" onClick={() => setStatusMenuOpen((value) => !value)} type="button">
+            <button
+              className="filter-popover-trigger"
+              onClick={() => {
+                setStatusMenuOpen((value) => !value);
+                setDifficultyMenuOpen(false);
+              }}
+              type="button"
+            >
               <span>按状态：{statusLabelText}</span>
               <ChevronDown size={15} />
             </button>
@@ -348,6 +374,36 @@ export function KnowledgeCardsPage({
                     onClick={() => {
                       setStatus(option.value);
                       setStatusMenuOpen(false);
+                    }}
+                    type="button"
+                  >
+                    {option.label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
+          </div>
+          <div className="filter-popover-wrap">
+            <button
+              className="filter-popover-trigger"
+              onClick={() => {
+                setDifficultyMenuOpen((value) => !value);
+                setStatusMenuOpen(false);
+              }}
+              type="button"
+            >
+              <span>按难度：{difficultyLabelText}</span>
+              <ChevronDown size={15} />
+            </button>
+            {difficultyMenuOpen ? (
+              <div className="filter-popover-menu">
+                {difficultyOptions.map((option) => (
+                  <button
+                    key={option.label}
+                    className={difficulty === option.value ? "active" : ""}
+                    onClick={() => {
+                      setDifficulty(option.value);
+                      setDifficultyMenuOpen(false);
                     }}
                     type="button"
                   >
@@ -391,8 +447,8 @@ export function KnowledgeCardsPage({
       {candidateCards.length ? (
         <LearningCardCandidatePanel
           candidates={candidateCards}
-          title="历史报告候选卡片"
-          description="这些候选来自最近报告的语义提炼。你可以编辑后选择保存。"
+          title="未沉淀报告候选卡片"
+          description="这些候选来自最近未沉淀报告的语义提炼。你可以编辑后选择保存。"
           onDismiss={() => setCandidateCards([])}
           onSaved={async (created, skipped, savedCards) => {
             setNotice(`已保存 ${created} 张知识卡片，跳过 ${skipped} 张重复卡片。`);
@@ -430,7 +486,7 @@ export function KnowledgeCardsPage({
         {visibleCards.map((card) => (
           <KnowledgeCard key={card.id} card={card} onOpen={() => openCard(card)} onRemove={() => void removeCard(card)} onStatus={(next) => void updateStatus(card, next)} />
         ))}
-        {!cards.length ? <div className="learning-empty-card">还没有知识卡片，可以先从最近报告生成一批。</div> : null}
+        {!cards.length ? <div className="learning-empty-card">{query.trim() ? "当前搜索下没有知识卡片。" : "还没有知识卡片，可以先从最近报告生成一批。"}</div> : null}
         {cards.length && !visibleCards.length ? <div className="learning-empty-card">当前筛选下没有知识卡片。</div> : null}
       </section>
 

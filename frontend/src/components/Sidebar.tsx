@@ -4,7 +4,6 @@ import {
   BookOpenText,
   ChevronLeft,
   ChevronRight,
-  Compass,
   Cpu,
   FileClock,
   GitCompare,
@@ -50,7 +49,6 @@ const navGroups: Array<{
     title: "项目协作",
     items: [
       { key: "agent", label: "Agent 工作区", icon: Cpu },
-      { key: "projectGuide", label: "项目导读", icon: Compass },
     ],
   },
   {

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+import time
+import uuid
 from collections import Counter
 from datetime import date, datetime, timedelta
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
@@ -16,6 +19,8 @@ from backend.app.models import AgentPlan, AnalysisMetric, ChatMessage, ChatSessi
 from backend.app.schemas import (
     AgentApplyResultRequest,
     AgentChatStreamRequest,
+    AgentChatContextRequestItem,
+    AgentChatContextResultRequest,
     AgentConfirmRequest,
     AgentContextSelectRequest,
     AgentContextSelectResponse,
@@ -37,11 +42,19 @@ from backend.app.schemas import (
     DiffStreamRequest,
     HealthResponse,
     LearningCardCreateRequest,
+    LearningCardBulkCreateRequest,
+    LearningCardBulkCreateResponse,
+    LearningCardCandidate,
+    LearningCardApplyTagSuggestionsRequest,
+    LearningCardApplyTagSuggestionsResponse,
     LearningCardGenerateRequest,
     LearningCardGenerateResponse,
     LearningCardItem,
     LearningCardMaterialGenerateRequest,
     LearningCardMaterialItem,
+    LearningCardTagSuggestion,
+    LearningCardTagSuggestionRequest,
+    LearningCardTagSuggestionResponse,
     LearningCardUpdateRequest,
     LearningCenterResponse,
     LearningReviewResponse,
@@ -69,7 +82,10 @@ from backend.app.services.usage_service import count_tokens, fetch_deepseek_bala
 router = APIRouter(prefix="/api")
 
 WORKSPACE_STALE_SECONDS = 20
+AGENT_CHAT_CONTEXT_TIMEOUT_SECONDS = 30
+AGENT_CHAT_CONTEXT_TTL_SECONDS = 120
 _agent_workspace_snapshot: AgentWorkspaceSnapshot | None = None
+_agent_chat_context_requests: dict[str, dict[str, Any]] = {}
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -206,6 +222,54 @@ def create_learning_card(
     return _learning_card_item(card)
 
 
+@router.post("/learning/cards/bulk", response_model=LearningCardBulkCreateResponse)
+def create_learning_cards_bulk(
+    payload: LearningCardBulkCreateRequest,
+    session: Session = Depends(get_session),
+) -> LearningCardBulkCreateResponse:
+    existing_keys = _existing_learning_card_keys(session)
+    created_cards: list[LearningCard] = []
+    skipped = 0
+
+    for candidate in payload.cards[:12]:
+        normalized = _normalize_learning_card_candidate(candidate, fallback_source_id=candidate.source_id)
+        key = _learning_card_dedupe_key(normalized)
+        if key in existing_keys:
+            skipped += 1
+            continue
+
+        card = LearningCard(
+            title=normalized.title,
+            explanation=normalized.explanation,
+            language_label=normalized.language_label,
+            difficulty=normalized.difficulty,
+            tags_json=json.dumps(normalized.tags, ensure_ascii=False),
+            source_type=normalized.source_type,
+            source_id=normalized.source_id,
+            code_excerpt=normalized.code_excerpt,
+            detail_markdown=normalized.detail_markdown or _learning_card_detail(
+                normalized.title,
+                normalized.explanation,
+                normalized.tags,
+            ),
+            resource_links_json=json.dumps(normalized.resource_links, ensure_ascii=False),
+            status="new",
+        )
+        session.add(card)
+        created_cards.append(card)
+        existing_keys.add(key)
+
+    session.commit()
+    for card in created_cards:
+        session.refresh(card)
+
+    return LearningCardBulkCreateResponse(
+        created=len(created_cards),
+        skipped=skipped,
+        cards=[_learning_card_item(item) for item in created_cards],
+    )
+
+
 @router.patch("/learning/cards/{card_id}", response_model=LearningCardItem)
 def update_learning_card(
     card_id: str,
@@ -268,6 +332,46 @@ def read_learning_card_material(card_id: str, session: Session = Depends(get_ses
     return _learning_card_material_placeholder(card)
 
 
+def _learning_card_material_context(card: LearningCard) -> tuple[list[str], list[dict[str, str]]]:
+    tags = [str(item) for item in _safe_json_list(card.tags_json) if str(item).strip()]
+    source_links = _normalize_resource_links(_safe_json_list(card.resource_links_json))
+    if not source_links:
+        source_links = _recommended_learning_resources(card, title=card.title, language_label=card.language_label, tags=tags)
+    return tags, source_links
+
+
+def _upsert_learning_card_material(
+    session: Session,
+    card: LearningCard,
+    content: str,
+    source_links: list[dict[str, str]],
+    model: str | None,
+) -> LearningCardMaterialItem:
+    tags = [str(item) for item in _safe_json_list(card.tags_json) if str(item).strip()]
+    final_content = content.strip() or _fallback_learning_card_material(card, tags)
+    material = _learning_card_material_for_card(session, card.id)
+    now = datetime.utcnow()
+    if material:
+        material.content_markdown = final_content
+        material.source_links_json = json.dumps(source_links, ensure_ascii=False)
+        material.model = model
+        material.generated_at = now
+        material.updated_at = now
+    else:
+        material = LearningCardMaterial(
+            card_id=card.id,
+            content_markdown=final_content,
+            source_links_json=json.dumps(source_links, ensure_ascii=False),
+            model=model,
+            generated_at=now,
+            updated_at=now,
+        )
+    session.add(material)
+    session.commit()
+    session.refresh(material)
+    return _learning_card_material_item(card, material, cached=True)
+
+
 @router.post("/learning/cards/{card_id}/material/generate", response_model=LearningCardMaterialItem)
 def generate_learning_card_material(
     card_id: str,
@@ -277,10 +381,7 @@ def generate_learning_card_material(
     card = session.get(LearningCard, card_id)
     if not card:
         raise HTTPException(status_code=404, detail="Learning card not found")
-    tags = [str(item) for item in _safe_json_list(card.tags_json) if str(item).strip()]
-    source_links = _normalize_resource_links(_safe_json_list(card.resource_links_json))
-    if not source_links:
-        source_links = _recommended_learning_resources(card, title=card.title, language_label=card.language_label, tags=tags)
+    tags, source_links = _learning_card_material_context(card)
     service = LLMService(payload.model)
     content = service.generate_learning_card_material(
         title=card.title,
@@ -291,29 +392,63 @@ def generate_learning_card_material(
         code_excerpt=card.code_excerpt,
         source_links=source_links,
     ).strip()
-    if not content:
-        content = _fallback_learning_card_material(card, tags)
-    material = _learning_card_material_for_card(session, card_id)
-    now = datetime.utcnow()
-    if material:
-        material.content_markdown = content
-        material.source_links_json = json.dumps(source_links, ensure_ascii=False)
-        material.model = service.model
-        material.generated_at = now
-        material.updated_at = now
-    else:
-        material = LearningCardMaterial(
-            card_id=card.id,
-            content_markdown=content,
-            source_links_json=json.dumps(source_links, ensure_ascii=False),
-            model=service.model,
-            generated_at=now,
-            updated_at=now,
-        )
-    session.add(material)
-    session.commit()
-    session.refresh(material)
-    return _learning_card_material_item(card, material, cached=True)
+    return _upsert_learning_card_material(session, card, content, source_links, service.model)
+
+
+@router.post("/learning/cards/{card_id}/material/generate/stream")
+def stream_learning_card_material(
+    card_id: str,
+    payload: LearningCardMaterialGenerateRequest,
+) -> StreamingResponse:
+    def event_generator():
+        chunks: list[str] = []
+        try:
+            mysql_ok, mysql_message = check_database()
+            if not mysql_ok:
+                yield sse_event("error", _mysql_error_payload(mysql_message))
+                return
+
+            with Session(engine) as session:
+                card = session.get(LearningCard, card_id)
+                if not card:
+                    yield sse_event("error", error_payload("LEARNING_CARD_NOT_FOUND", "Learning card not found."))
+                    return
+                tags, source_links = _learning_card_material_context(card)
+                card_snapshot = {
+                    "id": card.id,
+                    "title": card.title,
+                    "language_label": card.language_label,
+                    "difficulty": card.difficulty,
+                    "explanation": card.explanation,
+                    "code_excerpt": card.code_excerpt,
+                }
+
+            service = LLMService(payload.model)
+            yield sse_event("status", {"phase": "learning_card_material", "message": "学习资料正在生成中..."})
+            for text in service.stream_learning_card_material(
+                title=card_snapshot["title"],
+                language_label=card_snapshot["language_label"],
+                difficulty=card_snapshot["difficulty"],
+                explanation=card_snapshot["explanation"],
+                tags=tags,
+                code_excerpt=card_snapshot["code_excerpt"],
+                source_links=source_links,
+            ):
+                chunks.append(text)
+                yield sse_event("delta", {"text": text})
+
+            content = "".join(chunks).strip()
+            with Session(engine) as session:
+                card = session.get(LearningCard, card_id)
+                if not card:
+                    yield sse_event("error", error_payload("LEARNING_CARD_NOT_FOUND", "Learning card not found."))
+                    return
+                item = _upsert_learning_card_material(session, card, content, source_links, service.model)
+                yield sse_event("done", {"item": item.model_dump(mode="json")})
+        except Exception as exc:
+            yield sse_event("error", _llm_error_payload(exc))
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=_stream_headers())
 
 
 @router.post("/learning/cards/generate", response_model=LearningCardGenerateResponse)
@@ -322,45 +457,77 @@ def generate_learning_cards(
     session: Session = Depends(get_session),
 ) -> LearningCardGenerateResponse:
     reports = list(session.exec(select(Report).order_by(Report.created_at.desc()).limit(payload.source_limit)).all())
-    existing_keys = {
-        (card.title.strip().lower(), card.source_id or "")
-        for card in session.exec(select(LearningCard)).all()
-    }
-    created_cards: list[LearningCard] = []
+    existing_keys = _existing_learning_card_keys(session)
+    service: LLMService | None = None
+    try:
+        service = LLMService(payload.model)
+    except Exception:
+        service = None
+    candidates: list[LearningCardCandidate] = []
     skipped = 0
     for report in reports:
-        for candidate in _candidate_learning_cards_from_report(report):
-            key = (candidate["title"].strip().lower(), report.id)
+        report_candidates = _learning_card_candidates_for_report(report, service=service)
+        for candidate in report_candidates:
+            key = _learning_card_dedupe_key(candidate)
             if key in existing_keys:
                 skipped += 1
                 continue
-            card = LearningCard(
-                title=candidate["title"],
-                explanation=candidate["explanation"],
-                language_label=report.language_label,
-                difficulty=candidate["difficulty"],
-                tags_json=json.dumps(candidate["tags"], ensure_ascii=False),
-                source_type="report",
-                source_id=report.id,
-                code_excerpt=candidate.get("code_excerpt"),
-                detail_markdown=candidate.get("detail_markdown"),
-                resource_links_json=json.dumps(candidate.get("resource_links") or [], ensure_ascii=False),
-                status="new",
-            )
-            session.add(card)
-            created_cards.append(card)
+            candidates.append(candidate)
             existing_keys.add(key)
-            if len(created_cards) >= 24:
+            if len(candidates) >= 24:
                 break
-        if len(created_cards) >= 24:
+        if len(candidates) >= 24:
             break
-    session.commit()
-    for card in created_cards:
-        session.refresh(card)
     return LearningCardGenerateResponse(
-        created=len(created_cards),
+        created=0,
         skipped=skipped,
-        cards=[_learning_card_item(item) for item in created_cards],
+        cards=[],
+        candidates=candidates,
+    )
+
+
+@router.post("/learning/cards/tag-suggestions", response_model=LearningCardTagSuggestionResponse)
+def suggest_learning_card_tags(
+    payload: LearningCardTagSuggestionRequest,
+    session: Session = Depends(get_session),
+) -> LearningCardTagSuggestionResponse:
+    cards = list(session.exec(select(LearningCard).order_by(LearningCard.created_at.desc()).limit(payload.limit)).all())
+    if not cards:
+        return LearningCardTagSuggestionResponse(suggestions=[])
+    service = LLMService(payload.model)
+    try:
+        raw_suggestions = service.suggest_learning_card_tags([_learning_card_tag_context(card) for card in cards])
+    except Exception:
+        raw_suggestions = _fallback_learning_card_tag_suggestions(cards)
+    return LearningCardTagSuggestionResponse(
+        suggestions=_normalize_tag_suggestions(raw_suggestions, {card.id for card in cards})
+    )
+
+
+@router.post("/learning/cards/apply-tag-suggestions", response_model=LearningCardApplyTagSuggestionsResponse)
+def apply_learning_card_tag_suggestions(
+    payload: LearningCardApplyTagSuggestionsRequest,
+    session: Session = Depends(get_session),
+) -> LearningCardApplyTagSuggestionsResponse:
+    updated_ids: set[str] = set()
+    for suggestion in _normalize_tag_suggestions([item.model_dump() for item in payload.suggestions], set()):
+        if not suggestion.card_ids:
+            continue
+        cards = list(session.exec(select(LearningCard).where(LearningCard.id.in_(suggestion.card_ids))).all())
+        for card in cards:
+            current_tags = [str(item) for item in _safe_json_list(card.tags_json)]
+            next_tags = _apply_tag_suggestion_to_tags(current_tags, suggestion)
+            if next_tags == current_tags:
+                continue
+            card.tags_json = json.dumps(next_tags, ensure_ascii=False)
+            card.updated_at = datetime.utcnow()
+            session.add(card)
+            updated_ids.add(card.id)
+    session.commit()
+    refreshed = [session.get(LearningCard, card_id) for card_id in updated_ids]
+    return LearningCardApplyTagSuggestionsResponse(
+        updated=len(updated_ids),
+        cards=[_learning_card_item(card) for card in refreshed if card],
     )
 
 
@@ -380,8 +547,19 @@ def read_learning_review(
 @router.get("/daily-logs/calendar", response_model=list[DailyWorkLogCalendarItem])
 def list_daily_work_log_calendar(
     days: int = Query(default=30, ge=7, le=120),
+    month: str | None = Query(default=None, pattern=r"^\d{4}-\d{2}$"),
     session: Session = Depends(get_session),
 ) -> list[DailyWorkLogCalendarItem]:
+    if month:
+        year, month_number = [int(part) for part in month.split("-")]
+        start = date(year, month_number, 1)
+        end = date(year + 1, 1, 1) - timedelta(days=1) if month_number == 12 else date(year, month_number + 1, 1) - timedelta(days=1)
+        logs = _daily_logs_by_date(session, start, end)
+        total_days = (end - start).days + 1
+        return [
+            _daily_calendar_item(session, current, logs.get(current))
+            for current in (start + timedelta(days=offset) for offset in range(total_days))
+        ]
     today = date.today()
     start = today - timedelta(days=days - 1)
     logs = _daily_logs_by_date(session, start, today)
@@ -395,6 +573,43 @@ def list_daily_work_log_calendar(
 def read_daily_work_log(log_date: str, session: Session = Depends(get_session)) -> DailyWorkLogItem:
     day = _parse_log_date(log_date)
     log = _daily_log_for_date(session, day)
+    return _daily_work_log_item(session, day, log)
+
+
+def _upsert_daily_work_log(
+    session: Session,
+    day: date,
+    content: str,
+    context: dict[str, Any],
+    model: str | None,
+) -> DailyWorkLogItem:
+    final_content = _clean_daily_work_log_markdown(content) or _fallback_daily_work_log(day, context["stats"])
+    title = _daily_log_title(day, final_content)
+    existing = _daily_log_for_date(session, day)
+    now = datetime.utcnow()
+    if existing:
+        existing.title = title
+        existing.content_markdown = final_content
+        existing.source_stats_json = json.dumps(context["stats"], ensure_ascii=False)
+        existing.source_refs_json = json.dumps(context["refs"], ensure_ascii=False)
+        existing.model = model
+        existing.generated_at = now
+        existing.updated_at = now
+        log = existing
+    else:
+        log = DailyWorkLog(
+            log_date=_day_start(day),
+            title=title,
+            content_markdown=final_content,
+            source_stats_json=json.dumps(context["stats"], ensure_ascii=False),
+            source_refs_json=json.dumps(context["refs"], ensure_ascii=False),
+            model=model,
+            generated_at=now,
+            updated_at=now,
+        )
+    session.add(log)
+    session.commit()
+    session.refresh(log)
     return _daily_work_log_item(session, day, log)
 
 
@@ -414,35 +629,47 @@ def generate_daily_work_log(
         context_markdown=context["context_markdown"],
         stats=context["stats"],
     ).strip()
-    if not content:
-        content = _fallback_daily_work_log(day, context["stats"])
-    title = _daily_log_title(day, content)
-    existing = _daily_log_for_date(session, day)
-    now = datetime.utcnow()
-    if existing:
-        existing.title = title
-        existing.content_markdown = content
-        existing.source_stats_json = json.dumps(context["stats"], ensure_ascii=False)
-        existing.source_refs_json = json.dumps(context["refs"], ensure_ascii=False)
-        existing.model = service.model
-        existing.generated_at = now
-        existing.updated_at = now
-        log = existing
-    else:
-        log = DailyWorkLog(
-            log_date=_day_start(day),
-            title=title,
-            content_markdown=content,
-            source_stats_json=json.dumps(context["stats"], ensure_ascii=False),
-            source_refs_json=json.dumps(context["refs"], ensure_ascii=False),
-            model=service.model,
-            generated_at=now,
-            updated_at=now,
-        )
-    session.add(log)
-    session.commit()
-    session.refresh(log)
-    return _daily_work_log_item(session, day, log)
+    return _upsert_daily_work_log(session, day, content, context, service.model)
+
+
+@router.post("/daily-logs/{log_date}/generate/stream")
+def stream_daily_work_log(
+    log_date: str,
+    payload: DailyWorkLogGenerateRequest,
+) -> StreamingResponse:
+    def event_generator():
+        chunks: list[str] = []
+        try:
+            mysql_ok, mysql_message = check_database()
+            if not mysql_ok:
+                yield sse_event("error", _mysql_error_payload(mysql_message))
+                return
+
+            day = _parse_log_date(log_date)
+            with Session(engine) as session:
+                context = _daily_work_context(session, day)
+            if not context["stats"]["total_activity"]:
+                yield sse_event("error", error_payload("NO_DAILY_ACTIVITY", "这一天还没有可总结的使用记录。"))
+                return
+
+            service = LLMService(payload.model)
+            yield sse_event("status", {"phase": "daily_log", "message": "日志正在生成中..."})
+            for text in service.stream_daily_work_log(
+                log_date=day.isoformat(),
+                context_markdown=context["context_markdown"],
+                stats=context["stats"],
+            ):
+                chunks.append(text)
+                yield sse_event("delta", {"text": text})
+
+            content = "".join(chunks).strip()
+            with Session(engine) as session:
+                item = _upsert_daily_work_log(session, day, content, context, service.model)
+                yield sse_event("done", {"item": item.model_dump(mode="json")})
+        except Exception as exc:
+            yield sse_event("error", _llm_error_payload(exc))
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=_stream_headers())
 
 
 @router.patch("/daily-logs/{log_date}", response_model=DailyWorkLogItem)
@@ -453,12 +680,33 @@ def update_daily_work_log(
 ) -> DailyWorkLogItem:
     day = _parse_log_date(log_date)
     log = _daily_log_for_date(session, day)
+    title = payload.title.strip()[:160] if payload.title is not None else ""
+    content = payload.content_markdown.strip() if payload.content_markdown is not None else ""
     if not log:
-        raise HTTPException(status_code=404, detail="Daily work log not found")
+        if not content:
+            raise HTTPException(status_code=400, detail="日志正文不能为空。")
+        stats = _daily_activity_stats(session, day)
+        now = datetime.utcnow()
+        log = DailyWorkLog(
+            log_date=_day_start(day),
+            title=title or f"{day.isoformat()} 日记",
+            content_markdown=content,
+            source_stats_json=json.dumps(stats, ensure_ascii=False),
+            source_refs_json="[]",
+            model=None,
+            generated_at=now,
+            updated_at=now,
+        )
+        session.add(log)
+        session.commit()
+        session.refresh(log)
+        return _daily_work_log_item(session, day, log)
     if payload.title is not None:
-        log.title = payload.title.strip()[:160] or log.title
+        log.title = title or log.title
     if payload.content_markdown is not None:
-        log.content_markdown = payload.content_markdown.strip() or log.content_markdown
+        if not content:
+            raise HTTPException(status_code=400, detail="日志正文不能为空。")
+        log.content_markdown = content
     log.updated_at = datetime.utcnow()
     session.add(log)
     session.commit()
@@ -562,7 +810,7 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
             title = _ensure_unique_title(
                 session,
                 ChatSession,
-                build_chat_fallback_title(instruction, "", "Agent task"),
+                build_chat_fallback_title(instruction, "", "Agent 任务"),
             )
             chat_session = ChatSession(title=title, context_type="agent")
             session.add(chat_session)
@@ -779,13 +1027,53 @@ def stream_agent_chat(payload: AgentChatStreamRequest) -> StreamingResponse:
                 session.commit()
                 session_id = chat_session.id
 
+            files = [item.model_dump() for item in payload.files]
+            selected_paths = _normalize_selected_file_paths(payload.selected_file_paths)
+            if payload.source == "web" and selected_paths and not files:
+                request_id = _create_agent_chat_context_request(
+                    session_id=session_id,
+                    message=payload.message,
+                    selected_file_paths=selected_paths,
+                    context_mode=payload.context_mode,
+                )
+                yield sse_event(
+                    "status",
+                    {
+                        "phase": "agent_context",
+                        "request_id": request_id,
+                        "message": "正在等待 VS Code 插件读取所选文件...",
+                    },
+                )
+                context_result = _wait_agent_chat_context_result(request_id)
+                if context_result.get("status") == "failed":
+                    yield sse_event(
+                        "error",
+                        error_payload(
+                            "AGENT_CONTEXT_READ_FAILED",
+                            str(context_result.get("message") or "所选文件读取失败，无法继续 Agent 讨论。"),
+                            "请确认 VS Code 插件已连接、当前工作区已打开，并重新选择可读取的文件。",
+                        ),
+                    )
+                    return
+                files = context_result.get("files") or []
+                if not files:
+                    yield sse_event(
+                        "error",
+                        error_payload(
+                            "AGENT_CONTEXT_TIMEOUT",
+                            "等待 VS Code 插件读取上下文超时。",
+                            "请打开 VS Code 插件并保持当前项目在线，或切换到“交给插件修改”模式生成计划。",
+                        ),
+                    )
+                    return
+
             service = LLMService(payload.model)
             for text in service.stream_agent_chat(
                 payload.message,
                 history,
                 code_context=payload.code_context,
                 report_context=payload.report_context,
-                files=[item.model_dump() for item in payload.files],
+                files=files,
             ):
                 chunks.append(text)
                 yield sse_event("delta", {"text": text})
@@ -812,6 +1100,43 @@ def stream_agent_chat(payload: AgentChatStreamRequest) -> StreamingResponse:
             yield sse_event("error", _llm_error_payload(exc))
 
     return StreamingResponse(event_generator(), media_type="text/event-stream", headers=_stream_headers())
+
+
+@router.get("/agent/chat-context/pending", response_model=list[AgentChatContextRequestItem])
+def list_pending_agent_chat_contexts(limit: int = Query(default=20, ge=1, le=50)) -> list[AgentChatContextRequestItem]:
+    _prune_agent_chat_context_requests()
+    items = [
+        AgentChatContextRequestItem(
+            request_id=request_id,
+            session_id=str(item["session_id"]),
+            message=str(item["message"]),
+            selected_file_paths=_normalize_selected_file_paths(item.get("selected_file_paths") or []),
+            context_mode=item.get("context_mode") if item.get("context_mode") in {"manual", "ai_auto", "hybrid"} else "manual",
+            created_at=item["created_at"],
+        )
+        for request_id, item in _agent_chat_context_requests.items()
+        if item.get("status") == "pending"
+    ]
+    items.sort(key=lambda item: item.created_at)
+    return items[:limit]
+
+
+@router.post("/agent/chat-context/{request_id}/result")
+def update_agent_chat_context_result(request_id: str, payload: AgentChatContextResultRequest) -> dict[str, bool]:
+    item = _agent_chat_context_requests.get(request_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Agent chat context request not found")
+
+    item["status"] = payload.status
+    item["message"] = payload.message
+    item["files"] = [file.model_dump() for file in payload.files]
+    item["selected_file_paths"] = _normalize_selected_file_paths(payload.selected_file_paths)
+    item["updated_at"] = datetime.utcnow()
+    print(
+        f"[agent-chat-context] result request={request_id} status={payload.status} files={len(payload.files)}",
+        flush=True,
+    )
+    return {"ok": True}
 
 
 @router.get("/agent/pending", response_model=list[AgentPlanItem])
@@ -1037,6 +1362,73 @@ def _selected_file_paths(plan: AgentPlan) -> list[str]:
     return _normalize_selected_file_paths([str(item) for item in _safe_json_list(plan.selected_files_json)])
 
 
+def _create_agent_chat_context_request(
+    *,
+    session_id: str,
+    message: str,
+    selected_file_paths: list[str],
+    context_mode: str,
+) -> str:
+    request_id = uuid.uuid4().hex
+    _agent_chat_context_requests[request_id] = {
+        "request_id": request_id,
+        "session_id": session_id,
+        "message": message,
+        "selected_file_paths": _normalize_selected_file_paths(selected_file_paths),
+        "context_mode": context_mode if context_mode in {"manual", "ai_auto", "hybrid"} else "manual",
+        "status": "pending",
+        "files": [],
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+    }
+    print(
+        f"[agent-chat-context] created request={request_id} session={session_id} "
+        f"mode={context_mode} files={len(selected_file_paths)}",
+        flush=True,
+    )
+    return request_id
+
+
+def _wait_agent_chat_context_result(request_id: str) -> dict[str, Any]:
+    deadline = time.monotonic() + AGENT_CHAT_CONTEXT_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        _prune_agent_chat_context_requests()
+        item = _agent_chat_context_requests.get(request_id)
+        if not item:
+            return {"status": "failed", "message": "Agent 上下文请求已失效。"}
+        status = item.get("status")
+        if status in {"ok", "failed"}:
+            print(f"[agent-chat-context] completed request={request_id} status={status}", flush=True)
+            result = {
+                "status": status,
+                "message": item.get("message") or "",
+                "files": item.get("files") or [],
+                "selected_file_paths": item.get("selected_file_paths") or [],
+            }
+            _agent_chat_context_requests.pop(request_id, None)
+            return result
+        time.sleep(0.3)
+    item = _agent_chat_context_requests.pop(request_id, None)
+    print(f"[agent-chat-context] timeout request={request_id}", flush=True)
+    return {
+        "status": "failed",
+        "message": str(item.get("message") if item else "") or "等待 VS Code 插件读取上下文超时。",
+        "files": [],
+        "selected_file_paths": [],
+    }
+
+
+def _prune_agent_chat_context_requests() -> None:
+    now = datetime.utcnow()
+    expired = [
+        request_id
+        for request_id, item in _agent_chat_context_requests.items()
+        if (now - item.get("created_at", now)).total_seconds() > AGENT_CHAT_CONTEXT_TTL_SECONDS
+    ]
+    for request_id in expired:
+        _agent_chat_context_requests.pop(request_id, None)
+
+
 def _context_mode(plan: AgentPlan) -> str:
     value = str(getattr(plan, "context_mode", "") or "manual")
     return value if value in {"manual", "ai_auto", "hybrid"} else "manual"
@@ -1067,6 +1459,71 @@ def _normalize_learning_difficulty(value: str | None) -> str:
 def _normalize_learning_status(value: str | None) -> str:
     normalized = str(value or "").strip()
     return normalized if normalized in {"new", "reviewing", "mastered", "bookmarked"} else "new"
+
+
+def _learning_card_dedupe_key(candidate: LearningCardCandidate) -> tuple[str, str, str]:
+    return (
+        candidate.title.strip().lower(),
+        candidate.language_label.strip().lower(),
+        candidate.source_id or "",
+    )
+
+
+def _existing_learning_card_keys(session: Session) -> set[tuple[str, str, str]]:
+    return {
+        (card.title.strip().lower(), card.language_label.strip().lower(), card.source_id or "")
+        for card in session.exec(select(LearningCard)).all()
+    }
+
+
+def _normalize_learning_card_candidate(
+    value: LearningCardCandidate | dict,
+    *,
+    fallback_language_label: str = "通用",
+    fallback_source_id: str | None = None,
+    fallback_source_title: str | None = None,
+) -> LearningCardCandidate:
+    data = value.model_dump() if isinstance(value, LearningCardCandidate) else dict(value or {})
+    raw_tags = data.get("tags")
+    tags = [str(item) for item in raw_tags] if isinstance(raw_tags, list) else []
+    title = str(data.get("title") or "").strip()[:160] or "未命名知识点"
+    explanation = str(data.get("explanation") or data.get("summary") or "").strip()
+    if not explanation:
+        explanation = f"{title} 是这份报告中值得单独复习的编程知识点。"
+    language_label = str(data.get("language_label") or fallback_language_label or "通用").strip()[:32] or "通用"
+    normalized_tags = _normalize_tags([language_label, *tags])
+    source_type = str(data.get("source_type") or "report").strip()[:32] or "report"
+    source_id = str(data.get("source_id") or fallback_source_id or "").strip() or None
+    code_excerpt = str(data.get("code_excerpt") or "").strip()[:2600] or None
+    detail_markdown = str(data.get("detail_markdown") or "").strip()[:5000]
+    if not detail_markdown:
+        detail_markdown = _learning_card_detail(title, explanation, normalized_tags, fallback_source_title)
+    resources = _normalize_resource_links(data.get("resource_links") if isinstance(data.get("resource_links"), list) else None)
+    if not resources:
+        resources = _recommended_learning_resources(title=title, language_label=language_label, tags=normalized_tags)
+    source_reason = str(data.get("source_reason") or "").strip()[:360] or None
+    confidence_value = data.get("confidence")
+    try:
+        confidence = float(confidence_value) if confidence_value is not None else None
+    except (TypeError, ValueError):
+        confidence = None
+    if confidence is not None:
+        confidence = max(0.0, min(1.0, confidence))
+
+    return LearningCardCandidate(
+        title=title,
+        explanation=explanation[:1200],
+        language_label=language_label,
+        difficulty=_normalize_learning_difficulty(str(data.get("difficulty") or "入门")),
+        tags=normalized_tags,
+        source_type=source_type,
+        source_id=source_id,
+        code_excerpt=code_excerpt,
+        detail_markdown=detail_markdown,
+        resource_links=resources,
+        source_reason=source_reason,
+        confidence=confidence,
+    )
 
 
 LEARNING_RESOURCE_LIBRARY = [
@@ -1194,6 +1651,107 @@ def _learning_card_item(card: LearningCard) -> LearningCardItem:
     )
 
 
+def _learning_card_tag_context(card: LearningCard) -> dict:
+    return {
+        "id": card.id,
+        "title": card.title,
+        "explanation": card.explanation,
+        "language_label": card.language_label,
+        "difficulty": card.difficulty,
+        "tags": [str(item) for item in _safe_json_list(card.tags_json) if str(item).strip()],
+        "status": card.status,
+    }
+
+
+def _normalize_tag_suggestions(raw_suggestions: list[dict], allowed_card_ids: set[str]) -> list[LearningCardTagSuggestion]:
+    suggestions: list[LearningCardTagSuggestion] = []
+    seen: set[str] = set()
+    for index, raw in enumerate(raw_suggestions or []):
+        if not isinstance(raw, dict):
+            continue
+        action = str(raw.get("action") or "").strip().lower()
+        if action not in {"merge", "add", "remove", "rename"}:
+            continue
+        card_ids = [str(item).strip() for item in raw.get("card_ids", []) if str(item).strip()]
+        if allowed_card_ids:
+            card_ids = [card_id for card_id in card_ids if card_id in allowed_card_ids]
+        from_tags = _normalize_tags([str(item) for item in raw.get("from_tags", [])])
+        to_tags = _normalize_tags([str(item) for item in raw.get("to_tags", [])])
+        if action in {"merge", "rename"} and (not from_tags or not to_tags):
+            continue
+        if action == "add" and not to_tags:
+            continue
+        if action == "remove" and not from_tags:
+            continue
+        if not card_ids and action == "add":
+            continue
+        title = str(raw.get("title") or "").strip()[:120] or _tag_suggestion_title(action, from_tags, to_tags)
+        reason = str(raw.get("reason") or "").strip()[:360] or "AI 建议整理这组标签，用户确认后才会应用。"
+        key = f"{action}|{','.join(card_ids)}|{','.join(from_tags)}|{','.join(to_tags)}".lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        suggestions.append(
+            LearningCardTagSuggestion(
+                id=str(raw.get("id") or f"suggestion-{index + 1}")[:80],
+                action=action,
+                title=title,
+                reason=reason,
+                card_ids=card_ids[:60],
+                from_tags=from_tags,
+                to_tags=to_tags,
+            )
+        )
+        if len(suggestions) >= 12:
+            break
+    return suggestions
+
+
+def _tag_suggestion_title(action: str, from_tags: list[str], to_tags: list[str]) -> str:
+    if action == "add":
+        return f"补充标签：{'、'.join(to_tags[:3])}"
+    if action == "remove":
+        return f"删除低价值标签：{'、'.join(from_tags[:3])}"
+    return f"{'、'.join(from_tags[:3])} → {'、'.join(to_tags[:2])}"
+
+
+def _apply_tag_suggestion_to_tags(tags: list[str], suggestion: LearningCardTagSuggestion) -> list[str]:
+    current = _normalize_tags(tags)
+    from_keys = {tag.lower() for tag in suggestion.from_tags}
+    if suggestion.action == "remove":
+        return _normalize_tags([tag for tag in current if tag.lower() not in from_keys])
+    if suggestion.action in {"merge", "rename"}:
+        kept = [tag for tag in current if tag.lower() not in from_keys]
+        return _normalize_tags([*kept, *suggestion.to_tags])
+    if suggestion.action == "add":
+        return _normalize_tags([*current, *suggestion.to_tags])
+    return current
+
+
+def _fallback_learning_card_tag_suggestions(cards: list[LearningCard]) -> list[dict]:
+    by_tag: dict[str, list[LearningCard]] = {}
+    for card in cards:
+        for tag in _safe_json_list(card.tags_json):
+            normalized = str(tag).strip()
+            if not normalized:
+                continue
+            by_tag.setdefault(normalized.lower(), []).append(card)
+    low_value_tags = [tag for tag, items in by_tag.items() if tag in {"基础", "代码", "通用", "学习"} and items]
+    suggestions: list[dict] = []
+    for tag in low_value_tags[:4]:
+        suggestions.append(
+            {
+                "action": "remove",
+                "title": f"删除低价值标签：{tag}",
+                "reason": "这个标签过于宽泛，难以帮助后续检索。",
+                "card_ids": [card.id for card in by_tag[tag]],
+                "from_tags": [tag],
+                "to_tags": [],
+            }
+        )
+    return suggestions
+
+
 def _learning_card_material_for_card(session: Session, card_id: str) -> LearningCardMaterial | None:
     return session.exec(select(LearningCardMaterial).where(LearningCardMaterial.card_id == card_id)).first()
 
@@ -1227,7 +1785,7 @@ def _fallback_learning_card_material(card: LearningCard, tags: list[str]) -> str
     tag_text = "、".join(tags[:4]) if tags else card.language_label
     code = f"\n\n```text\n{card.code_excerpt[:900]}\n```" if card.code_excerpt else ""
     return (
-        f"## 概念解释\n{card.title} 是当前卡片需要重点理解的编程知识点。"
+        f"## 概念解释\n{card.title} 是当前卡片需要重点理解的编程知识点。\n\n"
         f"{card.explanation}\n\n"
         f"## 适用场景\n- 在 {card.language_label} 学习或项目阅读中遇到 {tag_text} 相关代码时，可以用它建立理解框架。\n"
         "- 复习时建议回到具体代码，看它的输入、输出、边界情况和常见错误。\n\n"
@@ -1373,6 +1931,46 @@ def _candidate_learning_cards_from_report(report: Report) -> list[dict]:
             }
         )
     return cards[:6]
+
+
+def _learning_card_candidates_for_report(report: Report, limit: int = 8, service: LLMService | None = None) -> list[LearningCardCandidate]:
+    code = report.code_content or "\n\n".join(item for item in [report.code_a, report.code_b] if item) or ""
+    raw_candidates: list[dict] = []
+    if service is not None:
+        try:
+            raw_candidates = service.generate_learning_card_candidates(
+                code=code,
+                report_content=report.content,
+                report_title=report.title,
+                report_mode=report.mode,
+                language_code=report.language_code,
+                language_label=report.language_label,
+                limit=limit,
+            )
+        except Exception:
+            raw_candidates = []
+    if not raw_candidates:
+        raw_candidates = _candidate_learning_cards_from_report(report)
+
+    candidates: list[LearningCardCandidate] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in raw_candidates:
+        candidate = _normalize_learning_card_candidate(
+            item,
+            fallback_language_label=report.language_label,
+            fallback_source_id=report.id,
+            fallback_source_title=report.title,
+        )
+        candidate.source_type = "report"
+        candidate.source_id = report.id
+        key = _learning_card_dedupe_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+        if len(candidates) >= limit:
+            break
+    return candidates
 
 
 def _first_code_excerpt(code: str) -> str | None:
@@ -1628,15 +2226,18 @@ def _daily_activity_stats(session: Session, day: date) -> dict[str, int]:
 def _daily_calendar_item(session: Session, day: date, log: DailyWorkLog | None) -> DailyWorkLogCalendarItem:
     stats = _daily_activity_stats(session, day)
     summary = None
+    title = None
     if log:
-        summary = _compact_daily_summary(log.content_markdown)
+        content = _clean_daily_work_log_markdown(log.content_markdown)
+        summary = _compact_daily_summary(content)
+        title = _daily_log_title(day, content) if _is_bad_daily_log_title(log.title) else log.title
     return DailyWorkLogCalendarItem(
         date=day.isoformat(),
         weekday=WEEKDAY_LABELS[day.weekday()],
         has_activity=bool(stats["total_activity"]),
         has_log=bool(log),
         activity_score=min(6, stats["reports"] * 2 + stats["agent_tasks"] * 2 + stats["learning_cards"] + max(0, stats["messages"] // 3)),
-        title=log.title if log else None,
+        title=title,
         summary=summary,
         generated_at=log.generated_at if log else None,
         stats=stats,
@@ -1655,11 +2256,12 @@ def _daily_work_log_item(session: Session, day: date, log: DailyWorkLog | None) 
             has_activity=bool(stats["total_activity"]),
             has_log=False,
         )
+    content = _clean_daily_work_log_markdown(log.content_markdown)
     return DailyWorkLogItem(
         id=log.id,
         date=day.isoformat(),
-        title=log.title,
-        content_markdown=log.content_markdown,
+        title=_daily_log_title(day, content) if _is_bad_daily_log_title(log.title) else log.title,
+        content_markdown=content,
         source_stats=_safe_json_dict(log.source_stats_json) or stats,
         source_refs=[item for item in _safe_json_list(log.source_refs_json) if isinstance(item, dict)],
         model=log.model,
@@ -1681,7 +2283,7 @@ def _safe_json_dict(value: str | None) -> dict:
 
 
 def _compact_daily_summary(content: str) -> str:
-    for line in content.splitlines():
+    for line in _clean_daily_work_log_markdown(content).splitlines():
         text = re.sub(r"^[#*\-\s>]+", "", line).strip()
         if text and not text.startswith(("今日概览", "完成事项", "AI 对话", "Agent", "知识卡片", "明日建议")):
             return text[:72]
@@ -1777,11 +2379,32 @@ def _daily_work_context(session: Session, day: date) -> dict[str, Any]:
 
 
 def _daily_log_title(day: date, content: str) -> str:
-    for line in content.splitlines():
+    for line in _clean_daily_work_log_markdown(content).splitlines():
         title = line.strip().lstrip("#").strip()
-        if title and not title.startswith(("今日概览", "完成事项")):
+        if title and not title.startswith(("今日概览", "完成事项", "```")):
             return title[:80]
     return f"{day.isoformat()} 工作日志"
+
+
+def _is_bad_daily_log_title(title: str | None) -> bool:
+    value = str(title or "").strip().lower()
+    return not value or value in {"```", "```markdown", "```md", "markdown"} or value.startswith("```")
+
+
+def _clean_daily_work_log_markdown(content: str | None) -> str:
+    text = str(content or "").strip()
+    for _ in range(2):
+        match = re.fullmatch(r"```(?:markdown|md)?\s*\n([\s\S]*?)\n```", text, re.IGNORECASE)
+        if not match:
+            break
+        text = match.group(1).strip()
+    lines = text.splitlines()
+    if lines and re.fullmatch(r"```(?:markdown|md)?", lines[0].strip(), re.IGNORECASE):
+        lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text
 
 
 def _fallback_daily_work_log(day: date, stats: dict[str, int]) -> str:
@@ -1857,8 +2480,9 @@ def _analytics_summary(session: Session) -> dict:
     chat_messages = list(session.exec(select(ChatMessage)).all())
     metrics = list(session.exec(select(AnalysisMetric)).all())
     agent_plans = list(session.exec(select(AgentPlan)).all())
-    report_tokens = sum(count_tokens(item.content) for item in reports)
-    chat_tokens = sum(count_tokens(item.content) for item in chat_messages)
+    learning_cards = list(session.exec(select(LearningCard)).all())
+    learning_materials = list(session.exec(select(LearningCardMaterial)).all())
+    daily_logs = list(session.exec(select(DailyWorkLog)).all())
     return {
         "reports": len(reports),
         "single_reports": sum(1 for item in reports if item.report_type == "single"),
@@ -1867,8 +2491,76 @@ def _analytics_summary(session: Session) -> dict:
         "agent_tasks": len(agent_plans),
         "code_lines": sum(item.lines for item in metrics),
         "security_risks": sum(_json_list_count(item.secrets_json) for item in metrics),
-        "total_tokens": report_tokens + chat_tokens,
+        "total_tokens": _total_content_tokens(
+            session,
+            reports=reports,
+            chat_messages=chat_messages,
+            agent_plans=agent_plans,
+            learning_cards=learning_cards,
+            learning_materials=learning_materials,
+            daily_logs=daily_logs,
+        ),
     }
+
+
+def _total_content_tokens(
+    session: Session,
+    *,
+    reports: list[Report] | None = None,
+    chat_messages: list[ChatMessage] | None = None,
+    agent_plans: list[AgentPlan] | None = None,
+    learning_cards: list[LearningCard] | None = None,
+    learning_materials: list[LearningCardMaterial] | None = None,
+    daily_logs: list[DailyWorkLog] | None = None,
+) -> int:
+    reports = reports if reports is not None else list(session.exec(select(Report)).all())
+    chat_messages = chat_messages if chat_messages is not None else list(session.exec(select(ChatMessage)).all())
+    agent_plans = agent_plans if agent_plans is not None else list(session.exec(select(AgentPlan)).all())
+    learning_cards = learning_cards if learning_cards is not None else list(session.exec(select(LearningCard)).all())
+    learning_materials = learning_materials if learning_materials is not None else list(session.exec(select(LearningCardMaterial)).all())
+    daily_logs = daily_logs if daily_logs is not None else list(session.exec(select(DailyWorkLog)).all())
+
+    report_tokens = sum(
+        count_tokens(item.code_content)
+        + count_tokens(item.code_a)
+        + count_tokens(item.code_b)
+        + count_tokens(item.content)
+        for item in reports
+    )
+    chat_tokens = sum(count_tokens(item.content) for item in chat_messages)
+    agent_tokens = sum(
+        count_tokens(item.instruction)
+        + count_tokens(item.summary)
+        + count_tokens(item.assumptions_json)
+        + count_tokens(item.warnings_json)
+        + count_tokens(item.operations_json)
+        + count_tokens(item.selected_files_json)
+        + count_tokens(item.apply_result)
+        for item in agent_plans
+    )
+    learning_tokens = sum(
+        count_tokens(item.title)
+        + count_tokens(item.explanation)
+        + count_tokens(item.tags_json)
+        + count_tokens(item.code_excerpt)
+        + count_tokens(item.detail_markdown)
+        + count_tokens(item.notes)
+        + count_tokens(item.resource_links_json)
+        for item in learning_cards
+    )
+    material_tokens = sum(
+        count_tokens(item.content_markdown)
+        + count_tokens(item.source_links_json)
+        for item in learning_materials
+    )
+    daily_log_tokens = sum(
+        count_tokens(item.title)
+        + count_tokens(item.content_markdown)
+        + count_tokens(item.source_stats_json)
+        + count_tokens(item.source_refs_json)
+        for item in daily_logs
+    )
+    return report_tokens + chat_tokens + agent_tokens + learning_tokens + material_tokens + daily_log_tokens
 
 
 def _recent_activity(session: Session, limit: int = 16) -> list[dict]:
@@ -2014,6 +2706,7 @@ def _mode_labels() -> dict[str, str]:
     for modes in REPORT_MODES.values():
         for item in modes:
             labels[item["id"]] = item["label"]
+    labels.setdefault("func_knowledge", "知识点提炼")
     return labels
 
 
@@ -2066,6 +2759,10 @@ def read_analytics(session: Session = Depends(get_session)) -> AnalyticsResponse
     chat_sessions = list(session.exec(select(ChatSession)).all())
     chat_messages = list(session.exec(select(ChatMessage)).all())
     metrics = list(session.exec(select(AnalysisMetric)).all())
+    agent_plans = list(session.exec(select(AgentPlan)).all())
+    learning_cards = list(session.exec(select(LearningCard)).all())
+    learning_materials = list(session.exec(select(LearningCardMaterial)).all())
+    daily_logs = list(session.exec(select(DailyWorkLog)).all())
 
     single_reports = [item for item in reports if item.report_type == "single"]
     diff_reports = [item for item in reports if item.report_type == "diff"]
@@ -2105,15 +2802,15 @@ def read_analytics(session: Session = Depends(get_session)) -> AnalyticsResponse
             }
         )
 
-    report_input_tokens = sum(
-        count_tokens(item.code_content)
-        + count_tokens(item.code_a)
-        + count_tokens(item.code_b)
-        for item in reports
+    total_tokens = _total_content_tokens(
+        session,
+        reports=reports,
+        chat_messages=chat_messages,
+        agent_plans=agent_plans,
+        learning_cards=learning_cards,
+        learning_materials=learning_materials,
+        daily_logs=daily_logs,
     )
-    report_output_tokens = sum(count_tokens(item.content) for item in reports)
-    chat_tokens = sum(count_tokens(item.content) for item in chat_messages)
-    total_tokens = report_input_tokens + report_output_tokens + chat_tokens
     token_status = tokenizer_status()
     balance = fetch_deepseek_balance()
 
@@ -2130,6 +2827,10 @@ def read_analytics(session: Session = Depends(get_session)) -> AnalyticsResponse
             "general_chats": len(general_chats),
             "report_chats": len(report_chats),
             "chat_messages": len(chat_messages),
+            "agent_tasks": len(agent_plans),
+            "learning_cards": len(learning_cards),
+            "learning_materials": len(learning_materials),
+            "daily_logs": len(daily_logs),
             "code_lines": total_lines,
             "functions": total_functions,
             "security_risks": total_risks,
@@ -2148,14 +2849,10 @@ def read_analytics(session: Session = Depends(get_session)) -> AnalyticsResponse
             "method": token_status.get("method"),
             "tokenizer_available": token_status.get("available"),
             "tokenizer_source": token_status.get("source"),
-            "report_input_tokens": report_input_tokens,
-            "report_output_tokens": report_output_tokens,
-            "chat_tokens": chat_tokens,
+            "refreshed_at": datetime.utcnow().isoformat(),
             "total_tokens": total_tokens,
             "items": [
-                {"label": "报告输入", "value": report_input_tokens},
-                {"label": "报告输出", "value": report_output_tokens},
-                {"label": "AI 对话", "value": chat_tokens},
+                {"label": "Token", "value": total_tokens},
             ],
         },
         api_balance=balance,
@@ -2202,6 +2899,20 @@ def stream_report(payload: ReportStreamRequest) -> StreamingResponse:
                 session.flush()
                 _save_metric(session, report.id, metrics)
                 session.commit()
+                learning_card_candidates: list[dict] = []
+                learning_card_candidate_error: str | None = None
+                if payload.generate_learning_card_candidates:
+                    yield sse_event(
+                        "status",
+                        {"phase": "learning_cards", "message": "知识卡片正在生成中..."},
+                    )
+                    try:
+                        learning_card_candidates = [
+                            item.model_dump()
+                            for item in _learning_card_candidates_for_report(report, limit=8, service=service)
+                        ]
+                    except Exception as candidate_exc:
+                        learning_card_candidate_error = str(candidate_exc)[:240]
                 yield sse_event(
                     "done",
                     {
@@ -2211,6 +2922,8 @@ def stream_report(payload: ReportStreamRequest) -> StreamingResponse:
                         "report_type": report.report_type,
                         "mode": report.mode,
                         "metrics_summary": _metric_summary(metrics),
+                        "learning_card_candidates": learning_card_candidates,
+                        "learning_card_candidate_error": learning_card_candidate_error,
                     },
                 )
         except Exception as exc:
@@ -2262,6 +2975,20 @@ def stream_diff(payload: DiffStreamRequest) -> StreamingResponse:
                 session.flush()
                 _save_metric(session, report.id, metrics)
                 session.commit()
+                learning_card_candidates: list[dict] = []
+                learning_card_candidate_error: str | None = None
+                if payload.generate_learning_card_candidates:
+                    yield sse_event(
+                        "status",
+                        {"phase": "learning_cards", "message": "知识卡片正在生成中..."},
+                    )
+                    try:
+                        learning_card_candidates = [
+                            item.model_dump()
+                            for item in _learning_card_candidates_for_report(report, limit=8, service=service)
+                        ]
+                    except Exception as candidate_exc:
+                        learning_card_candidate_error = str(candidate_exc)[:240]
                 yield sse_event(
                     "done",
                     {
@@ -2271,6 +2998,8 @@ def stream_diff(payload: DiffStreamRequest) -> StreamingResponse:
                         "report_type": report.report_type,
                         "mode": report.mode,
                         "metrics_summary": _metric_summary(metrics),
+                        "learning_card_candidates": learning_card_candidates,
+                        "learning_card_candidate_error": learning_card_candidate_error,
                     },
                 )
         except Exception as exc:
@@ -2286,7 +3015,7 @@ def stream_chat(payload: ChatStreamRequest) -> StreamingResponse:
         try:
             mysql_ok, mysql_message = check_database()
             if not mysql_ok:
-                yield sse_event("error", {"message": f"MySQL 未连接：{mysql_message}"})
+                yield sse_event("error", _mysql_error_payload(mysql_message))
                 return
 
             with Session(engine) as session:
@@ -2333,7 +3062,7 @@ def stream_chat(payload: ChatStreamRequest) -> StreamingResponse:
 
                 if not chat_session:
                     if report:
-                        title = _ensure_unique_title(session, ChatSession, f"{report.title}·关联对话")
+                        title = _ensure_unique_title(session, ChatSession, f"{report.title} · 关联对话")
                     else:
                         title = _ensure_unique_title(session, ChatSession, build_chat_fallback_title(payload.message, "", "新的对话"))
                     chat_session = ChatSession(
@@ -2381,7 +3110,7 @@ def stream_chat(payload: ChatStreamRequest) -> StreamingResponse:
                             chat_session.title = _ensure_unique_title(
                                 session,
                                 ChatSession,
-                                f"{linked_report.title}·关联对话",
+                                f"{linked_report.title} · 关联对话",
                                 chat_session.id,
                             )
                     elif should_auto_name_chat:
@@ -2407,6 +3136,8 @@ def list_chat_sessions(
     query: str | None = Query(default=None),
     context_type: str | None = Query(default=None),
     report_id: str | None = Query(default=None),
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> list[ChatSessionListItem]:
     statement = select(ChatSession)
@@ -2416,6 +3147,12 @@ def list_chat_sessions(
         statement = statement.where(ChatSession.context_type == context_type)
     if report_id:
         statement = statement.where(ChatSession.report_id == report_id)
+    if date_from:
+        start = _parse_log_date(date_from)
+        statement = statement.where(ChatSession.updated_at >= _day_start(start))
+    if date_to:
+        end = _parse_log_date(date_to)
+        statement = statement.where(ChatSession.updated_at < _day_end(end))
     statement = statement.order_by(ChatSession.updated_at.desc())
 
     sessions = list(session.exec(statement).all())
@@ -2481,6 +3218,9 @@ def list_reports(
     query: str | None = Query(default=None),
     language_code: str | None = Query(default=None),
     mode: str | None = Query(default=None),
+    report_type: str | None = Query(default=None),
+    date_from: str | None = Query(default=None),
+    date_to: str | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> list[Report]:
     statement = select(Report)
@@ -2491,6 +3231,14 @@ def list_reports(
         statement = statement.where(Report.language_code == language_code)
     if mode:
         statement = statement.where(Report.mode == mode)
+    if report_type:
+        statement = statement.where(Report.report_type == report_type)
+    if date_from:
+        start = _parse_log_date(date_from)
+        statement = statement.where(Report.created_at >= _day_start(start))
+    if date_to:
+        end = _parse_log_date(date_to)
+        statement = statement.where(Report.created_at < _day_end(end))
     statement = statement.order_by(Report.created_at.desc())
     return list(session.exec(statement).all())
 
@@ -2501,6 +3249,21 @@ def get_report_outline(report_id: str, session: Session = Depends(get_session)) 
     if not report:
         raise HTTPException(status_code=404, detail="报告不存在")
     return {"report_id": report.id, "outline": parse_report_outline(report.content)}
+
+
+@router.get("/reports/{report_id}/learning-cards", response_model=list[LearningCardItem])
+def get_report_learning_cards(report_id: str, session: Session = Depends(get_session)) -> list[LearningCardItem]:
+    report = session.get(Report, report_id)
+    if not report:
+        raise HTTPException(status_code=404, detail="报告不存在")
+    cards = list(
+        session.exec(
+            select(LearningCard)
+            .where(LearningCard.source_id == report_id)
+            .order_by(LearningCard.created_at.desc())
+        ).all()
+    )
+    return [_learning_card_item(card) for card in cards]
 
 
 @router.get("/reports/{report_id}", response_model=ReportDetail)

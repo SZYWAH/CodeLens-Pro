@@ -282,13 +282,13 @@ st.markdown(
 #  模型与语言配置
 # ============================================================
 DEEPSEEK_MODEL_OPTIONS = getattr(config, "MODEL_OPTIONS", {
-    "dsV4flash": "deepseek-v4-flash",
-    "dsV4pro": "deepseek-v4-pro",
+    "DeepSeek-V4-Flash": "deepseek-v4-flash",
+    "DeepSeek-V4-Pro": "deepseek-v4-pro",
 })
 
-DEFAULT_MODEL_LABEL = getattr(config, "DEFAULT_MODEL_LABEL", "dsV4flash")
+DEFAULT_MODEL_LABEL = getattr(config, "DEFAULT_MODEL_LABEL", "DeepSeek-V4-Flash")
 if DEFAULT_MODEL_LABEL not in DEEPSEEK_MODEL_OPTIONS:
-    DEFAULT_MODEL_LABEL = "dsV4flash" if "dsV4flash" in DEEPSEEK_MODEL_OPTIONS else next(iter(DEEPSEEK_MODEL_OPTIONS))
+    DEFAULT_MODEL_LABEL = "DeepSeek-V4-Flash" if "DeepSeek-V4-Flash" in DEEPSEEK_MODEL_OPTIONS else next(iter(DEEPSEEK_MODEL_OPTIONS))
 
 LANGUAGE_OPTIONS = getattr(config, "LANGUAGE_OPTIONS", {
     "Python": "python",

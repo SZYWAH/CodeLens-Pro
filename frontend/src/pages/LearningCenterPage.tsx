@@ -345,7 +345,7 @@ export function LearningCenterPage({ onNavigate: _onNavigate }: { onNavigate: (p
             <section className="daily-log-generating-sheet" aria-live="polite">
               {draftContent.trim() ? (
                 <article className="daily-log-document daily-log-document-streaming">
-                  {renderDailyMarkdown(cleanDailyMarkdown(draftContent), selectedDate)}
+                  {renderDailyMarkdown(cleanDailyMarkdown(draftContent))}
                 </article>
               ) : (
                 <div className="daily-log-empty daily-log-stream-empty">
@@ -370,7 +370,7 @@ export function LearningCenterPage({ onNavigate: _onNavigate }: { onNavigate: (p
             </section>
           ) : log?.content_markdown ? (
             <article className="daily-log-document">
-              {renderDailyMarkdown(log.content_markdown, selectedDate)}
+              {renderDailyMarkdown(log.content_markdown)}
             </article>
           ) : (
             <div className="daily-log-empty">
@@ -408,7 +408,7 @@ export function LearningCenterPage({ onNavigate: _onNavigate }: { onNavigate: (p
   );
 }
 
-function renderDailyMarkdown(content: string, selectedDate: string) {
+function renderDailyMarkdown(content: string) {
   const nodes: JSX.Element[] = [];
   let sectionLines: string[] = [];
   let sectionTitle = "";
@@ -435,12 +435,6 @@ function renderDailyMarkdown(content: string, selectedDate: string) {
     if (!line) return;
     if (line.startsWith("# ")) {
       flushSection();
-      nodes.push(
-        <header className="daily-log-document-cover" key={`cover-${index}`}>
-          <span>{selectedDate}</span>
-          <h1>{line.replace(/^#\s+/, "")}</h1>
-        </header>,
-      );
       return;
     }
     if (line.startsWith("## ")) {

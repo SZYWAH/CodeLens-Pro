@@ -1,41 +1,39 @@
 import { Compass, FileCode2, FolderTree, Map, RefreshCw, Route } from "lucide-react";
 import { useEffect, useState } from "react";
 import { api } from "../lib/api";
-import type { ProjectGuideResponse } from "../types";
+import type { ProjectGuideResponse, ProjectStructureNode, WorkspaceTreeNode } from "../types";
 
-export function ProjectGuidePage() {
-  const [guide, setGuide] = useState<ProjectGuideResponse | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
-
-  async function load() {
-    setLoading(true);
-    setError("");
-    try {
-      setGuide(await api.projectGuide());
-    } catch (exc) {
-      setError(exc instanceof Error ? exc.message : "项目导读加载失败");
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    void load();
-  }, []);
+export function ProjectGuideContent({
+  guide,
+  loading,
+  error,
+  onRefresh,
+  workspaceTree,
+  compact = false,
+}: {
+  guide: ProjectGuideResponse | null;
+  loading?: boolean;
+  error?: string;
+  onRefresh?: () => void;
+  workspaceTree?: WorkspaceTreeNode | null;
+  compact?: boolean;
+}) {
+  const projectStructure = guide?.project_structure ?? (workspaceTree ? workspaceTreeToProjectStructure(workspaceTree) : null);
 
   return (
-    <div className="page-scroll learning-page project-guide-page">
+    <div className={compact ? "project-guide-embedded" : "page-scroll learning-page project-guide-page"}>
       <section className="learning-hero project-guide-hero">
         <div className="project-guide-intro">
           <span className="learning-kicker"><Compass size={14} /> Project Guide</span>
           <h2>项目导读</h2>
-          <p>基于 VS Code 插件同步的项目结构，作为辅助视角推断入口、核心目录、阅读顺序和可能涉及的知识点。</p>
+          <p>直接读取本地项目结构和少量文件内容，生成项目架构、文件说明、核心区域与推荐阅读顺序。</p>
         </div>
-        <button className="btn btn-secondary project-guide-refresh" onClick={load} disabled={loading} type="button">
-          <RefreshCw className={loading ? "animate-spin" : ""} size={15} />
-          刷新导读
-        </button>
+        {onRefresh ? (
+          <button className="btn btn-secondary project-guide-refresh" onClick={onRefresh} disabled={loading} type="button">
+            <RefreshCw className={loading ? "animate-spin" : ""} size={15} />
+            刷新导读
+          </button>
+        ) : null}
       </section>
 
       {error ? <div className="chat-panel-error">{error}</div> : null}
@@ -61,15 +59,13 @@ export function ProjectGuidePage() {
 
       <div className="learning-grid learning-grid-main">
         <section className="learning-surface">
-          <div className="learning-section-head"><h3><FileCode2 size={16} /> 入口候选</h3></div>
-          <div className="project-path-list">
-            {(guide?.entry_candidates ?? []).map((item) => (
-              <article key={item.path}>
-                <strong>{item.path}</strong>
-                <p>{item.reason}</p>
-              </article>
-            ))}
-            {guide && !guide.entry_candidates.length ? <p className="learning-empty">暂未从项目树中识别到入口候选，建议确认插件同步是否完整。</p> : null}
+          <div className="learning-section-head"><h3><FileCode2 size={16} /> 项目架构</h3></div>
+          <div className="project-structure-panel">
+            {projectStructure ? (
+              <ProjectArchitectureView node={projectStructure} />
+            ) : (
+              <p className="learning-empty">{guide ? "当前没有可展示的项目架构。" : "打开 VS Code 插件后，这里会展示项目架构与文件说明。"}</p>
+            )}
           </div>
         </section>
 
@@ -113,4 +109,80 @@ export function ProjectGuidePage() {
       </div>
     </div>
   );
+}
+
+export function ProjectGuidePage() {
+  const [guide, setGuide] = useState<ProjectGuideResponse | null>(null);
+  const [workspaceTree, setWorkspaceTree] = useState<WorkspaceTreeNode | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      const [nextGuide, nextWorkspace] = await Promise.all([
+        api.projectGuide(),
+        api.currentWorkspace().catch(() => null),
+      ]);
+      setGuide(nextGuide);
+      setWorkspaceTree(nextWorkspace?.tree ?? null);
+    } catch (exc) {
+      setError(exc instanceof Error ? exc.message : "项目导读加载失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  return (
+    <ProjectGuideContent guide={guide} loading={loading} error={error} onRefresh={load} workspaceTree={workspaceTree} />
+  );
+}
+
+function ProjectArchitectureView({ node }: { node: ProjectStructureNode }) {
+  const lines = ["项目架构：", ...buildArchitectureLines(node)];
+  return (
+    <pre className="project-architecture-block" aria-label="项目架构与文件说明">
+      {lines.join("\n")}
+    </pre>
+  );
+}
+
+function buildArchitectureLines(node: ProjectStructureNode, prefix = "", isLast = true, isRoot = true): string[] {
+  const children = node.children ?? [];
+  const label = `${node.name || "项目"}${node.type === "directory" ? "/" : ""}`;
+  const comment = buildArchitectureComment(node);
+  const line = isRoot ? `${label}${comment}` : `${prefix}${isLast ? "└── " : "├── "}${label}${comment}`;
+  const childPrefix = isRoot ? "" : `${prefix}${isLast ? "    " : "│   "}`;
+  const lines = [line];
+
+  children.forEach((child, index) => {
+    lines.push(...buildArchitectureLines(child, childPrefix, index === children.length - 1, false));
+  });
+
+  if (node.truncated) {
+    lines.push(`${childPrefix}${children.length ? "└── " : ""}... # 已截断，部分节点未展示`);
+  }
+
+  return lines;
+}
+
+function buildArchitectureComment(node: ProjectStructureNode) {
+  const details = [node.description, node.truncated ? "已截断" : ""].filter(Boolean);
+  return details.length ? `  # ${details.join("，")}` : "";
+}
+
+function workspaceTreeToProjectStructure(node: WorkspaceTreeNode): ProjectStructureNode {
+  return {
+    name: node.name,
+    path: node.path,
+    type: node.type,
+    description: node.type === "directory" ? "项目目录" : "项目文件",
+    children: node.children?.map(workspaceTreeToProjectStructure),
+    truncated: node.truncated,
+  };
 }

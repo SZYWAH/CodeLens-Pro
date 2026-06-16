@@ -6,6 +6,7 @@ import {
   Folder,
   FolderOpen,
   FolderTree,
+  Map,
   MessageSquarePlus,
   PanelLeftClose,
   PanelLeftOpen,
@@ -14,11 +15,13 @@ import {
   Trash2,
 } from "lucide-react";
 import { useEffect, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { ChatPanel } from "../components/ChatPanel";
 import { api } from "../lib/api";
 import { formatTime } from "../lib/format";
 import { getApiBase } from "../lib/runtime";
-import type { AgentContextMode, ChatSessionListItem, SettingsResponse, WorkspaceSnapshot, WorkspaceTreeNode } from "../types";
+import { ProjectGuideContent } from "./ProjectGuidePage";
+import type { AgentContextMode, ChatSessionListItem, ProjectGuideResponse, SettingsResponse, WorkspaceSnapshot, WorkspaceTreeNode } from "../types";
 
 const MAX_AGENT_CONTEXT_FILES = 20;
 
@@ -44,6 +47,10 @@ export function AgentPage({
   const [workspaceLoading, setWorkspaceLoading] = useState(false);
   const [workspaceError, setWorkspaceError] = useState("");
   const [workspaceNotice, setWorkspaceNotice] = useState("");
+  const [projectGuideOpen, setProjectGuideOpen] = useState(false);
+  const [projectGuide, setProjectGuide] = useState<ProjectGuideResponse | null>(null);
+  const [projectGuideLoading, setProjectGuideLoading] = useState(false);
+  const [projectGuideError, setProjectGuideError] = useState("");
   const workspaceAnchorRef = useRef<HTMLDivElement | null>(null);
   const [workspacePopoverStyle, setWorkspacePopoverStyle] = useState<CSSProperties>({});
   const [expandedTreePaths, setExpandedTreePaths] = useState<Set<string>>(() => new Set([""]));
@@ -89,6 +96,23 @@ export function AgentPage({
     } finally {
       setWorkspaceLoading(false);
     }
+  }
+
+  async function loadProjectGuide() {
+    setProjectGuideLoading(true);
+    setProjectGuideError("");
+    try {
+      setProjectGuide(await api.projectGuide());
+    } catch (exc) {
+      setProjectGuideError(exc instanceof Error ? exc.message : "项目导读加载失败");
+    } finally {
+      setProjectGuideLoading(false);
+    }
+  }
+
+  function openProjectGuide() {
+    setProjectGuideOpen(true);
+    void loadProjectGuide();
   }
 
   useEffect(() => {
@@ -240,9 +264,15 @@ export function AgentPage({
                       <span>{workspaceStatusLabel(workspace)}</span>
                       <strong>{workspace?.workspace_name || "等待 VS Code 插件"}</strong>
                     </div>
-                    <button className="icon-button h-7 w-7" onClick={loadWorkspace} type="button" title="刷新项目结构">
-                      <RefreshCw className={workspaceLoading ? "animate-spin" : ""} size={13} />
-                    </button>
+                    <div className="agent-workspace-head-actions">
+                      <button className="agent-workspace-guide-button" onClick={openProjectGuide} type="button">
+                        <Map size={13} />
+                        项目导读
+                      </button>
+                      <button className="icon-button h-7 w-7" onClick={loadWorkspace} type="button" title="刷新项目结构">
+                        <RefreshCw className={workspaceLoading ? "animate-spin" : ""} size={13} />
+                      </button>
+                    </div>
                   </div>
                   {workspace?.workspace_root ? (
                     <div className="agent-workspace-root" title={workspace.workspace_root}>
@@ -368,8 +398,62 @@ export function AgentPage({
         onClearSelectedFiles={() => setSelectedFilePaths([])}
         onContextModeChange={setContextMode}
       />
+      {projectGuideOpen ? (
+        <ProjectGuideDialog
+          error={projectGuideError}
+          guide={projectGuide}
+          loading={projectGuideLoading}
+          workspaceTree={workspace?.tree ?? null}
+          onClose={() => setProjectGuideOpen(false)}
+          onRefresh={() => void loadProjectGuide()}
+        />
+      ) : null}
     </div>
   );
+}
+
+function ProjectGuideDialog({
+  guide,
+  loading,
+  error,
+  workspaceTree,
+  onClose,
+  onRefresh,
+}: {
+  guide: ProjectGuideResponse | null;
+  loading: boolean;
+  error: string;
+  workspaceTree: WorkspaceTreeNode | null;
+  onClose: () => void;
+  onRefresh: () => void;
+}) {
+  const dialog = (
+    <div className="project-guide-dialog-overlay" role="dialog" aria-modal="true" aria-label="项目导读">
+      <section className="project-guide-dialog">
+        <div className="project-guide-dialog-head">
+          <div>
+            <span>Project Guide</span>
+            <strong>项目导读</strong>
+          </div>
+          <button className="icon-button h-8 w-8" onClick={onClose} type="button" title="关闭项目导读">
+            <PanelLeftClose size={15} />
+          </button>
+        </div>
+        <div className="project-guide-dialog-body">
+          <ProjectGuideContent
+            compact
+            error={error}
+            guide={guide}
+            loading={loading}
+            onRefresh={onRefresh}
+            workspaceTree={workspaceTree}
+          />
+        </div>
+      </section>
+    </div>
+  );
+
+  return typeof document === "undefined" ? dialog : createPortal(dialog, document.body);
 }
 
 function WorkspaceTree({

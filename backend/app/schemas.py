@@ -49,6 +49,7 @@ class AgentFileContext(BaseModel):
 
 
 AgentContextMode = Literal["manual", "ai_auto", "hybrid"]
+AgentMessageIntent = Literal["auto", "chat", "plan"]
 
 
 class AgentPlanRequest(BaseModel):
@@ -100,9 +101,31 @@ class AgentChatStreamRequest(BaseModel):
     code_context: str = ""
     report_context: str | None = None
     files: list[AgentFileContext] = Field(default_factory=list)
+    selected_file_paths: list[str] = Field(default_factory=list)
+    context_mode: AgentContextMode = "manual"
     model: str | None = None
     source: str = "plugin"
     workspace_root: str | None = None
+
+
+class AgentMessageStreamRequest(AgentChatStreamRequest):
+    intent: AgentMessageIntent = "auto"
+
+
+class AgentChatContextRequestItem(BaseModel):
+    request_id: str
+    session_id: str
+    message: str
+    selected_file_paths: list[str] = Field(default_factory=list)
+    context_mode: AgentContextMode = "manual"
+    created_at: datetime
+
+
+class AgentChatContextResultRequest(BaseModel):
+    status: Literal["ok", "failed"]
+    message: str = ""
+    files: list[AgentFileContext] = Field(default_factory=list)
+    selected_file_paths: list[str] = Field(default_factory=list)
 
 
 class AgentOperation(BaseModel):
@@ -295,7 +318,7 @@ class LearningCardUpdateRequest(BaseModel):
 
 
 class LearningCardGenerateRequest(BaseModel):
-    source_limit: int = Field(default=8, ge=1, le=30)
+    source_limit: int = Field(default=10, ge=1, le=30)
     model: str | None = None
 
 
@@ -361,6 +384,7 @@ class ProjectGuideResponse(BaseModel):
     entry_candidates: list[dict[str, Any]]
     core_areas: list[dict[str, Any]]
     read_order: list[dict[str, Any]]
+    project_structure: dict[str, Any] | None = None
     knowledge_points: list[str] = Field(default_factory=list)
     notes: list[str] = Field(default_factory=list)
 

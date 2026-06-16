@@ -19,6 +19,7 @@ GENERIC_TITLE_WORDS = {
     "设计思路",
     "优化建议",
     "知识点提炼",
+    "代码运行推演",
     "结构分析",
     "接口整理",
     "复杂度分析",
@@ -86,6 +87,35 @@ def _parse_json_object(text: str) -> dict:
     if not isinstance(value, dict):
         raise ValueError("Agent 计划必须是 JSON 对象")
     return value
+
+
+def _parse_json_array_or_object(text: str) -> list:
+    candidate = text.strip()
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)```", candidate, re.IGNORECASE)
+    if fenced:
+        candidate = fenced.group(1).strip()
+
+    try:
+        value = json.loads(candidate)
+    except json.JSONDecodeError:
+        array_match = re.search(r"\[[\s\S]*\]", candidate)
+        object_match = re.search(r"\{[\s\S]*\}", candidate)
+        if array_match:
+            value = json.loads(array_match.group(0))
+        elif object_match:
+            value = json.loads(object_match.group(0))
+        else:
+            raise ValueError("知识卡片候选不是有效 JSON")
+
+    if isinstance(value, dict):
+        for key in ("cards", "candidates", "knowledge_points"):
+            nested = value.get(key)
+            if isinstance(nested, list):
+                return nested
+        return []
+    if isinstance(value, list):
+        return value
+    raise ValueError("知识卡片候选必须是 JSON 数组")
 
 
 def _extract_code_names(code: str, limit: int = 2) -> list[str]:
@@ -181,13 +211,16 @@ class LLMService:
             base_url=settings.deepseek_base_url,
         )
 
-    def _stream_completion(self, messages: list[dict[str, str]]) -> Iterable[str]:
-        stream = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=0.2,
-            stream=True,
-        )
+    def _stream_completion(self, messages: list[dict[str, str]], max_tokens: int | None = None) -> Iterable[str]:
+        kwargs = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.2,
+            "stream": True,
+        }
+        if max_tokens is not None:
+            kwargs["max_tokens"] = max_tokens
+        stream = self.client.chat.completions.create(**kwargs)
         for chunk in stream:
             text = self.extract_stream_text(chunk)
             if text:
@@ -407,6 +440,47 @@ class LLMService:
             "skipped": skipped if isinstance(skipped, list) else [],
         }
 
+    def generate_learning_card_candidates(
+        self,
+        code: str,
+        report_content: str,
+        report_title: str,
+        report_mode: str,
+        language_code: str,
+        language_label: str,
+        limit: int = 8,
+    ) -> list[dict]:
+        language_code, language_label, _ = resolve_language(language_code, language_label)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是 CodeLens Pro 的编程学习卡片抽取助手。"
+                    "请根据代码和报告内容，抽取真正值得复习的编程知识点候选。"
+                    "不要做关键词堆砌，不要把普通报告标题当知识点。"
+                    "只返回严格 JSON 数组，不要 Markdown，不要解释，不要推理过程。"
+                    "每项必须包含 title、explanation、difficulty、tags、code_excerpt、detail_markdown、source_reason、confidence。"
+                    "difficulty 只能是 入门、进阶、面试、项目 之一。"
+                    "tags 是 2 到 6 个短标签。code_excerpt 必须来自用户代码或为空字符串。"
+                    "detail_markdown 用中文 Markdown，包含 适用场景、常见误区、复习建议 三个小节。"
+                    f"候选数量控制在 3 到 {max(3, min(limit, 8))} 个；如果材料很少，可以少于 3 个。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"语言：{language_label} ({language_code})\n"
+                    f"报告类型：{report_mode}\n"
+                    f"报告标题：{report_title}\n\n"
+                    f"代码：\n```{language_code}\n{_clip_text(code, 18000)}\n```\n\n"
+                    f"报告内容：\n{_clip_text(report_content, 16000)}"
+                ),
+            },
+        ]
+        raw = self._complete_text(messages, max_tokens=3600)
+        value = _parse_json_array_or_object(raw)
+        return [item for item in value if isinstance(item, dict)][: max(1, min(limit, 12))]
+
     def generate_agent_plan(
         self,
         instruction: str,
@@ -559,8 +633,8 @@ class LLMService:
         ]
         return clean_generated_title(self._complete_text(messages, max_tokens=256), smart_fallback)
 
-    def generate_daily_work_log(self, log_date: str, context_markdown: str, stats: dict) -> str:
-        messages = [
+    def _daily_work_log_messages(self, log_date: str, context_markdown: str, stats: dict) -> list[dict[str, str]]:
+        return [
             {
                 "role": "system",
                 "content": (
@@ -568,6 +642,8 @@ class LLMService:
                     "请根据当天使用记录生成一张中文 Markdown 日志卡片。"
                     "风格像开发者日记：克制、具体、可回看，不要夸张，不要编造没有发生的事。"
                     "必须包含这些小节：今日概览、完成事项、AI 对话与报告、Agent 实践、知识卡片与学习、明日建议。"
+                    "第一行必须是一级标题：# 📋 CodeLens Pro 日志卡片 — 日期。"
+                    "只输出 Markdown 正文，不要用 ```markdown 或其他代码围栏包裹整篇日志。"
                     "如果某类记录为空，请简短说明当天没有对应活动。不要输出推理过程。"
                 ),
             },
@@ -576,13 +652,20 @@ class LLMService:
                 "content": (
                     f"日期：{log_date}\n"
                     f"统计：{json.dumps(stats, ensure_ascii=False)}\n\n"
+                    f"请以这一行开头：# 📋 CodeLens Pro 日志卡片 — {log_date}\n\n"
                     f"当天记录：\n{_clip_text(context_markdown, 26000)}"
                 ),
             },
         ]
+
+    def generate_daily_work_log(self, log_date: str, context_markdown: str, stats: dict) -> str:
+        messages = self._daily_work_log_messages(log_date, context_markdown, stats)
         return self._complete_text(messages, max_tokens=2200)
 
-    def generate_learning_card_material(
+    def stream_daily_work_log(self, log_date: str, context_markdown: str, stats: dict) -> Iterable[str]:
+        return self._stream_completion(self._daily_work_log_messages(log_date, context_markdown, stats), max_tokens=2200)
+
+    def _learning_card_material_messages(
         self,
         title: str,
         language_label: str,
@@ -591,8 +674,8 @@ class LLMService:
         tags: list[str],
         code_excerpt: str | None,
         source_links: list[dict],
-    ) -> str:
-        messages = [
+    ) -> list[dict[str, str]]:
+        return [
             {
                 "role": "system",
                 "content": (
@@ -616,4 +699,81 @@ class LLMService:
                 ),
             },
         ]
+
+    def generate_learning_card_material(
+        self,
+        title: str,
+        language_label: str,
+        difficulty: str,
+        explanation: str,
+        tags: list[str],
+        code_excerpt: str | None,
+        source_links: list[dict],
+    ) -> str:
+        messages = self._learning_card_material_messages(
+            title,
+            language_label,
+            difficulty,
+            explanation,
+            tags,
+            code_excerpt,
+            source_links,
+        )
         return self._complete_text(messages, max_tokens=1800)
+
+    def stream_learning_card_material(
+        self,
+        title: str,
+        language_label: str,
+        difficulty: str,
+        explanation: str,
+        tags: list[str],
+        code_excerpt: str | None,
+        source_links: list[dict],
+    ) -> Iterable[str]:
+        return self._stream_completion(
+            self._learning_card_material_messages(
+                title,
+                language_label,
+                difficulty,
+                explanation,
+                tags,
+                code_excerpt,
+                source_links,
+            ),
+            max_tokens=1800,
+        )
+
+    def suggest_learning_card_tags(self, cards: list[dict]) -> list[dict]:
+        compact_cards = [
+            {
+                "id": str(item.get("id") or ""),
+                "title": str(item.get("title") or "")[:120],
+                "language_label": str(item.get("language_label") or "通用")[:32],
+                "difficulty": str(item.get("difficulty") or "")[:24],
+                "status": str(item.get("status") or "")[:24],
+                "tags": [str(tag)[:32] for tag in item.get("tags", []) if str(tag).strip()][:8],
+                "explanation": _clip_text(str(item.get("explanation") or ""), 420),
+            }
+            for item in cards
+            if str(item.get("id") or "").strip()
+        ]
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "你是编程学习卡片的标签整理助手。请只输出 JSON 数组，不要 Markdown。"
+                    "每个建议对象必须包含 id、action、title、reason、card_ids、from_tags、to_tags。"
+                    "action 只能是 merge、add、remove、rename。"
+                    "建议应保守、可解释，优先合并同义标签、删除过泛标签、补充少量主题标签。"
+                    "不要修改卡片正文，不要发明与卡片无关的主题。最多输出 12 条建议。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": f"知识卡片列表：\n{_clip_text(json.dumps(compact_cards, ensure_ascii=False), 28000)}",
+            },
+        ]
+        raw = self._complete_text(messages, max_tokens=2200)
+        value = _parse_json_array_or_object(raw)
+        return [item for item in value if isinstance(item, dict)]

@@ -1,5 +1,7 @@
 from datetime import datetime, timedelta
 
+import pytest
+from fastapi import HTTPException
 from sqlalchemy import create_engine, text
 from sqlmodel import Session
 
@@ -13,6 +15,7 @@ from backend.app.api.routes import (
     _learning_card_item,
     _learning_card_material_item,
     _learning_card_material_placeholder,
+    _normalize_learning_card_candidate,
     _learning_center,
     _learning_review,
     _metric_summary,
@@ -20,12 +23,13 @@ from backend.app.api.routes import (
     _recent_activity,
     select_agent_context,
     read_current_agent_workspace,
+    update_daily_work_log,
     update_agent_workspace_heartbeat,
     error_payload,
     parse_report_outline,
 )
 from backend.app.models import AgentPlan, AnalysisMetric, ChatMessage, ChatSession, DailyWorkLog, LearningCard, LearningCardMaterial, Report
-from backend.app.schemas import AgentContextFileCandidate, AgentContextSelectRequest, AgentWorkspaceHeartbeatRequest, AgentWorkspaceTreeNode
+from backend.app.schemas import AgentContextFileCandidate, AgentContextSelectRequest, AgentWorkspaceHeartbeatRequest, AgentWorkspaceTreeNode, DailyWorkLogUpdateRequest
 
 
 def test_parse_report_outline_extracts_markdown_headings():
@@ -44,6 +48,29 @@ def test_error_payload_keeps_message_for_stream_compatibility():
     assert payload["code"] == "LLM_KEY_MISSING"
     assert payload["message"] == "Key 未配置"
     assert payload["hint"] == "填写 .env"
+
+
+def test_learning_card_candidate_normalization_adds_defaults():
+    candidate = _normalize_learning_card_candidate(
+        {
+            "title": " 字典推导式 ",
+            "explanation": "用于快速构造字典。",
+            "difficulty": "unknown",
+            "tags": ["Python", "dict", "dict"],
+            "source_reason": "报告中多次说明了重构循环的写法。",
+            "confidence": 1.4,
+        },
+        fallback_language_label="Python",
+        fallback_source_id="r1",
+        fallback_source_title="缓存函数分析",
+    )
+
+    assert candidate.title == "字典推导式"
+    assert candidate.difficulty == "入门"
+    assert candidate.source_id == "r1"
+    assert candidate.tags == ["Python", "dict"]
+    assert candidate.resource_links
+    assert candidate.confidence == 1.0
 
 
 def test_metric_summary_compacts_static_metrics():
@@ -295,6 +322,81 @@ def test_recent_activity_and_summary_use_existing_tables():
     assert daily_item.has_log
     assert daily_item.source_refs[0]["type"] == "report"
     assert "异常处理" in _fallback_learning_card_material(card, ["Python", "异常处理"])
+
+
+def _create_daily_work_logs_table(engine):
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE reports (
+                id VARCHAR(32) PRIMARY KEY,
+                created_at DATETIME NOT NULL
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                created_at DATETIME NOT NULL
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE agent_plans (
+                id VARCHAR(32) PRIMARY KEY,
+                updated_at DATETIME NOT NULL
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE learning_cards (
+                id VARCHAR(32) PRIMARY KEY,
+                updated_at DATETIME NOT NULL
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE daily_work_logs (
+                id VARCHAR(32) PRIMARY KEY,
+                log_date DATETIME NOT NULL,
+                title VARCHAR(160) NOT NULL,
+                content_markdown TEXT NOT NULL,
+                source_stats_json TEXT NOT NULL,
+                source_refs_json TEXT NOT NULL,
+                model VARCHAR(96),
+                generated_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL
+            )
+        """))
+
+
+def test_update_daily_work_log_creates_manual_log_for_empty_day():
+    engine = create_engine("sqlite:///:memory:")
+    _create_daily_work_logs_table(engine)
+    day = (datetime.utcnow() - timedelta(days=1)).date()
+
+    with Session(engine) as session:
+        item = update_daily_work_log(
+            day.isoformat(),
+            DailyWorkLogUpdateRequest(title="随手日记", content_markdown="今天复盘了一下递归。"),
+            session,
+        )
+
+    assert item.has_log is True
+    assert item.title == "随手日记"
+    assert item.content_markdown == "今天复盘了一下递归。"
+    assert item.model is None
+    assert item.source_refs == []
+
+
+def test_update_daily_work_log_rejects_empty_manual_content():
+    engine = create_engine("sqlite:///:memory:")
+    _create_daily_work_logs_table(engine)
+    day = (datetime.utcnow() - timedelta(days=1)).date()
+
+    with Session(engine) as session, pytest.raises(HTTPException) as exc_info:
+        update_daily_work_log(
+            day.isoformat(),
+            DailyWorkLogUpdateRequest(title="空日记", content_markdown="   "),
+            session,
+        )
+
+    assert exc_info.value.status_code == 400
 
 
 def test_agent_context_select_filters_to_candidate_paths(monkeypatch):

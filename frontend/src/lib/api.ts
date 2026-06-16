@@ -71,10 +71,11 @@ export const api = {
       body: JSON.stringify(body)
     }),
   learningCenter: () => request<LearningCenterResponse>("/api/learning/center"),
-  learningCards: (params: { query?: string; status?: string; language_label?: string } = {}) => {
+  learningCards: (params: { query?: string; status?: string; difficulty?: string; language_label?: string } = {}) => {
     const search = new URLSearchParams();
     if (params.query) search.set("query", params.query);
     if (params.status) search.set("status", params.status);
+    if (params.difficulty) search.set("difficulty", params.difficulty);
     if (params.language_label) search.set("language_label", params.language_label);
     const suffix = search.toString() ? `?${search}` : "";
     return request<LearningCardItem[]>(`/api/learning/cards${suffix}`);
@@ -104,7 +105,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ model })
     }),
-  generateLearningCards: (source_limit = 8) =>
+  generateLearningCards: (source_limit = 10) =>
     request<LearningCardGenerateResponse>("/api/learning/cards/generate", {
       method: "POST",
       body: JSON.stringify({ source_limit })

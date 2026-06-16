@@ -1333,7 +1333,7 @@ function PillSelect({
   const open = openSelect === id;
 
   return (
-    <div className="pill-select">
+    <div className={["pill-select", id === "model" ? "pill-select-model" : ""].filter(Boolean).join(" ")}>
       <button
         className={`pill-select-trigger ${open ? "pill-select-trigger-open" : ""}`}
         type="button"

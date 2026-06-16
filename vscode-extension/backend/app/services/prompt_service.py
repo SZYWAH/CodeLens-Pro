@@ -6,8 +6,18 @@ from CodeLens import config as legacy_config
 MODEL_OPTIONS: dict[str, str] = getattr(
     legacy_config,
     "MODEL_OPTIONS",
-    {"dsV4flash": "deepseek-v4-flash", "dsV4pro": "deepseek-v4-pro"},
+    {"DeepSeek-V4-Flash": "deepseek-v4-flash", "DeepSeek-V4-Pro": "deepseek-v4-pro"},
 )
+
+MODEL_LABEL_ALIASES = {
+    "dsV4flash": "DeepSeek-V4-Flash",
+    "dsV4pro": "DeepSeek-V4-Pro",
+}
+
+MODEL_OPTIONS = {
+    MODEL_LABEL_ALIASES.get(label, label): model_id
+    for label, model_id in MODEL_OPTIONS.items()
+}
 
 LANGUAGE_OPTIONS: dict[str, str] = getattr(
     legacy_config,
@@ -35,7 +45,7 @@ REPORT_MODES = {
         {"id": "func_comment", "label": "注释解析"},
         {"id": "func_design", "label": "设计思路"},
         {"id": "func_optimize", "label": "优化建议"},
-        {"id": "func_knowledge", "label": "知识点提炼"},
+        {"id": "func_trace", "label": "代码运行推演"},
     ],
     "script": [
         {"id": "script_structure", "label": "结构分析"},
@@ -76,12 +86,13 @@ def resolve_language(language_code: str | None = None, language_label: str | Non
 
 def resolve_model(model: str | None) -> str:
     if not model:
-        return MODEL_OPTIONS.get("dsV4flash", "deepseek-v4-flash")
-    if model in MODEL_OPTIONS:
-        return MODEL_OPTIONS[model]
-    if model in MODEL_OPTIONS.values():
-        return model
-    return model
+        return MODEL_OPTIONS.get("DeepSeek-V4-Flash", "deepseek-v4-flash")
+    normalized = MODEL_LABEL_ALIASES.get(model, model)
+    if normalized in MODEL_OPTIONS:
+        return MODEL_OPTIONS[normalized]
+    if normalized in MODEL_OPTIONS.values():
+        return normalized
+    return normalized
 
 
 def report_title(mode: str) -> str:

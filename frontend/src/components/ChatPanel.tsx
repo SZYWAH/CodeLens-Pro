@@ -9,6 +9,7 @@ import { SelectField } from "./SelectField";
 import type { AgentContextMode, AgentPlan, ChatMessage, SettingsResponse, WorkspaceSnapshot } from "../types";
 
 type ChatPanelMode = "general" | "report" | "agent";
+type AgentIntent = "auto" | "chat" | "plan";
 
 type ConversationTurn = {
   turnNumber: number;
@@ -73,8 +74,9 @@ export function ChatPanel({
   const [confirmingPlanId, setConfirmingPlanId] = useState<string | null>(null);
   const [inputHeight, setInputHeight] = useState(compact ? 48 : 56);
   const [isResizingInput, setIsResizingInput] = useState(false);
-  const [agentAction, setAgentAction] = useState<"chat" | "plan">("chat");
+  const [agentIntent, setAgentIntent] = useState<AgentIntent>("auto");
   const [activeTurnMessageIndex, setActiveTurnMessageIndex] = useState<number | null>(null);
+  const [agentStatusMessage, setAgentStatusMessage] = useState("");
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const turnNodeRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const sessionSnapshotRef = useRef("");
@@ -114,10 +116,11 @@ export function ChatPanel({
   const helperText = useMemo(() => {
     if (isReportMode && !reportId) return "报告保存完成后即可开始上下文对话";
     if (isReportMode) return `已携带当前代码与报告上下文 · ${reportPromptHint}`;
-    if (isAgentMode && agentAction === "plan") return "修改任务会同步到 VS Code 插件，由插件读取项目并确认应用";
+    if (isAgentMode && agentIntent === "plan") return "将生成可确认的插件修改计划，确认前不会应用文件改动。";
+    if (isAgentMode && agentIntent === "chat") return "仅讨论项目结构、代码问题和修改思路，不自动生成计划。";
     if (isAgentMode) return "Agent 讨论模式，可先分析项目、定位问题、梳理修改思路";
     return "普通聊天模式，不自动携带当前代码或报告";
-  }, [agentAction, isAgentMode, isReportMode, reportId]);
+  }, [agentIntent, isAgentMode, isReportMode, reportId]);
 
   useEffect(() => {
     if (activeTurnMessageIndex === null) return;
@@ -345,6 +348,7 @@ export function ChatPanel({
     if (!message || loading || (isReportMode && !reportId)) return;
 
     setError("");
+    setAgentStatusMessage("");
     setLoading(true);
     if (options.clearInput ?? true) setInput("");
     autoFollowBottomRef.current = true;
@@ -353,19 +357,50 @@ export function ChatPanel({
 
     try {
       if (isAgentMode) {
-        if (agentAction === "chat") {
+        if (true) {
           await streamPost(
-            "/api/agent/chat/stream",
+            "/api/agent/message/stream",
             {
               message,
               session_id: activeSessionId,
+              intent: agentIntent,
               code_context: codeContext,
               report_context: reportContext || null,
+              selected_file_paths: selectedFilePaths,
+              context_mode: contextMode,
               model,
-              source: "web"
+              source: "web",
+              workspace_root: workspace?.workspace_root ?? null
             },
             {
+              onStatus: (data) => {
+                if (data.phase === "agent_context") {
+                  setAgentStatusMessage(String(data.message || "插件正在读取上下文文件..."));
+                  followMessagesBottom();
+                }
+              },
+              onPlan: (data) => {
+                const plan = data.plan as AgentPlan | undefined;
+                if (!plan) return;
+                setAgentPlans((previous) => {
+                  const planId = plan.plan_id ?? plan.id;
+                  if (planId && previous.some((item) => (item.plan_id ?? item.id) === planId)) return previous;
+                  return [...previous, plan];
+                });
+                setMessages((previous) => {
+                  const next = [...previous];
+                  const last = next[next.length - 1];
+                  if (last?.role === "assistant") {
+                    next[next.length - 1] = {
+                      ...last,
+                      content: `Agent 修改任务已创建。\n\n摘要：${plan.summary}\n状态：${plan.apply_result || "等待 VS Code 插件读取文件并生成计划。"}`
+                    };
+                  }
+                  return next;
+                });
+              },
               onDelta: (text) => {
+                setAgentStatusMessage("");
                 setMessages((previous) => {
                   const next = [...previous];
                   const last = next[next.length - 1];
@@ -374,6 +409,7 @@ export function ChatPanel({
                 });
               },
               onDone: (data) => {
+                setAgentStatusMessage("");
                 const nextSessionId = String(data.session_id ?? activeSessionId ?? "");
                 if (nextSessionId) {
                   applySessionId(nextSessionId);
@@ -382,6 +418,7 @@ export function ChatPanel({
                 setLoading(false);
               },
               onError: (messageText) => {
+                setAgentStatusMessage("");
                 setError(messageText);
                 setLoading(false);
               }
@@ -404,9 +441,10 @@ export function ChatPanel({
           model,
           source: "web"
         });
-        if (plan.session_id) applySessionId(plan.session_id);
+        const nextPlanSessionId = plan.session_id ?? null;
+        if (nextPlanSessionId) applySessionId(nextPlanSessionId);
         setAgentPlans((previous) => [...previous, plan]);
-        if (plan.session_id) onSessionSaved?.(plan.session_id);
+        if (nextPlanSessionId) onSessionSaved?.(String(nextPlanSessionId));
         setMessages((previous) => {
           const next = [...previous];
           const last = next[next.length - 1];
@@ -530,7 +568,7 @@ export function ChatPanel({
       style={chatPanelStyle}
     >
       <div className="chat-panel-header">
-        <div className="flex min-w-0 items-center gap-2">
+        <div className="agent-chat-title-block flex min-w-0 items-center gap-2">
           <div className="chat-panel-icon">
             <Bot size={15} />
           </div>
@@ -539,19 +577,35 @@ export function ChatPanel({
             <p>{helperText}</p>
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        {isAgentMode ? (
+          <AgentHeaderCompactControls
+            contextMode={contextMode}
+            onContextModeChange={onContextModeChange}
+            selectedFilePaths={selectedFilePaths}
+            stage={agentStage}
+            workspace={workspace}
+          />
+        ) : null}
+        <div className="agent-chat-actions flex shrink-0 items-center gap-2">
           {isAgentMode ? (
             <div className="agent-web-action-toggle" aria-label="Agent 模式">
               <button
-                className={agentAction === "chat" ? "agent-web-action-active" : ""}
-                onClick={() => setAgentAction("chat")}
+                className={agentIntent === "auto" ? "agent-web-action-active" : ""}
+                onClick={() => setAgentIntent("auto")}
                 type="button"
               >
                 讨论
               </button>
               <button
-                className={agentAction === "plan" ? "agent-web-action-active" : ""}
-                onClick={() => setAgentAction("plan")}
+                className={agentIntent === "chat" ? "agent-web-action-active" : ""}
+                onClick={() => setAgentIntent("chat")}
+                type="button"
+              >
+                仅讨论
+              </button>
+              <button
+                className={agentIntent === "plan" ? "agent-web-action-active" : ""}
+                onClick={() => setAgentIntent("plan")}
                 type="button"
               >
                 交给插件修改
@@ -622,7 +676,11 @@ export function ChatPanel({
                   {message.role === "assistant" ? (
                     <div className="chat-assistant-message">
                       <div className="chat-bubble chat-bubble-assistant">
-                        {message.content ? <MarkdownDocument content={message.content} className="chat-markdown-document" /> : loading ? "..." : ""}
+                        {message.content ? (
+                          <MarkdownDocument content={message.content} className="chat-markdown-document" />
+                        ) : loading ? (
+                          agentStatusMessage || "..."
+                        ) : ""}
                       </div>
                       {message.content ? (
                         <div className="chat-message-actions">
@@ -671,51 +729,13 @@ export function ChatPanel({
 
       {error ? <div className="chat-panel-error">{error}</div> : null}
 
-      {isAgentMode ? <AgentWorkflowStrip stage={agentStage} /> : null}
-
-      {isAgentMode ? (
-        <div className="agent-context-mode-strip">
-          <span>上下文</span>
-          <div className="agent-context-mode-options" role="tablist" aria-label="Agent 上下文来源">
-            {(["manual", "ai_auto", "hybrid"] as AgentContextMode[]).map((modeOption) => (
-              <button
-                aria-selected={contextMode === modeOption}
-                className={["agent-context-mode-option", contextMode === modeOption ? "agent-context-mode-option-active" : ""].filter(Boolean).join(" ")}
-                key={modeOption}
-                onClick={() => onContextModeChange?.(modeOption)}
-                role="tab"
-                type="button"
-              >
-                {contextModeLabel(modeOption)}
-              </button>
-            ))}
-          </div>
-          <em>{contextModeHint(contextMode, selectedFilePaths.length, workspace)}</em>
-        </div>
-      ) : null}
-
       {isAgentMode && selectedFilePaths.length ? (
-        <div className="agent-context-file-strip">
-          <span>{contextMode === "ai_auto" ? "参考文件" : contextMode === "hybrid" ? "种子文件" : "上下文文件"}</span>
-          <div className="agent-context-file-chip-list">
-            {selectedFilePaths.slice(0, 8).map((path) => (
-              <button
-                className="agent-context-file-chip"
-                key={path}
-                onClick={() => onRemoveSelectedFile?.(path)}
-                title={path}
-                type="button"
-              >
-                <strong>{fileNameFromPath(path)}</strong>
-                <X size={12} />
-              </button>
-            ))}
-            {selectedFilePaths.length > 8 ? <em>+{selectedFilePaths.length - 8}</em> : null}
-          </div>
-          <button className="agent-context-file-clear" onClick={onClearSelectedFiles} type="button">
-            清空
-          </button>
-        </div>
+        <AgentSelectedFileBar
+          contextMode={contextMode}
+          onClearSelectedFiles={onClearSelectedFiles}
+          onRemoveSelectedFile={onRemoveSelectedFile}
+          selectedFilePaths={selectedFilePaths}
+        />
       ) : null}
 
       <div
@@ -739,7 +759,7 @@ export function ChatPanel({
               void send();
             }
           }}
-          placeholder={isReportMode ? "围绕这份报告继续追问" : isAgentMode ? (agentAction === "plan" ? "描述要交给 VS Code 插件修改或调试的任务..." : "询问项目结构、代码问题或调试思路...") : "随便聊点什么"}
+          placeholder={isReportMode ? "围绕这份报告继续追问" : isAgentMode ? (agentIntent === "plan" ? "描述要生成修改计划的任务..." : agentIntent === "chat" ? "询问项目结构、代码问题或调试思路..." : "提问或描述修改目标，系统会自动判断是否生成计划...") : "随便聊点什么"}
           value={input}
         />
         <button className="btn btn-primary chat-panel-send" disabled={!canSend} onClick={send} type="button">
@@ -905,6 +925,98 @@ type AgentStageState = {
   plan: "idle" | "pending" | "waiting_confirm" | "confirmed" | "applied" | "failed" | "rejected";
   execution: "idle" | "waiting" | "done" | "failed" | "rejected";
 };
+
+function AgentHeaderCompactControls({
+  stage,
+  contextMode,
+  selectedFilePaths,
+  workspace,
+  onContextModeChange
+}: {
+  stage: AgentStageState;
+  contextMode: AgentContextMode;
+  selectedFilePaths: string[];
+  workspace?: WorkspaceSnapshot | null;
+  onContextModeChange?: (mode: AgentContextMode) => void;
+}) {
+  const steps = [
+    { key: "workspace", label: "工作区", status: stage.workspace, detail: agentStageDetail("workspace", stage.workspace) },
+    { key: "context", label: "上下文", status: stage.context, detail: agentStageDetail("context", stage.context) },
+    { key: "plan", label: "计划", status: stage.plan, detail: agentStageDetail("plan", stage.plan) },
+    { key: "execution", label: "执行", status: stage.execution, detail: agentStageDetail("execution", stage.execution) },
+  ];
+
+  return (
+    <div className="agent-header-compact-controls">
+      <div className="agent-header-stage-row" aria-label="Agent 任务状态">
+        {steps.map((step) => (
+          <span className={`agent-header-stage-chip agent-header-stage-chip-${step.status}`} key={step.key} title={`${step.label}: ${step.detail}`}>
+            <em>{step.label}</em>
+            <strong>{step.detail}</strong>
+          </span>
+        ))}
+      </div>
+      <div className="agent-header-context-row">
+        <div className="agent-header-mini-mode" role="tablist" aria-label="Agent 上下文来源">
+          {(["manual", "ai_auto", "hybrid"] as AgentContextMode[]).map((modeOption) => (
+            <button
+              aria-selected={contextMode === modeOption}
+              className={contextMode === modeOption ? "agent-header-mini-mode-active" : ""}
+              key={modeOption}
+              onClick={() => onContextModeChange?.(modeOption)}
+              role="tab"
+              title={contextModeHint(modeOption, selectedFilePaths.length, workspace)}
+              type="button"
+            >
+              {contextModeLabel(modeOption)}
+            </button>
+          ))}
+        </div>
+        <div className="agent-header-context-summary" title={contextModeHint(contextMode, selectedFilePaths.length, workspace)}>
+          <span>{selectedFilePaths.length ? `已选 ${selectedFilePaths.length} 个文件` : "未选文件"}</span>
+          <em>{contextModeHint(contextMode, selectedFilePaths.length, workspace)}</em>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AgentSelectedFileBar({
+  contextMode,
+  selectedFilePaths,
+  onRemoveSelectedFile,
+  onClearSelectedFiles
+}: {
+  contextMode: AgentContextMode;
+  selectedFilePaths: string[];
+  onRemoveSelectedFile?: (path: string) => void;
+  onClearSelectedFiles?: () => void;
+}) {
+  const label = contextMode === "ai_auto" ? "参考文件" : contextMode === "hybrid" ? "种子文件" : "上下文文件";
+
+  return (
+    <div className="agent-selected-file-bar" aria-label="已选上下文文件">
+      <span>{label}</span>
+      <div className="agent-selected-file-scroll">
+        {selectedFilePaths.map((path) => (
+          <button
+            className="agent-selected-file-chip"
+            key={path}
+            onClick={() => onRemoveSelectedFile?.(path)}
+            title={`移除 ${path}`}
+            type="button"
+          >
+            <strong>{fileNameFromPath(path)}</strong>
+            <X size={11} />
+          </button>
+        ))}
+      </div>
+      <button className="agent-selected-file-clear" onClick={onClearSelectedFiles} type="button">
+        清空
+      </button>
+    </div>
+  );
+}
 
 function AgentWorkflowStrip({ stage }: { stage: AgentStageState }) {
   const steps = [

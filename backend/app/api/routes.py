@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import json
 import re
+import time
+import traceback
+import uuid
 from collections import Counter
 from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -17,6 +21,9 @@ from backend.app.models import AgentPlan, AnalysisMetric, ChatMessage, ChatSessi
 from backend.app.schemas import (
     AgentApplyResultRequest,
     AgentChatStreamRequest,
+    AgentChatContextRequestItem,
+    AgentChatContextResultRequest,
+    AgentMessageStreamRequest,
     AgentConfirmRequest,
     AgentContextSelectRequest,
     AgentContextSelectResponse,
@@ -78,7 +85,10 @@ from backend.app.services.usage_service import count_tokens, fetch_deepseek_bala
 router = APIRouter(prefix="/api")
 
 WORKSPACE_STALE_SECONDS = 20
+AGENT_CHAT_CONTEXT_TIMEOUT_SECONDS = 30
+AGENT_CHAT_CONTEXT_TTL_SECONDS = 120
 _agent_workspace_snapshot: AgentWorkspaceSnapshot | None = None
+_agent_chat_context_requests: dict[str, dict[str, Any]] = {}
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -164,12 +174,15 @@ def read_learning_center(session: Session = Depends(get_session)) -> LearningCen
 def list_learning_cards(
     query: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    difficulty: str | None = Query(default=None),
     language_label: str | None = Query(default=None),
     session: Session = Depends(get_session),
 ) -> list[LearningCardItem]:
     statement = select(LearningCard).order_by(LearningCard.updated_at.desc())
     if status:
         statement = statement.where(LearningCard.status == status)
+    if difficulty:
+        statement = statement.where(LearningCard.difficulty == difficulty)
     if language_label:
         statement = statement.where(LearningCard.language_label == language_label)
     cards = list(session.exec(statement).all())
@@ -449,7 +462,24 @@ def generate_learning_cards(
     payload: LearningCardGenerateRequest,
     session: Session = Depends(get_session),
 ) -> LearningCardGenerateResponse:
-    reports = list(session.exec(select(Report).order_by(Report.created_at.desc()).limit(payload.source_limit)).all())
+    settled_report_ids = {
+        str(source_id)
+        for source_id in session.exec(
+            select(LearningCard.source_id)
+            .where(LearningCard.source_type == "report")
+            .where(LearningCard.source_id.is_not(None))
+        ).all()
+        if source_id
+    }
+    report_query = select(Report).order_by(Report.created_at.desc()).limit(payload.source_limit)
+    if settled_report_ids:
+        report_query = (
+            select(Report)
+            .where(Report.id.not_in(settled_report_ids))
+            .order_by(Report.created_at.desc())
+            .limit(payload.source_limit)
+        )
+    reports = list(session.exec(report_query).all())
     existing_keys = _existing_learning_card_keys(session)
     service: LLMService | None = None
     try:
@@ -894,19 +924,83 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
         session.commit()
         session_id = chat_session.id
 
-    service = LLMService(payload.model)
-    plan = service.generate_agent_plan(
-        instruction=instruction,
-        code_context=payload.code_context,
-        language_code=payload.language_code,
-        language_label=payload.language_label,
-        file_name=payload.file_name,
-        file_path=payload.file_path,
-        report_context=payload.report_context,
-        files=[item.model_dump() for item in payload.files],
-        history=history,
-        previous_plans=previous_plans,
-    )
+    try:
+        service = LLMService(payload.model)
+        plan = service.generate_agent_plan(
+            instruction=instruction,
+            code_context=payload.code_context,
+            language_code=payload.language_code,
+            language_label=payload.language_label,
+            file_name=payload.file_name,
+            file_path=payload.file_path,
+            report_context=payload.report_context,
+            files=[item.model_dump() for item in payload.files],
+            history=history,
+            previous_plans=previous_plans,
+            selected_file_paths=payload.selected_file_paths,
+        )
+    except Exception as exc:
+        traceback.print_exc()
+        failure_message = (
+            f"Agent 计划生成失败：{str(exc) or exc.__class__.__name__}\n\n"
+            "请检查模型配置、网络连接、API 额度，或尝试缩小所选上下文文件后重试。"
+        )
+        with Session(engine) as session:
+            chat_session = session.get(ChatSession, session_id)
+            if not chat_session:
+                raise HTTPException(status_code=404, detail="Agent session not found")
+
+            source = payload.source if payload.source in {"web", "plugin"} else "plugin"
+            plan_row = session.get(AgentPlan, existing_plan_id) if existing_plan_id else None
+            if plan_row:
+                plan_row.instruction = instruction
+                plan_row.summary = "Agent 计划生成失败"
+                plan_row.assumptions_json = json.dumps([], ensure_ascii=False)
+                plan_row.warnings_json = json.dumps([failure_message], ensure_ascii=False)
+                plan_row.operations_json = json.dumps([], ensure_ascii=False)
+                if payload.selected_file_paths:
+                    plan_row.selected_files_json = json.dumps(_normalize_selected_file_paths(payload.selected_file_paths), ensure_ascii=False)
+                plan_row.context_mode = payload.context_mode
+                plan_row.status = "failed"
+                plan_row.source = plan_row.source or source
+                plan_row.apply_result = failure_message
+                plan_row.updated_at = datetime.utcnow()
+            else:
+                plan_row = AgentPlan(
+                    session_id=session_id,
+                    instruction=instruction,
+                    summary="Agent 计划生成失败",
+                    assumptions_json=json.dumps([], ensure_ascii=False),
+                    warnings_json=json.dumps([failure_message], ensure_ascii=False),
+                    operations_json=json.dumps([], ensure_ascii=False),
+                    selected_files_json=json.dumps(_normalize_selected_file_paths(payload.selected_file_paths), ensure_ascii=False),
+                    context_mode=payload.context_mode,
+                    status="failed",
+                    source=source,
+                    apply_result=failure_message,
+                )
+            session.add(plan_row)
+            session.flush()
+            session.add(ChatMessage(session_id=session_id, role="assistant", content=failure_message))
+            chat_session.updated_at = datetime.utcnow()
+            session.add(chat_session)
+            session.commit()
+            session.refresh(plan_row)
+            title = chat_session.title
+
+        return AgentPlanResponse(
+            session_id=session_id,
+            plan_id=plan_row.id,
+            title=title,
+            status=plan_row.status,
+            source=plan_row.source,
+            summary=plan_row.summary,
+            assumptions=_safe_json_list(plan_row.assumptions_json),
+            warnings=_safe_json_list(plan_row.warnings_json),
+            operations=_safe_json_list(plan_row.operations_json),
+            selected_file_paths=_selected_file_paths(plan_row),
+            context_mode=_context_mode(plan_row),
+        )
 
     with Session(engine) as session:
         chat_session = session.get(ChatSession, session_id)
@@ -975,6 +1069,183 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
     )
 
 
+@router.post("/agent/message/stream")
+def stream_agent_message(payload: AgentMessageStreamRequest) -> StreamingResponse:
+    def event_generator():
+        chunks: list[str] = []
+        try:
+            mysql_ok, mysql_message = check_database()
+            if not mysql_ok:
+                yield sse_event("error", _mysql_error_payload(mysql_message))
+                return
+
+            selected_paths = _normalize_selected_file_paths(payload.selected_file_paths)
+            should_plan = _agent_message_should_plan(payload.intent, payload.message)
+            if should_plan:
+                with Session(engine) as session:
+                    chat_session = session.get(ChatSession, payload.session_id) if payload.session_id else None
+                    if chat_session and chat_session.context_type != "agent":
+                        chat_session = None
+                    if not chat_session:
+                        title = _ensure_unique_title(
+                            session,
+                            ChatSession,
+                            build_chat_fallback_title(payload.message, "", "Agent 任务"),
+                        )
+                        chat_session = ChatSession(title=title, context_type="agent")
+                        session.add(chat_session)
+                        session.flush()
+
+                    session.add(ChatMessage(session_id=chat_session.id, role="user", content=payload.message))
+                    plan_row = AgentPlan(
+                        session_id=chat_session.id,
+                        instruction=payload.message,
+                        summary="等待 VS Code 插件处理",
+                        assumptions_json=json.dumps([], ensure_ascii=False),
+                        warnings_json=json.dumps(["插件将读取工作区文件，并基于当前对话生成可确认的修改计划。"], ensure_ascii=False),
+                        operations_json=json.dumps([], ensure_ascii=False),
+                        selected_files_json=json.dumps(selected_paths, ensure_ascii=False),
+                        context_mode=payload.context_mode,
+                        status="pending",
+                        source="web",
+                        apply_result="任务已保存，等待 VS Code 插件读取上下文并生成计划。",
+                    )
+                    session.add(plan_row)
+                    session.flush()
+                    assistant_message = _agent_plan_message(plan_row)
+                    session.add(ChatMessage(session_id=chat_session.id, role="assistant", content=assistant_message))
+                    chat_session.updated_at = datetime.utcnow()
+                    session.add(chat_session)
+                    session.commit()
+                    session.refresh(plan_row)
+                    session_id = chat_session.id
+                    title = chat_session.title
+                    plan_item = _agent_plan_item(plan_row)
+
+                yield sse_event(
+                    "status",
+                    {
+                        "phase": "agent_plan",
+                        "message": "已创建修改任务，正在等待 VS Code 插件读取文件并生成计划...",
+                        "plan_id": plan_item.id,
+                    },
+                )
+                yield sse_event(
+                    "plan",
+                    {
+                        "plan": plan_item.model_dump(mode="json"),
+                    },
+                )
+                yield sse_event(
+                    "done",
+                    {
+                        "session_id": session_id,
+                        "title": title,
+                        "mode": "plan",
+                        "plan_id": plan_item.id,
+                    },
+                )
+                return
+
+            created_session = False
+            with Session(engine) as session:
+                chat_session = session.get(ChatSession, payload.session_id) if payload.session_id else None
+                if chat_session and chat_session.context_type != "agent":
+                    chat_session = None
+                if not chat_session:
+                    title = _ensure_unique_title(
+                        session,
+                        ChatSession,
+                        build_chat_fallback_title(payload.message, "", "Agent 对话"),
+                    )
+                    chat_session = ChatSession(title=title, context_type="agent")
+                    session.add(chat_session)
+                    session.flush()
+                    created_session = True
+
+                history_rows = list(
+                    session.exec(
+                        select(ChatMessage)
+                        .where(ChatMessage.session_id == chat_session.id)
+                        .order_by(ChatMessage.created_at)
+                        .limit(24)
+                    ).all()
+                )
+                history = [
+                    {"role": item.role, "content": item.content}
+                    for item in history_rows
+                    if item.role in {"user", "assistant"}
+                ]
+                session.add(ChatMessage(session_id=chat_session.id, role="user", content=payload.message))
+                chat_session.updated_at = datetime.utcnow()
+                session.add(chat_session)
+                session.commit()
+                session_id = chat_session.id
+
+            files = [item.model_dump() for item in payload.files]
+            if payload.source == "web" and selected_paths and not files:
+                request_id = _create_agent_chat_context_request(
+                    session_id=session_id,
+                    message=payload.message,
+                    selected_file_paths=selected_paths,
+                    context_mode=payload.context_mode,
+                )
+                yield sse_event(
+                    "status",
+                    {
+                        "phase": "agent_context",
+                        "request_id": request_id,
+                        "message": "正在等待 VS Code 插件读取所选文件...",
+                    },
+                )
+                context_result = _wait_agent_chat_context_result(request_id)
+                if context_result.get("status") == "failed":
+                    yield sse_event(
+                        "error",
+                        error_payload(
+                            "AGENT_CONTEXT_READ_FAILED",
+                            str(context_result.get("message") or "所选文件读取失败，无法继续 Agent 对话。"),
+                            "请确认 VS Code 插件已连接、当前工作区已打开，并重新选择可读取的文件。",
+                        ),
+                    )
+                    return
+                files = context_result.get("files") or []
+
+            service = LLMService(payload.model)
+            for text in service.stream_agent_chat(
+                payload.message,
+                history,
+                code_context=payload.code_context,
+                report_context=payload.report_context,
+                files=files,
+            ):
+                chunks.append(text)
+                yield sse_event("delta", {"text": text})
+
+            reply = "".join(chunks).strip()
+            final_session_title = None
+            with Session(engine) as session:
+                chat_session = session.get(ChatSession, session_id)
+                if chat_session:
+                    session.add(ChatMessage(session_id=session_id, role="assistant", content=reply))
+                    if created_session:
+                        chat_session.title = _ensure_unique_title(
+                            session,
+                            ChatSession,
+                            _safe_chat_title(service, payload.message, reply, chat_session.title),
+                            chat_session.id,
+                        )
+                    chat_session.updated_at = datetime.utcnow()
+                    session.add(chat_session)
+                    session.commit()
+                    final_session_title = chat_session.title
+            yield sse_event("done", {"session_id": session_id, "title": final_session_title, "mode": "chat"})
+        except Exception as exc:
+            yield sse_event("error", _llm_error_payload(exc))
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=_stream_headers())
+
+
 @router.post("/agent/chat/stream")
 def stream_agent_chat(payload: AgentChatStreamRequest) -> StreamingResponse:
     def event_generator():
@@ -1020,13 +1291,53 @@ def stream_agent_chat(payload: AgentChatStreamRequest) -> StreamingResponse:
                 session.commit()
                 session_id = chat_session.id
 
+            files = [item.model_dump() for item in payload.files]
+            selected_paths = _normalize_selected_file_paths(payload.selected_file_paths)
+            if payload.source == "web" and selected_paths and not files:
+                request_id = _create_agent_chat_context_request(
+                    session_id=session_id,
+                    message=payload.message,
+                    selected_file_paths=selected_paths,
+                    context_mode=payload.context_mode,
+                )
+                yield sse_event(
+                    "status",
+                    {
+                        "phase": "agent_context",
+                        "request_id": request_id,
+                        "message": "正在等待 VS Code 插件读取所选文件...",
+                    },
+                )
+                context_result = _wait_agent_chat_context_result(request_id)
+                if context_result.get("status") == "failed":
+                    yield sse_event(
+                        "error",
+                        error_payload(
+                            "AGENT_CONTEXT_READ_FAILED",
+                            str(context_result.get("message") or "所选文件读取失败，无法继续 Agent 讨论。"),
+                            "请确认 VS Code 插件已连接、当前工作区已打开，并重新选择可读取的文件。",
+                        ),
+                    )
+                    return
+                files = context_result.get("files") or []
+                if not files:
+                    yield sse_event(
+                        "error",
+                        error_payload(
+                            "AGENT_CONTEXT_TIMEOUT",
+                            "等待 VS Code 插件读取上下文超时。",
+                            "请打开 VS Code 插件并保持当前项目在线，或切换到“交给插件修改”模式生成计划。",
+                        ),
+                    )
+                    return
+
             service = LLMService(payload.model)
             for text in service.stream_agent_chat(
                 payload.message,
                 history,
                 code_context=payload.code_context,
                 report_context=payload.report_context,
-                files=[item.model_dump() for item in payload.files],
+                files=files,
             ):
                 chunks.append(text)
                 yield sse_event("delta", {"text": text})
@@ -1053,6 +1364,43 @@ def stream_agent_chat(payload: AgentChatStreamRequest) -> StreamingResponse:
             yield sse_event("error", _llm_error_payload(exc))
 
     return StreamingResponse(event_generator(), media_type="text/event-stream", headers=_stream_headers())
+
+
+@router.get("/agent/chat-context/pending", response_model=list[AgentChatContextRequestItem])
+def list_pending_agent_chat_contexts(limit: int = Query(default=20, ge=1, le=50)) -> list[AgentChatContextRequestItem]:
+    _prune_agent_chat_context_requests()
+    items = [
+        AgentChatContextRequestItem(
+            request_id=request_id,
+            session_id=str(item["session_id"]),
+            message=str(item["message"]),
+            selected_file_paths=_normalize_selected_file_paths(item.get("selected_file_paths") or []),
+            context_mode=item.get("context_mode") if item.get("context_mode") in {"manual", "ai_auto", "hybrid"} else "manual",
+            created_at=item["created_at"],
+        )
+        for request_id, item in _agent_chat_context_requests.items()
+        if item.get("status") == "pending"
+    ]
+    items.sort(key=lambda item: item.created_at)
+    return items[:limit]
+
+
+@router.post("/agent/chat-context/{request_id}/result")
+def update_agent_chat_context_result(request_id: str, payload: AgentChatContextResultRequest) -> dict[str, bool]:
+    item = _agent_chat_context_requests.get(request_id)
+    if not item:
+        raise HTTPException(status_code=404, detail="Agent chat context request not found")
+
+    item["status"] = payload.status
+    item["message"] = payload.message
+    item["files"] = [file.model_dump() for file in payload.files]
+    item["selected_file_paths"] = _normalize_selected_file_paths(payload.selected_file_paths)
+    item["updated_at"] = datetime.utcnow()
+    print(
+        f"[agent-chat-context] result request={request_id} status={payload.status} files={len(payload.files)}",
+        flush=True,
+    )
+    return {"ok": True}
 
 
 @router.get("/agent/pending", response_model=list[AgentPlanItem])
@@ -1278,9 +1626,110 @@ def _selected_file_paths(plan: AgentPlan) -> list[str]:
     return _normalize_selected_file_paths([str(item) for item in _safe_json_list(plan.selected_files_json)])
 
 
+def _create_agent_chat_context_request(
+    *,
+    session_id: str,
+    message: str,
+    selected_file_paths: list[str],
+    context_mode: str,
+) -> str:
+    request_id = uuid.uuid4().hex
+    _agent_chat_context_requests[request_id] = {
+        "request_id": request_id,
+        "session_id": session_id,
+        "message": message,
+        "selected_file_paths": _normalize_selected_file_paths(selected_file_paths),
+        "context_mode": context_mode if context_mode in {"manual", "ai_auto", "hybrid"} else "manual",
+        "status": "pending",
+        "files": [],
+        "created_at": datetime.utcnow(),
+        "updated_at": datetime.utcnow(),
+    }
+    print(
+        f"[agent-chat-context] created request={request_id} session={session_id} "
+        f"mode={context_mode} files={len(selected_file_paths)}",
+        flush=True,
+    )
+    return request_id
+
+
+def _wait_agent_chat_context_result(request_id: str) -> dict[str, Any]:
+    deadline = time.monotonic() + AGENT_CHAT_CONTEXT_TIMEOUT_SECONDS
+    while time.monotonic() < deadline:
+        _prune_agent_chat_context_requests()
+        item = _agent_chat_context_requests.get(request_id)
+        if not item:
+            return {"status": "failed", "message": "Agent 上下文请求已失效。"}
+        status = item.get("status")
+        if status in {"ok", "failed"}:
+            print(f"[agent-chat-context] completed request={request_id} status={status}", flush=True)
+            result = {
+                "status": status,
+                "message": item.get("message") or "",
+                "files": item.get("files") or [],
+                "selected_file_paths": item.get("selected_file_paths") or [],
+            }
+            _agent_chat_context_requests.pop(request_id, None)
+            return result
+        time.sleep(0.3)
+    item = _agent_chat_context_requests.pop(request_id, None)
+    print(f"[agent-chat-context] timeout request={request_id}", flush=True)
+    return {
+        "status": "failed",
+        "message": str(item.get("message") if item else "") or "等待 VS Code 插件读取上下文超时。",
+        "files": [],
+        "selected_file_paths": [],
+    }
+
+
+def _prune_agent_chat_context_requests() -> None:
+    now = datetime.utcnow()
+    expired = [
+        request_id
+        for request_id, item in _agent_chat_context_requests.items()
+        if (now - item.get("created_at", now)).total_seconds() > AGENT_CHAT_CONTEXT_TTL_SECONDS
+    ]
+    for request_id in expired:
+        _agent_chat_context_requests.pop(request_id, None)
+
+
 def _context_mode(plan: AgentPlan) -> str:
     value = str(getattr(plan, "context_mode", "") or "manual")
     return value if value in {"manual", "ai_auto", "hybrid"} else "manual"
+
+
+def _agent_message_should_plan(intent: str, message: str) -> bool:
+    if intent == "chat":
+        return False
+    if intent == "plan":
+        return True
+    text = str(message or "").strip().lower()
+    plan_terms = (
+        "\u843d\u5b9e",
+        "\u6267\u884c",
+        "\u5e94\u7528",
+        "\u4fee\u6539",
+        "\u6539\u4e00\u4e0b",
+        "\u8865\u5145",
+        "\u65b0\u589e",
+        "\u6dfb\u52a0",
+        "\u5220\u9664",
+        "\u91cd\u547d\u540d",
+        "\u4fee\u590d",
+        "\u5b9e\u73b0",
+        "\u751f\u6210\u8ba1\u5212",
+        "\u4ea4\u7ed9\u63d2\u4ef6",
+        "apply",
+        "execute",
+        "implement",
+        "modify",
+        "update",
+        "fix",
+        "create",
+        "delete",
+        "rename",
+    )
+    return any(term in text for term in plan_terms)
 
 
 def _normalize_tags(tags: list[str] | None) -> list[str]:
@@ -1857,7 +2306,9 @@ def _flatten_workspace_tree(node: dict | None, depth: int = 0) -> list[dict]:
 
 def _project_guide(session: Session | None) -> ProjectGuideResponse:
     snapshot = _workspace_snapshot_response(_agent_workspace_snapshot)
-    tree_data = snapshot.tree.model_dump() if snapshot.tree else None
+    workspace_root = Path(snapshot.workspace_root).expanduser() if snapshot.workspace_root else None
+    project_structure = _build_project_structure(workspace_root) if workspace_root and workspace_root.exists() else None
+    tree_data = project_structure or (snapshot.tree.model_dump() if snapshot.tree else None)
     nodes = _flatten_workspace_tree(tree_data)
     files = [item for item in nodes if item["type"] == "file"]
     dirs = [item for item in nodes if item["type"] == "directory"]
@@ -1897,10 +2348,14 @@ def _project_guide(session: Session | None) -> ProjectGuideResponse:
     notes = []
     if not snapshot.connected or snapshot.stale:
         notes.append("未收到最新 VS Code 插件心跳，项目导读基于后端当前可见状态生成。")
-    if snapshot.truncated:
+    if project_structure and _project_structure_is_truncated(project_structure):
+        notes.append("项目架构已按深度或节点数量截断，导读优先覆盖当前可见文件。")
+    elif snapshot.truncated:
         notes.append("项目树已按深度或节点数量截断，导读优先覆盖当前可见文件。")
+    if snapshot.workspace_root and not project_structure:
+        notes.append("后端暂时无法直接读取项目目录，已尝试使用插件同步的项目树作为兜底。")
     if not files:
-        notes.append("当前没有可用项目树，请先打开 VS Code 插件并等待心跳同步。")
+        notes.append("当前没有可用项目结构，请先打开 VS Code 插件并等待心跳同步。")
     return ProjectGuideResponse(
         workspace={
             "name": snapshot.workspace_name,
@@ -1914,6 +2369,7 @@ def _project_guide(session: Session | None) -> ProjectGuideResponse:
         entry_candidates=entry_candidates,
         core_areas=core_areas,
         read_order=read_order,
+        project_structure=project_structure,
         knowledge_points=_project_knowledge_points(files),
         notes=notes,
     )
@@ -1930,6 +2386,295 @@ def _entry_reason(name: str, file_path: str) -> str:
     if file_path.endswith("/App.tsx"):
         return "前端应用主组件，适合理解页面结构。"
     return "从路径命名看可能是项目入口。"
+
+
+PROJECT_STRUCTURE_MAX_DEPTH = 5
+PROJECT_STRUCTURE_MAX_NODES = 180
+PROJECT_STRUCTURE_SAMPLE_BYTES = 8192
+PROJECT_STRUCTURE_EXCLUDED_DIRS = {
+    ".git",
+    ".idea",
+    ".vscode",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".venv",
+    "venv",
+    "env",
+    "node_modules",
+    "dist",
+    "build",
+    "coverage",
+    ".next",
+    ".turbo",
+}
+PROJECT_STRUCTURE_BINARY_EXTENSIONS = {
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".webp",
+    ".ico",
+    ".pdf",
+    ".zip",
+    ".7z",
+    ".rar",
+    ".exe",
+    ".dll",
+    ".so",
+    ".pyc",
+    ".pyd",
+    ".xls",
+    ".xlsx",
+    ".doc",
+    ".docx",
+    ".ppt",
+    ".pptx",
+}
+
+
+def _build_project_structure(root: Path) -> dict[str, Any] | None:
+    if not root.exists() or not root.is_dir():
+        return None
+    counter = {"count": 0, "truncated": False}
+    return _project_structure_node(root, root, 0, counter)
+
+
+def _project_structure_is_truncated(node: dict[str, Any] | None) -> bool:
+    if not node:
+        return False
+    if node.get("truncated"):
+        return True
+    return any(_project_structure_is_truncated(child) for child in node.get("children") or [])
+
+
+def _project_structure_node(path: Path, root: Path, depth: int, counter: dict[str, Any]) -> dict[str, Any] | None:
+    if counter["count"] >= PROJECT_STRUCTURE_MAX_NODES:
+        counter["truncated"] = True
+        return None
+    counter["count"] += 1
+
+    is_dir = path.is_dir()
+    relative_path = "" if path == root else path.relative_to(root).as_posix()
+    node = {
+        "name": path.name or root.name,
+        "path": relative_path,
+        "type": "directory" if is_dir else "file",
+        "description": _describe_project_directory(path.name, relative_path) if is_dir else _describe_project_file(path, relative_path),
+        "children": [],
+        "truncated": False,
+    }
+
+    if not is_dir:
+        return node
+    if depth >= PROJECT_STRUCTURE_MAX_DEPTH:
+        node["truncated"] = True
+        counter["truncated"] = True
+        return node
+
+    try:
+        entries = sorted(
+            [item for item in path.iterdir() if _include_project_structure_path(item)],
+            key=lambda item: (not item.is_dir(), item.name.lower()),
+        )
+    except Exception:
+        node["truncated"] = True
+        return node
+
+    for child in entries:
+        child_node = _project_structure_node(child, root, depth + 1, counter)
+        if child_node:
+            node["children"].append(child_node)
+        if counter["count"] >= PROJECT_STRUCTURE_MAX_NODES:
+            node["truncated"] = True
+            break
+    return node
+
+
+def _include_project_structure_path(path: Path) -> bool:
+    if path.is_dir():
+        return path.name not in PROJECT_STRUCTURE_EXCLUDED_DIRS
+    if path.name.startswith(".") and path.suffix not in {".env", ".gitignore"}:
+        return False
+    return True
+
+
+def _describe_project_directory(name: str, relative_path: str) -> str:
+    lower_name = name.lower()
+    lower_path = relative_path.lower()
+    if lower_name == "backend":
+        return "FastAPI 后端服务"
+    if lower_name == "frontend":
+        return "React 前端应用"
+    if lower_name == "vscode-extension":
+        return "VS Code 插件与本地执行能力"
+    if lower_name == "app" and lower_path.startswith("backend"):
+        return "后端核心应用代码"
+    if lower_name == "api":
+        return "接口路由与请求处理"
+    if lower_name == "services":
+        return "业务服务与 AI 调用封装"
+    if lower_name == "components":
+        return "前端通用组件"
+    if lower_name == "pages":
+        return "前端功能页面"
+    if lower_name == "styles":
+        return "前端样式资源"
+    if lower_name in {"tests", "test"}:
+        return "自动化测试"
+    if lower_name == "alembic":
+        return "数据库迁移配置"
+    if lower_name == "versions":
+        return "数据库表结构迁移脚本"
+    if lower_name == "resources":
+        return "本地资源文件"
+    if lower_name == "scripts":
+        return "本地脚本工具"
+    return "项目目录"
+
+
+def _describe_project_file(path: Path, relative_path: str) -> str:
+    lower_name = path.name.lower()
+    lower_path = relative_path.lower()
+    suffix = path.suffix.lower()
+    sample = _read_project_file_sample(path)
+    sample_lower = sample.lower()
+
+    if lower_name == "readme.md":
+        return "项目说明与使用文档"
+    if lower_name == "dockerfile":
+        return "Docker 镜像配置"
+    if lower_name == "docker-compose.yml":
+        return "前端、后端和数据库编排配置"
+    if lower_name == "package.json":
+        return "前端依赖与脚本配置"
+    if lower_name == "requirements.txt":
+        return "Python 后端依赖"
+    if lower_name == "nginx.conf":
+        return "Nginx 静态托管与 API 代理"
+    if lower_name in {"start.bat", "start.ps1"}:
+        return "本地一键启动脚本"
+    if lower_name == "main.py" and "fastapi" in sample_lower:
+        return "FastAPI 入口、CORS 与初始化"
+    if lower_name == "config.py":
+        return "环境变量、模型与语言配置"
+    if lower_name == "db.py":
+        return "数据库连接与初始化"
+    if lower_name == "models.py":
+        return "数据库表与领域模型"
+    if lower_name == "schemas.py":
+        return "API 请求与响应结构"
+    if lower_name == "routes.py":
+        return "核心接口：分析、报告、对话、统计"
+    if lower_name == "llm_service.py":
+        return "大模型调用与流式生成"
+    if lower_name == "prompt_service.py":
+        return "报告、对比与命名 Prompt"
+    if lower_name == "sse.py":
+        return "SSE 流式响应封装"
+    if lower_name == "usage_service.py":
+        return "Token、余额与使用统计"
+    if lower_name == "analyzer_service.py":
+        return "静态代码分析与安全风险扫描"
+    if lower_name == "app.tsx":
+        return "前端应用主入口与路由编排"
+    if lower_name == "sidebar.tsx":
+        return "左侧导航栏"
+    if lower_name == "topbar.tsx":
+        return "顶部状态栏"
+    if lower_name == "editorpanel.tsx":
+        return "Monaco 代码编辑器"
+    if lower_name == "reportviewer.tsx":
+        return "报告展示、章节定位与全屏阅读"
+    if lower_name == "markdowndocument.tsx":
+        return "Markdown 与代码块渲染"
+    if lower_name == "chatpanel.tsx":
+        return "AI 对话与 Agent 计划交互"
+    if lower_name == "workbenchpage.tsx":
+        return "代码工作台页面"
+    if lower_name == "diffpage.tsx":
+        return "代码对比页面"
+    if lower_name == "historypage.tsx":
+        return "历史报告页面"
+    if lower_name == "settingspage.tsx":
+        return "统计分析页面"
+    if suffix in PROJECT_STRUCTURE_BINARY_EXTENSIONS:
+        return _binary_file_description(suffix)
+
+    if "streamlit" in sample_lower:
+        return "Streamlit 数据展示或演示页面"
+    if "pandas" in sample_lower or "openpyxl" in sample_lower or "read_excel" in sample_lower:
+        return "数据读取、清洗或表格分析脚本"
+    if "fastapi" in sample_lower or "apirouter" in sample_lower:
+        return "FastAPI 接口或后端路由"
+    if "react" in sample_lower or "usestate" in sample_lower or "useeffect" in sample_lower:
+        return "React 组件或页面逻辑"
+    if "pytest" in sample_lower or lower_path.startswith("tests/"):
+        return "自动化测试脚本"
+    if "uvicorn" in sample_lower:
+        return "后端服务启动脚本"
+    if "class " in sample_lower and suffix == ".py":
+        return "Python 类与业务逻辑"
+    if "def " in sample_lower and suffix == ".py":
+        functions = _extract_python_functions(sample)
+        return f"Python 函数脚本：{functions}" if functions else "Python 函数脚本"
+
+    return _generic_file_description(suffix)
+
+
+def _read_project_file_sample(path: Path) -> str:
+    if path.suffix.lower() in PROJECT_STRUCTURE_BINARY_EXTENSIONS:
+        return ""
+    try:
+        data = path.read_bytes()[:PROJECT_STRUCTURE_SAMPLE_BYTES]
+    except Exception:
+        return ""
+    if b"\x00" in data:
+        return ""
+    for encoding in ("utf-8", "utf-8-sig", "gb18030"):
+        try:
+            return data.decode(encoding, errors="strict")
+        except Exception:
+            continue
+    return data.decode("utf-8", errors="ignore")
+
+
+def _extract_python_functions(sample: str) -> str:
+    names = re.findall(r"^\s*def\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(", sample, flags=re.MULTILINE)
+    return "、".join(names[:3])
+
+
+def _binary_file_description(suffix: str) -> str:
+    if suffix in {".xls", ".xlsx"}:
+        return "Excel 数据表"
+    if suffix in {".doc", ".docx"}:
+        return "Word 文档"
+    if suffix in {".ppt", ".pptx"}:
+        return "演示文稿"
+    if suffix == ".pdf":
+        return "PDF 文档"
+    if suffix in {".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico"}:
+        return "图片资源"
+    return "二进制资源文件"
+
+
+def _generic_file_description(suffix: str) -> str:
+    mapping = {
+        ".py": "Python 源码文件",
+        ".tsx": "React TypeScript 组件",
+        ".ts": "TypeScript 源码文件",
+        ".js": "JavaScript 源码文件",
+        ".css": "样式文件",
+        ".json": "JSON 配置或数据文件",
+        ".md": "Markdown 文档",
+        ".yml": "YAML 配置文件",
+        ".yaml": "YAML 配置文件",
+        ".toml": "TOML 配置文件",
+        ".env": "环境变量配置",
+        ".sql": "SQL 脚本",
+        ".html": "HTML 页面",
+    }
+    return mapping.get(suffix, "项目文件")
 
 
 def _area_description(name: str) -> str:

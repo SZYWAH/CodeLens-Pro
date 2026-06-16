@@ -77,6 +77,7 @@ export type AgentOperation = {
 };
 
 export type AgentContextMode = "manual" | "ai_auto" | "hybrid";
+export type AgentIntent = "auto" | "chat" | "plan";
 
 export type AgentPlan = {
   id?: string;
@@ -120,6 +121,23 @@ export type AgentPlanRequest = {
   model?: string | null;
   source?: "web" | "plugin";
   workspace_root?: string | null;
+};
+
+export type AgentChatStreamRequest = {
+  message: string;
+  session_id?: string | null;
+  code_context?: string;
+  report_context?: string | null;
+  files?: Array<{ code: string; languageId?: string; fileName?: string; filePath?: string }>;
+  selected_file_paths?: string[];
+  context_mode?: AgentContextMode;
+  model?: string | null;
+  source?: "web" | "plugin";
+  workspace_root?: string | null;
+};
+
+export type AgentMessageStreamRequest = AgentChatStreamRequest & {
+  intent?: AgentIntent;
 };
 
 export type ChatSessionListItem = {
@@ -212,6 +230,15 @@ export type WorkspaceTreeNode = {
   path: string;
   type: "file" | "directory";
   children?: WorkspaceTreeNode[];
+  truncated?: boolean;
+};
+
+export type ProjectStructureNode = {
+  name: string;
+  path: string;
+  type: "file" | "directory";
+  description?: string;
+  children?: ProjectStructureNode[];
   truncated?: boolean;
 };
 
@@ -383,6 +410,7 @@ export type ProjectGuideResponse = {
   entry_candidates: Array<{ path: string; name: string; reason: string }>;
   core_areas: Array<{ name: string; file_count: number; description: string }>;
   read_order: Array<{ step: number; title: string; paths: string[] }>;
+  project_structure?: ProjectStructureNode | null;
   knowledge_points: string[];
   notes: string[];
 };

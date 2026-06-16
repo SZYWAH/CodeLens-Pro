@@ -3,6 +3,7 @@ import { apiUrl } from "./runtime";
 type StreamHandlers = {
   onDelta: (text: string) => void;
   onStatus?: (data: Record<string, unknown>) => void;
+  onPlan?: (data: Record<string, unknown>) => void;
   onDone?: (data: Record<string, unknown>) => void;
   onError?: (message: string) => void;
 };
@@ -46,10 +47,14 @@ function dispatchEvent(raw: string, handlers: StreamHandlers) {
     handlers.onDelta(String(parsed.data.text ?? ""));
   } else if (parsed.event === "status") {
     handlers.onStatus?.(parsed.data);
+  } else if (parsed.event === "plan") {
+    handlers.onPlan?.(parsed.data);
   } else if (parsed.event === "done") {
     handlers.onDone?.(parsed.data);
   } else if (parsed.event === "error") {
-    handlers.onError?.(String(parsed.data.message ?? "Stream request failed"));
+    const message = String(parsed.data.message ?? parsed.data.detail ?? "Stream request failed");
+    const hint = String(parsed.data.hint ?? "");
+    handlers.onError?.(hint ? `${message}\n${hint}` : message);
   }
 }
 

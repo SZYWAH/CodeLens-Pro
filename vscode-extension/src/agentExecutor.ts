@@ -24,6 +24,14 @@ type AgentContextSelectResponse = {
   skipped?: Array<{ path?: string; reason?: string }>;
 };
 
+type AgentChatContextRequest = {
+  request_id: string;
+  session_id: string;
+  message: string;
+  selected_file_paths?: string[];
+  context_mode?: AgentContextMode;
+};
+
 export class AgentWorkspaceExecutor implements vscode.Disposable {
   private timer: NodeJS.Timeout | null = null;
   private running = false;
@@ -54,10 +62,28 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
     try {
       const status = await this.backend.getBackendStatus();
       if (!status.healthy || !status.agentReady) return;
+      await this.processPendingChatContexts();
       await this.processPendingTasks();
       await this.processConfirmedPlans();
     } finally {
       this.running = false;
+    }
+  }
+
+  private async processPendingChatContexts() {
+    const requests = await this.fetchJson<AgentChatContextRequest[]>(`${this.backend.apiBase}/api/agent/chat-context/pending`);
+    for (const request of requests) {
+      const requestId = request.request_id || "";
+      if (!requestId || this.processing.has(requestId)) continue;
+      this.processing.add(requestId);
+      try {
+        await this.handlePendingChatContext(request);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Agent 讨论上下文读取失败";
+        await this.reportChatContextResult(requestId, "failed", message).catch(() => undefined);
+      } finally {
+        this.processing.delete(requestId);
+      }
     }
   }
 
@@ -154,6 +180,56 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
     }
 
     await response.json();
+  }
+
+  private async handlePendingChatContext(request: AgentChatContextRequest) {
+    const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    if (!workspaceFolder) {
+      await this.reportChatContextResult(request.request_id, "failed", "未打开 VS Code 工作区，无法读取所选文件。").catch(() => undefined);
+      return;
+    }
+
+    const contextMode = normalizeContextMode(request.context_mode);
+    const selectedPaths = sanitizeRelativePaths(Array.isArray(request.selected_file_paths) ? request.selected_file_paths : []);
+    const contextPaths = await this.resolveContextPaths(
+      {
+        instruction: request.message,
+        summary: request.message,
+        assumptions: [],
+        warnings: [],
+        operations: [],
+        selected_file_paths: selectedPaths,
+        context_mode: contextMode,
+      },
+      contextMode,
+      selectedPaths,
+    );
+    let effectiveContextPaths = contextPaths;
+    let files = effectiveContextPaths.length
+      ? await readWorkspaceSelectedFileContexts(effectiveContextPaths)
+      : [];
+    if (!files.length && contextMode !== "manual") {
+      effectiveContextPaths = [];
+      files = await autoCollectWorkspaceContexts();
+    }
+    if (!files.length && contextMode === "manual" && effectiveContextPaths.length) {
+      await this.reportChatContextResult(request.request_id, "failed", "所选文件无法读取，请重新选择较小且可访问的文件。").catch(() => undefined);
+      return;
+    }
+    if (!files.length) {
+      await this.reportChatContextResult(request.request_id, "failed", "未读取到可用的上下文文件。").catch(() => undefined);
+      return;
+    }
+
+    const actualPaths = effectiveContextPaths.length ? relativePathsFromFiles(files, workspaceFolder.uri.fsPath) : [];
+    const bundle = buildMultiFileContext(files, effectiveContextPaths.length ? "workspaceFiles" : "autoWorkspace");
+    await this.reportChatContextResult(
+      request.request_id,
+      "ok",
+      `已读取 ${bundle.files?.length ?? files.length} 个上下文文件。`,
+      bundle.files ?? [],
+      actualPaths,
+    );
   }
 
   private async resolveContextPaths(task: AgentPlanItem, contextMode: AgentContextMode, selectedPaths: string[]): Promise<string[]> {
@@ -259,6 +335,25 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
         assumptions: plan.assumptions,
         warnings: plan.warnings,
         operations: plan.operations,
+      }),
+    });
+  }
+
+  private async reportChatContextResult(
+    requestId: string,
+    status: "ok" | "failed",
+    message: string,
+    files: Array<{ code: string; languageId?: string; fileName?: string; filePath?: string; attention?: "low" | "normal" | "high" }> = [],
+    selectedFilePaths: string[] = [],
+  ) {
+    await fetch(`${this.backend.apiBase}/api/agent/chat-context/${requestId}/result`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        status,
+        message,
+        files,
+        selected_file_paths: selectedFilePaths,
       }),
     });
   }
