@@ -193,11 +193,27 @@ class CodeLensWebviewPanel {
             }
             else if (operation.type === "update") {
                 const document = await vscode.workspace.openTextDocument(targetUri);
+                let nextText = operation.content ?? "";
+                if (Array.isArray(operation.edits) && operation.edits.length) {
+                    nextText = document.getText();
+                    for (const localEdit of operation.edits) {
+                        const search = String(localEdit.search || "");
+                        if (!search)
+                            continue;
+                        if (!nextText.includes(search)) {
+                            throw new Error(`局部替换片段未在文件中找到：${operation.path}`);
+                        }
+                        nextText = nextText.replace(search, String(localEdit.replace ?? ""));
+                    }
+                }
+                else if (operation.content === undefined || operation.content === null) {
+                    throw new Error(`更新操作缺少 content 或 edits：${operation.path}`);
+                }
                 const lastLine = document.lineCount > 0 ? document.lineAt(document.lineCount - 1) : undefined;
                 const range = lastLine
                     ? new vscode.Range(0, 0, lastLine.lineNumber, lastLine.text.length)
                     : new vscode.Range(0, 0, 0, 0);
-                edit.replace(targetUri, range, operation.content ?? "");
+                edit.replace(targetUri, range, nextText);
             }
             else if (operation.type === "delete") {
                 edit.deleteFile(targetUri, { recursive: false, ignoreIfNotExists: false });

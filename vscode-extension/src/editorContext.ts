@@ -1,4 +1,5 @@
 import * as path from "path";
+import * as fs from "fs";
 import * as vscode from "vscode";
 
 export type EditorSourceType = "current" | "selection" | "pickedFiles" | "recentFiles" | "workspaceFiles" | "workspaceRules" | "autoWorkspace";
@@ -26,6 +27,20 @@ export type WorkspaceManifestFile = {
   depth: number;
 };
 
+export type ReadContextProgress = {
+  index: number;
+  total: number;
+  path: string;
+  status: "reading" | "read" | "summarized" | "skipped";
+  bytes?: number;
+  chars?: number;
+  reason?: string;
+};
+
+export type ReadContextOptions = {
+  onProgress?: (event: ReadContextProgress) => void | Promise<void>;
+};
+
 export function getActiveEditorContext(selectionOnly: boolean): EditorCodeContext | null {
   const editor = vscode.window.activeTextEditor;
   if (!editor) return null;
@@ -51,6 +66,112 @@ export async function getFileContext(uri: vscode.Uri): Promise<EditorFileContext
     fileName: path.basename(document.fileName),
     filePath: document.uri.fsPath,
   };
+}
+
+async function getLargeFileKeyPointContext(uri: vscode.Uri): Promise<EditorFileContext> {
+  const extension = path.extname(uri.fsPath).replace(/^\./, "").toLowerCase();
+  const stat = await vscode.workspace.fs.stat(uri);
+  const snapshot = await readLargeTextSnapshot(uri.fsPath, stat.size);
+  const code = [
+    `# 大文件关键点上下文`,
+    `# 原始文件：${uri.fsPath}`,
+    `# 原始大小：${formatBytes(stat.size)}，已流式扫描字符数约：${snapshot.scannedChars}`,
+    `# 说明：该文件超过普通完整上下文上限，插件已流式读取文本并保留头部、中部采样、尾部及关键行，供后端逐文件关键点提取。`,
+    "",
+    "## 关键行",
+    snapshot.keyLines || "未找到明显关键行。",
+    "",
+    "## 文件头部",
+    snapshot.head,
+    "",
+    "## 文件中部采样",
+    snapshot.middle,
+    "",
+    "## 文件尾部",
+    snapshot.tail,
+  ].join("\n");
+  return {
+    code,
+    languageId: languageFromExtension(extension),
+    fileName: path.basename(uri.fsPath),
+    filePath: uri.fsPath,
+    attention: "high",
+  };
+}
+
+async function readLargeTextSnapshot(filePath: string, bytes: number): Promise<{ head: string; middle: string; tail: string; keyLines: string; scannedChars: number }> {
+  const headLimit = Math.floor(LARGE_FILE_SLICE_CHARS / 2);
+  const tailLimit = Math.floor(LARGE_FILE_SLICE_CHARS / 2);
+  const middleLimit = Math.floor(LARGE_FILE_SLICE_CHARS / 3);
+  const middleStartByte = Math.max(0, Math.floor(bytes / 2) - Math.floor(MAX_FILE_BYTES / 4));
+  const middleEndByte = Math.min(bytes, middleStartByte + Math.floor(MAX_FILE_BYTES / 2));
+  let offset = 0;
+  let scannedChars = 0;
+  let head = "";
+  let middle = "";
+  let tail = "";
+  const keyLines: string[] = [];
+  let lineBuffer = "";
+  let lineNumber = 1;
+
+  await new Promise<void>((resolve, reject) => {
+    const stream = fs.createReadStream(filePath, { encoding: "utf8", highWaterMark: 64 * 1024 });
+    stream.on("data", (rawChunk: string | Buffer) => {
+      const chunk = String(rawChunk);
+      scannedChars += chunk.length;
+      if (head.length < headLimit) {
+        head = (head + chunk).slice(0, headLimit);
+      }
+      const chunkStart = offset;
+      const chunkEnd = offset + Buffer.byteLength(chunk, "utf8");
+      if (chunkEnd >= middleStartByte && chunkStart <= middleEndByte && middle.length < middleLimit) {
+        middle = (middle + chunk).slice(0, middleLimit);
+      }
+      tail = (tail + chunk).slice(-tailLimit);
+      offset = chunkEnd;
+
+      if (keyLines.length < 260) {
+        const lines = (lineBuffer + chunk).split(/\r?\n/);
+        lineBuffer = lines.pop() ?? "";
+        for (const line of lines) {
+          collectKeyLine(line, lineNumber, keyLines);
+          lineNumber += 1;
+          if (keyLines.length >= 260) break;
+        }
+      }
+    });
+    stream.on("error", reject);
+    stream.on("end", () => {
+      if (lineBuffer && keyLines.length < 260) {
+        collectKeyLine(lineBuffer, lineNumber, keyLines);
+      }
+      resolve();
+    });
+  });
+
+  return {
+    head,
+    middle,
+    tail,
+    keyLines: keyLines.join("\n"),
+    scannedChars,
+  };
+}
+
+function collectKeyLine(line: string, lineNumber: number, result: string[]) {
+  const patterns = [
+    /^\s*(def|class|async\s+def)\s+/,
+    /^\s*(function|const|let|var)\s+\w+/,
+    /^\s*import\s+/,
+    /^\s*from\s+\S+\s+import\s+/,
+    /print\s*\(/,
+    /\blogger\./,
+    /\blogging\b/,
+    /except\b|catch\s*\(/,
+    /TODO|FIXME|ERROR|WARN|warning|exception/i,
+  ];
+  if (!patterns.some((pattern) => pattern.test(line))) return;
+  result.push(`${lineNumber}: ${line.slice(0, 500)}`);
 }
 
 export async function pickFileContexts(): Promise<EditorFileContext[]> {
@@ -106,7 +227,7 @@ const CODE_FILE_EXTENSIONS = [
 ];
 const WORKSPACE_EXCLUDE = "{**/node_modules/**,**/.git/**,**/.venv/**,**/venv/**,**/dist/**,**/build/**,**/__pycache__/**,**/.next/**,**/.vite/**}";
 const MAX_FILE_BYTES = 240_000;
-const MAX_CONTEXT_CHARS = 260_000;
+const LARGE_FILE_SLICE_CHARS = 18_000;
 const MAX_AUTO_CONTEXT_FILES = 36;
 
 export async function pickProjectFileContexts(): Promise<EditorFileContext[]> {
@@ -140,13 +261,13 @@ export async function pickProjectFileContexts(): Promise<EditorFileContext[]> {
   return readContextBundle(selected.map((item) => item.uri));
 }
 
-export async function readWorkspaceSelectedFileContexts(relativePaths: string[]): Promise<EditorFileContext[]> {
+export async function readWorkspaceSelectedFileContexts(relativePaths: string[], options: ReadContextOptions = {}): Promise<EditorFileContext[]> {
   const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
   if (!workspaceFolder || !relativePaths.length) return [];
 
   const rootPath = path.resolve(workspaceFolder.uri.fsPath);
   const seen = new Set<string>();
-  const uris: vscode.Uri[] = [];
+  const candidates: Array<{ uri: vscode.Uri; relativePath: string }> = [];
 
   for (const rawPath of relativePaths) {
     const normalized = String(rawPath || "").trim().replace(/\\/g, "/");
@@ -167,10 +288,10 @@ export async function readWorkspaceSelectedFileContexts(relativePaths: string[])
     const key = targetPath.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
-    uris.push(vscode.Uri.file(targetPath));
+    candidates.push({ uri: vscode.Uri.file(targetPath), relativePath: normalized });
   }
 
-  return readContextBundle(await filterReadableUris(uris));
+  return readContextBundleWithProgress(candidates, options);
 }
 
 export async function collectWorkspaceManifest(limit = 800): Promise<WorkspaceManifestFile[]> {
@@ -316,13 +437,109 @@ async function filterReadableUris(uris: vscode.Uri[]): Promise<vscode.Uri[]> {
     seen.add(key);
     try {
       const stat = await vscode.workspace.fs.stat(uri);
-      if (stat.size > MAX_FILE_BYTES) continue;
       result.push(uri);
     } catch {
       // Ignore unreadable files.
     }
   }
   return result;
+}
+
+async function isReadableUri(uri: vscode.Uri): Promise<
+  | { ok: true; bytes: number; large: boolean }
+  | { ok: false; reason: string; bytes?: number }
+> {
+  const ext = path.extname(uri.fsPath).replace(/^\./, "").toLowerCase();
+  if (ext && !CODE_FILE_EXTENSIONS.includes(ext)) {
+    return { ok: false, reason: "文件类型不在可读代码上下文范围内。" };
+  }
+  try {
+    const stat = await vscode.workspace.fs.stat(uri);
+    if (stat.size > MAX_FILE_BYTES) {
+      return { ok: true, bytes: stat.size, large: true };
+    }
+    return { ok: true, bytes: stat.size, large: false };
+  } catch (error) {
+    return { ok: false, reason: error instanceof Error ? error.message : "文件不存在或无法读取。" };
+  }
+}
+
+async function readContextBundleWithProgress(
+  candidates: Array<{ uri: vscode.Uri; relativePath: string }>,
+  options: ReadContextOptions = {},
+): Promise<EditorFileContext[]> {
+  const contexts: EditorFileContext[] = [];
+  const total = candidates.length;
+
+  for (let index = 0; index < candidates.length; index += 1) {
+    const candidate = candidates[index];
+    const position = index + 1;
+    await options.onProgress?.({
+      index: position,
+      total,
+      path: candidate.relativePath,
+      status: "reading",
+    });
+
+    const readable = await isReadableUri(candidate.uri);
+    if (!readable.ok) {
+      await options.onProgress?.({
+        index: position,
+        total,
+        path: candidate.relativePath,
+        status: "skipped",
+        bytes: readable.bytes,
+        reason: readable.reason,
+      });
+      continue;
+    }
+
+    try {
+      const context = readable.large
+        ? await getLargeFileKeyPointContext(candidate.uri)
+        : await getFileContext(candidate.uri);
+      if (!context.code.trim()) {
+        await options.onProgress?.({
+          index: position,
+          total,
+          path: candidate.relativePath,
+          status: "skipped",
+          bytes: readable.bytes,
+          chars: context.code.length,
+          reason: "文件内容为空。",
+        });
+        continue;
+      }
+
+      contexts.push(context);
+      await options.onProgress?.({
+        index: position,
+        total,
+        path: candidate.relativePath,
+        status: readable.large ? "summarized" : "read",
+        bytes: readable.bytes,
+        chars: context.code.length,
+        reason: readable.large ? "文件较大，已读取文本并提取关键点上下文。" : undefined,
+      });
+    } catch (error) {
+      await options.onProgress?.({
+        index: position,
+        total,
+        path: candidate.relativePath,
+        status: "skipped",
+        bytes: readable.bytes,
+        reason: error instanceof Error ? error.message : "文件读取失败。",
+      });
+    }
+  }
+
+  return contexts;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 102.4) / 10} KB`;
+  return `${Math.round(bytes / (1024 * 102.4)) / 10} MB`;
 }
 
 function rankAutoContextUris(uris: vscode.Uri[], rootPath: string): vscode.Uri[] {
@@ -381,16 +598,13 @@ function languageFromExtension(extension: string): string {
 
 async function readContextBundle(uris: vscode.Uri[]): Promise<EditorFileContext[]> {
   const contexts: EditorFileContext[] = [];
-  let totalChars = 0;
   for (const uri of uris) {
-    const context = await getFileContext(uri);
+    const stat = await vscode.workspace.fs.stat(uri);
+    const context = stat.size > MAX_FILE_BYTES
+      ? await getLargeFileKeyPointContext(uri)
+      : await getFileContext(uri);
     if (!context.code.trim()) continue;
-    if (totalChars + context.code.length > MAX_CONTEXT_CHARS) {
-      vscode.window.showWarningMessage("选中文件内容较多，已按上下文上限截断部分文件，请缩小范围后可获得更完整分析。");
-      break;
-    }
     contexts.push(context);
-    totalChars += context.code.length;
   }
   return contexts;
 }

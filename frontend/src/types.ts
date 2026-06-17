@@ -93,6 +93,7 @@ export type AgentOperation = {
   new_path?: string | null;
   content?: string | null;
   reason?: string | null;
+  edits?: Array<{ search: string; replace: string }>;
 };
 
 export type AgentContextMode = "manual" | "ai_auto" | "hybrid";
@@ -158,6 +159,7 @@ export type AgentChatStreamRequest = {
 
 export type AgentMessageStreamRequest = AgentChatStreamRequest & {
   intent?: AgentIntent;
+  plan_id?: string | null;
 };
 
 export type ChatSessionListItem = {

@@ -110,6 +110,7 @@ class AgentChatStreamRequest(BaseModel):
 
 class AgentMessageStreamRequest(AgentChatStreamRequest):
     intent: AgentMessageIntent = "auto"
+    plan_id: str | None = None
 
 
 class AgentChatContextRequestItem(BaseModel):
@@ -135,6 +136,7 @@ class AgentOperation(BaseModel):
     new_path: str | None = None
     content: str | None = None
     reason: str | None = None
+    edits: list[dict[str, str]] = Field(default_factory=list)
 
 
 class AgentPlanResponse(BaseModel):
@@ -162,7 +164,7 @@ class AgentPlanItem(AgentPlanResponse):
 
 
 class AgentApplyResultRequest(BaseModel):
-    status: Literal["applied", "failed", "rejected"]
+    status: Literal["confirmed", "applied", "failed", "rejected"]
     message: str = ""
 
 
@@ -178,6 +180,13 @@ class AgentTaskResultRequest(BaseModel):
     assumptions: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     operations: list[AgentOperation] = Field(default_factory=list)
+
+
+class AgentTaskProgressRequest(BaseModel):
+    phase: str
+    message: str
+    detail: str | None = None
+    selected_file_paths: list[str] = Field(default_factory=list)
 
 
 class AgentWorkspaceTreeNode(BaseModel):

@@ -19,6 +19,7 @@ export type AgentPlanOperation = {
   new_path?: string | null;
   content?: string | null;
   reason?: string | null;
+  edits?: Array<{ search: string; replace: string }>;
 };
 
 export type AgentPlanPayload = {

@@ -58,7 +58,7 @@ def _looks_like_edit_instruction(instruction: str) -> bool:
     return bool(
         re.search(
             r"(add|create|update|modify|rewrite|optimi[sz]e|remove|delete|rename|insert|append|"
-            r"implement|添加|新增|增加|修改|更新|优化|删除|移除|重命名|插入|补充|创建|新建|实现|落地|生成|编写)",
+            r"implement|添加|新增|增加|修改|更新|优化|删除|移除|重命名|插入|补充|创建|新建|实现|落地|生成|编写|引入|替换|代替|记录)",
             instruction or "",
             re.IGNORECASE,
         )
@@ -321,6 +321,265 @@ def _openalex_reproduce_doc_operation(
     }
 
 
+def _looks_like_readme_doc_instruction(instruction: str, history: list[dict[str, str]] | None = None) -> bool:
+    instruction_text = str(instruction or "")
+    history_text = _agent_history_text(history)
+    combined = f"{instruction_text}\n{history_text}".lower()
+    readme_terms = (
+        "readme",
+        "README".lower(),
+        "项目说明",
+        "说明文档",
+        "使用说明",
+        "项目文档",
+        "项目介绍",
+        "文档说明",
+    )
+    if any(term.lower() in combined for term in readme_terms):
+        return True
+
+    followup_terms = (
+        "这一点不错",
+        "这点不错",
+        "这个不错",
+        "按这个",
+        "就这个",
+        "采纳",
+        "帮我实现",
+        "实现一下",
+        "落地",
+        "do it",
+        "implement it",
+    )
+    return any(term.lower() in instruction_text.lower() for term in followup_terms) and any(
+        term.lower() in history_text.lower()
+        for term in ("readme", "项目说明", "说明文档", "使用说明", "项目文档")
+    )
+
+
+def _context_file_path(item: dict) -> str:
+    return str(item.get("filePath") or item.get("file_path") or item.get("fileName") or item.get("file_name") or "").replace("\\", "/")
+
+
+def _context_file_content(files: list[dict] | None, path_suffix: str) -> str:
+    suffix = path_suffix.lower()
+    for item in files or []:
+        path_value = _context_file_path(item).lower()
+        if path_value.endswith(suffix):
+            return str(item.get("code") or "")
+    return ""
+
+
+def _context_has_path(files: list[dict] | None, *suffixes: str) -> bool:
+    normalized_suffixes = tuple(suffix.lower() for suffix in suffixes)
+    return any(_context_file_path(item).lower().endswith(normalized_suffixes) for item in files or [])
+
+
+def _infer_readme_project_title(files: list[dict] | None, code_context: str) -> str:
+    text = "\n".join(
+        [
+            str(code_context or ""),
+            "\n".join(_file_identity_text(item) for item in files or []),
+            _context_file_content(files, "docker-compose.yml"),
+            _context_file_content(files, "Dockerfile"),
+        ]
+    ).lower()
+    if "streamlit" in text and any(term in text for term in ("bertopic", "sentence-transformers", "hdbscan", "umap")):
+        return "机器学习课堂展示"
+    if "streamlit" in text:
+        return "Streamlit 数据分析应用"
+    return "项目说明"
+
+
+def _readme_feature_lines(files: list[dict] | None, code_context: str) -> list[str]:
+    text_parts = [str(code_context or "")]
+    for item in files or []:
+        text_parts.append(_file_identity_text(item))
+        text_parts.append(_clip_text(str(item.get("code") or ""), 2400))
+    text = "\n".join(text_parts).lower()
+    features: list[str] = []
+    if "streamlit" in text:
+        features.append("基于 Streamlit 提供交互式 Web 页面，适合课堂演示和快速验证分析流程。")
+    if any(term in text for term in ("bertopic", "sentence-transformers", "hdbscan", "umap", "gensim")):
+        features.append("集成主题建模、文本嵌入、降维和聚类等机器学习/NLP 能力。")
+    if any(term in text for term in ("feedparser", "rss", "openalex", "arxiv")):
+        features.append("支持从 RSS、OpenAlex、arXiv 等数据源采集或整理文献与资讯数据。")
+    if any(term in text for term in ("plotly", "pandas")):
+        features.append("使用 Pandas 与 Plotly 完成数据处理、统计汇总和可视化展示。")
+    if any(term in text for term in ("selenium", "chromium", "chromedriver")):
+        features.append("包含 Selenium/Chromium 自动化能力，可用于动态页面抓取或页面渲染。")
+    if any(term in text for term in ("pymysql", "dbutils", "mysql")):
+        features.append("提供 MySQL 连接与连接池能力，用于持久化业务数据。")
+    if any(term in text for term in ("xhtml2pdf", "markdown", "exports")):
+        features.append("支持将分析结果导出为 Markdown、PDF 或其他报告文件。")
+    if _context_has_path(files, "Dockerfile", "docker-compose.yml"):
+        features.append("提供 Docker/Docker Compose 配置，便于在一致环境中部署运行。")
+    return features or ["整理项目结构、运行方式和常见配置，方便新用户快速理解并启动项目。"]
+
+
+def _readme_structure_lines(files: list[dict] | None) -> list[str]:
+    paths: list[str] = []
+    for item in files or []:
+        path_value = _context_file_path(item)
+        if not path_value:
+            continue
+        if path_value not in paths:
+            paths.append(path_value)
+    preferred = [
+        "app17.py",
+        "config.py",
+        ".env.example",
+        ".env",
+        "Dockerfile",
+        "docker-compose.yml",
+        "requirements.txt",
+        "requirements-base.txt",
+        "requirements-ml.txt",
+        "openalex_crawler.py",
+        "arxiv_crawler.py",
+    ]
+    ordered: list[str] = []
+    lower_paths = {path.lower(): path for path in paths}
+    for name in preferred:
+        if name.lower() in lower_paths:
+            ordered.append(lower_paths[name.lower()])
+    for path in paths:
+        if path not in ordered and len(ordered) < 18:
+            ordered.append(path)
+
+    descriptions = {
+        "app17.py": "Streamlit 主入口，负责页面交互与核心业务流程。",
+        "config.py": "集中管理配置读取、数据库或模型参数等运行配置。",
+        ".env.example": "环境变量示例文件，可复制为本地 `.env` 后填写真实配置。",
+        ".env": "本地环境变量文件，通常不应提交到版本库。",
+        "Dockerfile": "容器镜像构建文件。",
+        "docker-compose.yml": "本地编排配置，可一键启动相关服务。",
+        "requirements.txt": "Python 依赖列表。",
+        "requirements-base.txt": "基础运行依赖列表。",
+        "requirements-ml.txt": "机器学习/NLP 相关依赖列表。",
+        "openalex_crawler.py": "OpenAlex 数据采集或检索脚本。",
+        "arxiv_crawler.py": "arXiv 数据采集或检索脚本。",
+    }
+    lines: list[str] = []
+    for path in ordered:
+        key = path.rsplit("/", 1)[-1]
+        description = descriptions.get(key, "项目文件。")
+        lines.append(f"- `{path}`：{description}")
+    return lines or ["- `app17.py`：应用入口文件。", "- `requirements*.txt`：Python 依赖配置。"]
+
+
+def _build_project_readme_markdown(files: list[dict] | None, code_context: str) -> str:
+    title = _infer_readme_project_title(files, code_context)
+    has_base_requirements = _context_has_path(files, "requirements-base.txt")
+    has_ml_requirements = _context_has_path(files, "requirements-ml.txt")
+    has_requirements = _context_has_path(files, "requirements.txt")
+    has_compose = _context_has_path(files, "docker-compose.yml")
+    has_dockerfile = _context_has_path(files, "Dockerfile")
+    has_env_example = _context_has_path(files, ".env.example", ".env.docker.example")
+    has_app17 = _context_has_path(files, "app17.py")
+
+    install_commands: list[str] = ["python -m venv .venv"]
+    install_commands.append(".\\.venv\\Scripts\\activate")
+    install_commands.append("python -m pip install --upgrade pip")
+    if has_base_requirements:
+        install_commands.append("pip install -r requirements-base.txt")
+    if has_ml_requirements:
+        install_commands.append("pip install -r requirements-ml.txt")
+    if has_requirements and not (has_base_requirements or has_ml_requirements):
+        install_commands.append("pip install -r requirements.txt")
+    run_command = "streamlit run app17.py --server.port 8501" if has_app17 else "streamlit run <入口文件>.py"
+    docker_commands = ["docker compose up --build"] if has_compose else ["docker build -t ml-class-demo .", "docker run --rm -p 8501:8501 --env-file .env ml-class-demo"]
+    env_hint = (
+        "复制 `.env.example` 或 `.env.docker.example` 为 `.env`，再填写数据库、模型服务、API Key 等本地配置。"
+        if has_env_example
+        else "根据 `config.py` 或部署环境要求准备 `.env`，不要把包含真实密钥的 `.env` 提交到版本库。"
+    )
+
+    return (
+        f"# {title}\n\n"
+        "本项目是一个面向课堂展示和实验验证的数据分析应用，围绕文本采集、自然语言处理、机器学习建模、可视化展示和报告导出组织代码。"
+        "README 用于说明项目结构、环境准备、运行方式和常见问题，方便从零启动或继续维护。\n\n"
+        "## 功能特性\n\n"
+        + "\n".join(f"- {line}" for line in _readme_feature_lines(files, code_context))
+        + "\n\n"
+        "## 技术栈\n\n"
+        "- Python 3.10+\n"
+        "- Streamlit\n"
+        "- Pandas / Plotly\n"
+        "- BERTopic / Sentence-Transformers / UMAP / HDBSCAN / Gensim（如安装了机器学习依赖）\n"
+        "- MySQL / PyMySQL / DBUtils（如启用数据库功能）\n"
+        "- Selenium / Chromium（如启用动态页面采集或渲染）\n"
+        "- Docker / Docker Compose\n\n"
+        "## 项目结构\n\n"
+        + "\n".join(_readme_structure_lines(files))
+        + "\n\n"
+        "## 环境准备\n\n"
+        "1. 安装 Python 3.10 或更高版本。\n"
+        "2. 准备可用的数据库和外部 API 配置（如项目功能需要）。\n"
+        f"3. {env_hint}\n"
+        "4. 如需运行 Docker 版本，请先安装 Docker Desktop 或兼容的 Docker 环境。\n\n"
+        "## 本地运行\n\n"
+        "```powershell\n"
+        + "\n".join(install_commands)
+        + f"\n{run_command}\n"
+        "```\n\n"
+        "启动后在浏览器打开 Streamlit 输出的本地地址，默认通常为 `http://localhost:8501`。\n\n"
+        + (
+            "## Docker 运行\n\n"
+            "```powershell\n"
+            + "\n".join(docker_commands)
+            + "\n```\n\n"
+            "如果需要持久化导出文件，建议在运行容器时挂载本地目录到应用的导出目录。\n\n"
+            if has_dockerfile or has_compose
+            else ""
+        )
+        + "## 配置说明\n\n"
+        "- `.env`：本地真实配置文件，可能包含数据库密码、API Key 等敏感信息，请勿提交。\n"
+        "- `.env.example` / `.env.docker.example`：推荐维护的配置模板，供新环境复制使用。\n"
+        "- `config.py`：建议集中读取环境变量并设置默认值，避免在业务代码中硬编码配置。\n\n"
+        "## 数据与导出\n\n"
+        "- 数据采集脚本可按需从 OpenAlex、arXiv、RSS 或其他来源拉取内容。\n"
+        "- 分析结果建议输出到统一的 `data/`、`exports/` 或项目约定目录中。\n"
+        "- 大文件、临时文件和包含敏感信息的数据应通过 `.gitignore` 排除。\n\n"
+        "## 常见问题\n\n"
+        "- 依赖安装失败：优先确认 Python 版本和系统编译环境，机器学习依赖可单独安装排查。\n"
+        "- 页面无法打开：确认 Streamlit 进程已启动，并检查端口是否被占用。\n"
+        "- 数据库连接失败：检查 `.env` 中的主机、端口、用户名、密码和数据库名。\n"
+        "- Docker 内浏览器相关功能异常：确认镜像中已安装 Chromium、chromedriver 和必要字体/系统库。\n\n"
+        "## 维护建议\n\n"
+        "- 依赖版本变更后同步更新 requirements 文件和 Docker 构建逻辑。\n"
+        "- 新增采集源、模型或导出格式时，在 README 中补充配置项和运行示例。\n"
+        "- 课堂展示前建议完整跑通一次本地运行、Docker 运行和核心分析流程。\n"
+    )
+
+
+def _project_readme_doc_operation(
+    instruction: str,
+    files: list[dict] | None,
+    code_context: str,
+    *,
+    history: list[dict[str, str]] | None = None,
+) -> dict | None:
+    if not _looks_like_readme_doc_instruction(instruction, history):
+        return None
+    existing_readme = next(
+        (
+            item
+            for item in files or []
+            if _context_file_path(item).lower().rsplit("/", 1)[-1] in {"readme.md", "readme.markdown"}
+        ),
+        None,
+    )
+    path = _context_file_path(existing_readme) if existing_readme else "README.md"
+    return {
+        "type": "update" if existing_readme else "create",
+        "path": path or "README.md",
+        "new_path": None,
+        "content": _build_project_readme_markdown(files, code_context),
+        "reason": "根据当前项目结构补充 README 项目说明，方便了解功能、依赖、配置和运行方式。",
+    }
+
+
 def _normalize_agent_operation_path(path_value: str, selected_file_paths: list[str]) -> str:
     normalized = str(path_value or "").strip().replace("\\", "/")
     selected = [str(item or "").strip().replace("\\", "/") for item in selected_file_paths if str(item or "").strip()]
@@ -337,6 +596,23 @@ def _normalize_agent_operation_path(path_value: str, selected_file_paths: list[s
     if drive_match:
         normalized = drive_match.group(1)
     return normalized.lstrip("/")
+
+
+def _normalize_agent_operation_edits(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, list):
+        return []
+    edits: list[dict[str, str]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        search = str(item.get("search") or "")
+        replace = str(item.get("replace") or "")
+        if not search:
+            continue
+        edits.append({"search": search, "replace": replace})
+        if len(edits) >= 20:
+            break
+    return edits
 
 
 def _compact_text(text: str, limit: int = 28) -> str:
@@ -567,8 +843,10 @@ class LLMService:
                     "Use this exact schema: "
                     '{"summary":"short summary","assumptions":["..."],"warnings":["..."],'
                     '"operations":[{"type":"create","path":"relative/path","new_path":null,'
-                    '"content":"complete file text or null","reason":"why"}]}. '
+                    '"content":"complete file text or null","reason":"why",'
+                    '"edits":[{"search":"exact old text","replace":"new text"}]}]}. '
                     "Allowed operation types are create, update, delete, rename. "
+                    "For update, use either content for a complete file replacement or edits for exact local replacements. "
                     "All paths must be workspace-relative."
                 ),
             },
@@ -857,6 +1135,7 @@ class LLMService:
                                 "new_path": _normalize_agent_operation_path(str(item.get("new_path") or ""), selected_file_paths or []) if item.get("new_path") else None,
                                 "content": item.get("content"),
                                 "reason": str(item.get("reason") or "").strip() or "沿用上一条 Agent 计划中的文件修改操作。",
+                                "edits": _normalize_agent_operation_edits(item.get("edits")),
                             }
                         )
                     if normalized_operations:
@@ -894,14 +1173,14 @@ class LLMService:
             item_code = str(item.get("code") or "")
             file_sections.append(
                 f"File {index}: {item_name}\nPath: {item_path}\nLanguage: {item_language}\nAttention: {item_attention}\n"
-                f"```{item_language}\n{_clip_text(item_code, 12000)}\n```"
+                f"```{item_language}\n{item_code}\n```"
             )
 
         context_parts = [
             f"Primary file: {file_name or 'unknown'}",
             f"Primary path: {file_path or 'unknown'}",
             f"Language: {language_label} ({language_code})",
-            f"Current code:\n```{language_code}\n{_clip_text(code_context, 18000)}\n```",
+            f"Current code:\n```{language_code}\n{code_context}\n```",
         ]
         if file_sections:
             context_parts.append("Additional files:\n" + "\n\n".join(file_sections))
@@ -934,13 +1213,16 @@ class LLMService:
                     "you must produce concrete file operations whenever enough file context is provided. "
                     "All paths must be workspace-relative paths, never absolute paths. "
                     "Allowed operation types are create, update, delete, rename. "
-                    "For create and update operations, content must contain the complete final file content. "
+                    "For create operations, content must contain the complete final file content. "
+                    "For update operations on large existing files, prefer edits with exact search/replace snippets instead of returning the whole file. "
+                    "Each edit.search must be copied exactly from the provided file context and each edit.replace must be the desired replacement text. "
+                    "Use content for update only when replacing the entire file is truly intended. "
                     "For rename operations, include new_path. "
                     "Avoid deleting files unless the user explicitly asks for deletion. "
                     "Use this schema exactly: "
                     '{"summary":"short summary","assumptions":["..."],"warnings":["..."],'
                     '"operations":[{"type":"update","path":"src/file.py","new_path":null,'
-                    '"content":"complete file text","reason":"why"}]}.'
+                    '"content":null,"reason":"why","edits":[{"search":"exact old text","replace":"new text"}]}]}.'
                 ),
             },
             {
@@ -974,6 +1256,23 @@ class LLMService:
                         "warnings": ["模型返回的计划 JSON 不完整，已使用本地规则生成 reproduce.md 的可确认计划。"],
                         "operations": [reproduce_operation],
                     }
+                readme_operation = _project_readme_doc_operation(
+                    instruction,
+                    files,
+                    code_context,
+                    history=history,
+                )
+                if readme_operation:
+                    readme_operation["path"] = _normalize_agent_operation_path(
+                        str(readme_operation.get("path") or ""),
+                        selected_file_paths or [],
+                    )
+                    return {
+                        "summary": "创建或更新 README 项目说明文档。",
+                        "assumptions": ["用户希望根据当前项目结构生成 README 项目说明。"],
+                        "warnings": ["模型返回的计划 JSON 不完整，已使用本地规则生成 README.md 的可确认计划。"],
+                        "operations": [readme_operation],
+                    }
                 fallback_operation = _quick_start_readme_operation(instruction, files, code_context)
                 if fallback_operation:
                     fallback_operation["path"] = _normalize_agent_operation_path(str(fallback_operation.get("path") or ""), selected_file_paths or [])
@@ -1005,11 +1304,44 @@ class LLMService:
                     "new_path": _normalize_agent_operation_path(str(item.get("new_path") or ""), selected_file_paths or []) if item.get("new_path") else None,
                     "content": item.get("content"),
                     "reason": str(item.get("reason") or "").strip() or None,
+                    "edits": _normalize_agent_operation_edits(item.get("edits")),
                 }
             )
 
         if not normalized_operations and _looks_like_edit_instruction(instruction):
+            retry_plan = self._retry_agent_plan_with_local_edits(
+                instruction=instruction,
+                context_parts=context_parts,
+                selected_file_paths=selected_file_paths or [],
+            )
+            if retry_plan:
+                value = retry_plan
+                operations = value.get("operations") if isinstance(value.get("operations"), list) else []
+                for item in operations:
+                    if not isinstance(item, dict):
+                        continue
+                    operation_type = str(item.get("type") or "").lower()
+                    path_value = str(item.get("path") or "").strip()
+                    if operation_type not in {"create", "update", "delete", "rename"} or not path_value:
+                        continue
+                    normalized_operations.append(
+                        {
+                            "type": operation_type,
+                            "path": _normalize_agent_operation_path(path_value, selected_file_paths or []),
+                            "new_path": _normalize_agent_operation_path(str(item.get("new_path") or ""), selected_file_paths or []) if item.get("new_path") else None,
+                            "content": item.get("content"),
+                            "reason": str(item.get("reason") or "").strip() or None,
+                            "edits": _normalize_agent_operation_edits(item.get("edits")),
+                        }
+                    )
+
+        if not normalized_operations and _looks_like_edit_instruction(instruction):
             fallback_operation = _openalex_reproduce_doc_operation(
+                instruction,
+                files,
+                code_context,
+                history=history,
+            ) or _project_readme_doc_operation(
                 instruction,
                 files,
                 code_context,
@@ -1018,16 +1350,21 @@ class LLMService:
             if fallback_operation:
                 fallback_operation["path"] = _normalize_agent_operation_path(str(fallback_operation.get("path") or ""), selected_file_paths or [])
                 normalized_operations.append(fallback_operation)
+                fallback_path = str(fallback_operation.get("path") or "")
                 value["summary"] = (
                     "创建 OpenAlex 实验复现说明文档。"
-                    if str(fallback_operation.get("path") or "") == "reproduce.md"
+                    if fallback_path == "reproduce.md"
+                    else "创建或更新 README 项目说明文档。"
+                    if fallback_path.lower().rsplit("/", 1)[-1] in {"readme.md", "readme.markdown"}
                     else "为 README 补充快速开始板块。"
                 )
                 warnings = value.get("warnings")
                 if not isinstance(warnings, list):
                     value["warnings"] = []
-                if str(fallback_operation.get("path") or "") == "reproduce.md":
+                if fallback_path == "reproduce.md":
                     value["warnings"].append("模型未生成具体文件操作，已使用本地规则生成 reproduce.md 的可确认计划。")
+                elif fallback_path.lower().rsplit("/", 1)[-1] in {"readme.md", "readme.markdown"}:
+                    value["warnings"].append("模型未生成具体文件操作，已使用本地规则生成 README.md 的可确认计划。")
 
         return {
             "summary": str(value.get("summary") or instruction).strip()[:500],
@@ -1035,6 +1372,74 @@ class LLMService:
             "warnings": [str(item) for item in value.get("warnings", []) if str(item).strip()][:12],
             "operations": normalized_operations[:24],
         }
+
+    def _retry_agent_plan_with_local_edits(
+        self,
+        *,
+        instruction: str,
+        context_parts: list[str],
+        selected_file_paths: list[str],
+    ) -> dict | None:
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are retrying a CodeLens Pro Agent file modification plan because the first plan had no operations. "
+                    "Return one strict JSON object and nothing else. "
+                    "The user asked for a concrete change, so produce at least one operation if there is any relevant file context. "
+                    "For large files, use update operations with edits, not whole-file content. "
+                    "Each edit.search must be an exact snippet from the provided file and edit.replace must be the replacement. "
+                    "Schema: "
+                    '{"summary":"short summary","assumptions":["..."],"warnings":["..."],'
+                    '"operations":[{"type":"update","path":"relative/path","new_path":null,'
+                    '"content":null,"reason":"why","edits":[{"search":"exact old text","replace":"new text"}]}]}.'
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"User instruction:\n{instruction}\n\n"
+                    f"Selected paths:\n{json.dumps(selected_file_paths, ensure_ascii=False)}\n\n"
+                    "Workspace context:\n"
+                    + "\n\n".join(context_parts)
+                ),
+            },
+        ]
+        try:
+            raw = self._complete_text(messages, max_tokens=8000, json_object=True)
+            value = _parse_json_object(raw)
+        except Exception as exc:
+            print(f"[agent-plan-retry] failed to produce local edit plan: {exc.__class__.__name__}: {exc}", flush=True)
+            return None
+        return value if isinstance(value, dict) else None
+
+    def summarize_agent_file_for_plan(self, instruction: str, file_item: dict, index: int, total: int) -> str:
+        item_name = str(file_item.get("fileName") or file_item.get("file_name") or f"file-{index}")
+        item_path = str(file_item.get("filePath") or file_item.get("file_path") or item_name)
+        item_language = str(file_item.get("languageId") or file_item.get("language_id") or "text")
+        item_code = str(file_item.get("code") or "")
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You summarize one file for a CodeLens Pro Agent planning pass. "
+                    "Do not propose final operations yet. "
+                    "Return concise Chinese bullet points only, focused on facts needed to modify this file for the user request. "
+                    "Mention exact symbols, imports, functions, print/logging calls, and likely edit locations when relevant. "
+                    "When a local replacement is likely needed, include the exact old snippet that should be used as edit.search. "
+                    "Do not output chain-of-thought."
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"User instruction:\n{instruction}\n\n"
+                    f"File {index}/{total}: {item_name}\nPath: {item_path}\nLanguage: {item_language}\n\n"
+                    f"```{item_language}\n{item_code}\n```"
+                ),
+            },
+        ]
+        return self._complete_text(messages, max_tokens=1800).strip()
 
     def generate_report_title(
         self,

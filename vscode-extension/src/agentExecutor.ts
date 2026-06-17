@@ -2,6 +2,7 @@ import * as path from "path";
 import * as vscode from "vscode";
 import type { BackendManager } from "./backendManager";
 import { autoCollectWorkspaceContexts, buildMultiFileContext, collectWorkspaceManifest, readWorkspaceSelectedFileContexts } from "./editorContext";
+import type { ReadContextProgress } from "./editorContext";
 import type { AgentPlanPayload } from "./messageBridge";
 
 type AgentContextMode = "manual" | "ai_auto" | "hybrid";
@@ -127,6 +128,7 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
 
   private async handlePendingTask(task: AgentPlanItem) {
     const workspaceFolder = vscode.workspace.workspaceFolders?.[0];
+    await this.reportTaskProgress(task, "received", "插件已收到网页端 Agent 计划任务。").catch(() => undefined);
     if (!workspaceFolder) {
       await this.reportTaskResult(task, "failed", "未打开 VS Code 工作区，无法自动收集项目文件。").catch(() => undefined);
       return;
@@ -134,16 +136,40 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
     if (!workspaceMatches(task.workspace_root, workspaceFolder.uri.fsPath)) {
       return;
     }
+    await this.reportTaskProgress(task, "workspace_checked", `已确认 VS Code 工作区：${workspaceFolder.name}`).catch(() => undefined);
 
     const contextMode = normalizeContextMode(task.context_mode);
     const selectedPaths = sanitizeRelativePaths(Array.isArray(task.selected_file_paths) ? task.selected_file_paths : []);
-    const contextPaths = await this.resolveContextPaths(task, contextMode, selectedPaths);
+    await this.reportTaskProgress(
+      task,
+      "context_resolve",
+      contextMode === "manual"
+        ? `正在读取网页选中的 ${selectedPaths.length} 个上下文文件...`
+        : "正在解析项目上下文范围，准备读取相关文件...",
+      undefined,
+      selectedPaths,
+    ).catch(() => undefined);
+    const contextPaths = await this.resolveContextPaths(task, contextMode, selectedPaths, task);
     let effectiveContextPaths = contextPaths;
+    if (effectiveContextPaths.length) {
+      await this.reportTaskProgress(
+        task,
+        "read_selected_files",
+        `正在读取 ${effectiveContextPaths.length} 个工作区文件...`,
+        undefined,
+        effectiveContextPaths,
+      ).catch(() => undefined);
+    } else {
+      await this.reportTaskProgress(task, "auto_collect", "正在自动收集项目上下文文件...").catch(() => undefined);
+    }
     let files = effectiveContextPaths.length
-      ? await readWorkspaceSelectedFileContexts(contextPaths)
+      ? await readWorkspaceSelectedFileContexts(contextPaths, {
+          onProgress: (event) => this.reportFileReadProgress(task, event),
+        })
       : await autoCollectWorkspaceContexts();
     if (!files.length && contextMode !== "manual") {
       effectiveContextPaths = [];
+      await this.reportTaskProgress(task, "auto_collect_retry", "未读取到指定文件，正在改用自动项目上下文收集...").catch(() => undefined);
       files = await autoCollectWorkspaceContexts();
     }
     if (!files.length && contextMode === "manual" && effectiveContextPaths.length) {
@@ -156,8 +182,16 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
     }
 
     const actualPaths = effectiveContextPaths.length ? relativePathsFromFiles(files, workspaceFolder.uri.fsPath) : [];
+    await this.reportTaskProgress(
+      task,
+      "context_ready",
+      `已读取 ${files.length} 个上下文文件，正在打包发送给后端生成计划...`,
+      undefined,
+      actualPaths,
+    ).catch(() => undefined);
     const bundle = buildMultiFileContext(files, effectiveContextPaths.length ? "workspaceFiles" : "autoWorkspace");
     const instruction = task.instruction || task.summary || "请分析当前项目";
+    await this.reportTaskProgress(task, "backend_plan", "正在请求后端模型生成可确认的修改计划...", undefined, actualPaths).catch(() => undefined);
     const response = await fetch(`${this.backend.apiBase}/api/agent/plan`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -186,6 +220,7 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
     }
 
     await response.json();
+    await this.reportTaskProgress(task, "done", "后端已生成计划，正在回传网页确认。", undefined, actualPaths).catch(() => undefined);
   }
 
   private async handlePendingChatContext(request: AgentChatContextRequest) {
@@ -241,12 +276,23 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
     );
   }
 
-  private async resolveContextPaths(task: AgentPlanItem, contextMode: AgentContextMode, selectedPaths: string[]): Promise<string[]> {
+  private async resolveContextPaths(
+    task: AgentPlanItem,
+    contextMode: AgentContextMode,
+    selectedPaths: string[],
+    progressPlan?: AgentPlanItem,
+  ): Promise<string[]> {
     if (contextMode === "manual") return selectedPaths;
 
     try {
+      if (progressPlan) {
+        await this.reportTaskProgress(progressPlan, "manifest_collect", "正在收集项目文件清单，让 AI 选择相关上下文...", undefined, selectedPaths).catch(() => undefined);
+      }
       const manifest = await collectWorkspaceManifest();
       if (!manifest.length) return contextMode === "hybrid" ? selectedPaths : [];
+      if (progressPlan) {
+        await this.reportTaskProgress(progressPlan, "manifest_ready", `已收集 ${manifest.length} 个候选文件，正在选择相关文件...`, undefined, selectedPaths).catch(() => undefined);
+      }
       const response = await fetch(`${this.backend.apiBase}/api/agent/context/select`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -262,6 +308,9 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
       const result = await response.json() as AgentContextSelectResponse;
       const aiPaths = sanitizeRelativePaths(Array.isArray(result.selected_file_paths) ? result.selected_file_paths : []);
       if (!aiPaths.length) return contextMode === "hybrid" ? selectedPaths : [];
+      if (progressPlan) {
+        await this.reportTaskProgress(progressPlan, "context_selected", `已选择 ${aiPaths.length} 个相关文件，准备逐个读取。`, undefined, aiPaths).catch(() => undefined);
+      }
       return aiPaths;
     } catch {
       return contextMode === "hybrid" ? selectedPaths : [];
@@ -289,10 +338,23 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
     const edit = new vscode.WorkspaceEdit();
     const skipped: string[] = [];
 
-    for (const operation of operations) {
+    await this.reportPlanResult(plan, "confirmed", `开始执行 Agent 计划，共 ${operations.length} 个文件操作。`).catch(() => undefined);
+
+    for (let index = 0; index < operations.length; index += 1) {
+      const operation = operations[index];
       const targetPath = path.resolve(rootPath, operation.path);
+      await this.reportPlanResult(
+        plan,
+        "confirmed",
+        `正在准备第 ${index + 1}/${operations.length} 个操作：${operation.type} ${operation.path}`,
+      ).catch(() => undefined);
       if (!this.isInsideWorkspace(rootPath, targetPath)) {
         skipped.push(operation.path);
+        await this.reportPlanResult(
+          plan,
+          "confirmed",
+          `已跳过工作区外路径：${operation.path}`,
+        ).catch(() => undefined);
         continue;
       }
       const targetUri = vscode.Uri.file(targetPath);
@@ -302,11 +364,31 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
         edit.insert(targetUri, new vscode.Position(0, 0), operation.content ?? "");
       } else if (operation.type === "update") {
         const document = await vscode.workspace.openTextDocument(targetUri);
-        const lastLine = document.lineCount > 0 ? document.lineAt(document.lineCount - 1) : undefined;
-        const range = lastLine
-          ? new vscode.Range(0, 0, lastLine.lineNumber, lastLine.text.length)
-          : new vscode.Range(0, 0, 0, 0);
-        edit.replace(targetUri, range, operation.content ?? "");
+        if (Array.isArray(operation.edits) && operation.edits.length) {
+          let nextText = document.getText();
+          for (const localEdit of operation.edits) {
+            const search = String(localEdit.search || "");
+            if (!search) continue;
+            if (!nextText.includes(search)) {
+              throw new Error(`局部替换片段未在文件中找到：${operation.path}`);
+            }
+            nextText = nextText.replace(search, String(localEdit.replace ?? ""));
+          }
+          const lastLine = document.lineCount > 0 ? document.lineAt(document.lineCount - 1) : undefined;
+          const range = lastLine
+            ? new vscode.Range(0, 0, lastLine.lineNumber, lastLine.text.length)
+            : new vscode.Range(0, 0, 0, 0);
+          edit.replace(targetUri, range, nextText);
+        } else {
+          if (operation.content === undefined || operation.content === null) {
+            throw new Error(`更新操作缺少 content 或 edits：${operation.path}`);
+          }
+          const lastLine = document.lineCount > 0 ? document.lineAt(document.lineCount - 1) : undefined;
+          const range = lastLine
+            ? new vscode.Range(0, 0, lastLine.lineNumber, lastLine.text.length)
+            : new vscode.Range(0, 0, 0, 0);
+          edit.replace(targetUri, range, operation.content ?? "");
+        }
       } else if (operation.type === "delete") {
         edit.deleteFile(targetUri, { recursive: false, ignoreIfNotExists: false });
       } else if (operation.type === "rename" && operation.new_path) {
@@ -317,6 +399,11 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
         }
         edit.renameFile(targetUri, vscode.Uri.file(nextPath), { overwrite: true, ignoreIfExists: false });
       }
+      await this.reportPlanResult(
+        plan,
+        "confirmed",
+        `已准备第 ${index + 1}/${operations.length} 个操作：${operation.type} ${operation.path}`,
+      ).catch(() => undefined);
     }
 
     try {
@@ -352,6 +439,68 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
     });
   }
 
+  private async reportTaskProgress(
+    plan: AgentPlanItem,
+    phase: string,
+    message: string,
+    detail?: string,
+    selectedFilePaths: string[] = [],
+  ) {
+    const planId = plan.plan_id || plan.id;
+    if (!planId) return;
+    await fetch(`${this.backend.apiBase}/api/agent/tasks/${planId}/progress`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        phase,
+        message,
+        detail: detail ?? null,
+        selected_file_paths: selectedFilePaths,
+      }),
+    });
+  }
+
+  private async reportFileReadProgress(plan: AgentPlanItem, event: ReadContextProgress) {
+    const fileName = path.basename(event.path);
+    if (event.status === "reading") {
+      await this.reportTaskProgress(
+        plan,
+        "file_reading",
+        `正在读取第 ${event.index}/${event.total} 个文件：${fileName}`,
+        event.path,
+        [event.path],
+      ).catch(() => undefined);
+      return;
+    }
+    if (event.status === "read") {
+      await this.reportTaskProgress(
+        plan,
+        "file_read",
+        `已完整读取第 ${event.index}/${event.total} 个文件：${fileName}`,
+        `${event.path}${event.chars !== undefined ? ` · ${event.chars} 字符` : ""}`,
+        [event.path],
+      ).catch(() => undefined);
+      return;
+    }
+    if (event.status === "summarized") {
+      await this.reportTaskProgress(
+        plan,
+        "file_summarized",
+        `已读取并提取第 ${event.index}/${event.total} 个大文件的关键点：${fileName}`,
+        `${event.path}${event.reason ? ` · ${event.reason}` : ""}`,
+        [event.path],
+      ).catch(() => undefined);
+      return;
+    }
+    await this.reportTaskProgress(
+      plan,
+      "file_skipped",
+      `已跳过第 ${event.index}/${event.total} 个文件：${fileName}`,
+      `${event.path}${event.reason ? ` · ${event.reason}` : ""}`,
+      [],
+    ).catch(() => undefined);
+  }
+
   private async reportChatContextResult(
     requestId: string,
     status: "ok" | "failed",
@@ -371,7 +520,7 @@ export class AgentWorkspaceExecutor implements vscode.Disposable {
     });
   }
 
-  private async reportPlanResult(plan: AgentPlanItem, status: "applied" | "failed" | "rejected", message: string) {
+  private async reportPlanResult(plan: AgentPlanItem, status: "confirmed" | "applied" | "failed" | "rejected", message: string) {
     await fetch(`${this.backend.apiBase}/api/agent/plans/${plan.plan_id || plan.id}/apply-result`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },

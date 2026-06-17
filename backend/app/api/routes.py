@@ -30,6 +30,7 @@ from backend.app.schemas import (
     AgentPlanItem,
     AgentPlanRequest,
     AgentPlanResponse,
+    AgentTaskProgressRequest,
     AgentTaskResultRequest,
     AgentWorkspaceHeartbeatRequest,
     AgentWorkspaceSnapshot,
@@ -99,9 +100,13 @@ router = APIRouter(prefix="/api")
 WORKSPACE_STALE_SECONDS = 60
 AGENT_CHAT_CONTEXT_TIMEOUT_SECONDS = 30
 AGENT_CHAT_CONTEXT_TTL_SECONDS = 120
+AGENT_PLAN_PROGRESS_TIMEOUT_SECONDS = 90
+AGENT_PLAN_PROGRESS_TTL_SECONDS = 180
+AGENT_PLAN_PROGRESS_MAX_EVENTS = 80
 _agent_workspace_snapshot: AgentWorkspaceSnapshot | None = None
 _agent_workspace_snapshots: dict[str, AgentWorkspaceSnapshot] = {}
 _agent_chat_context_requests: dict[str, dict[str, Any]] = {}
+_agent_plan_progress_events: dict[str, list[dict[str, Any]]] = {}
 
 
 @router.get("/health", response_model=HealthResponse)
@@ -995,20 +1000,97 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
         session_id = chat_session.id
 
     try:
+        if existing_plan_id:
+            _record_agent_plan_progress(
+                existing_plan_id,
+                AgentTaskProgressRequest(
+                    phase="llm_start",
+                    message="正在调用模型生成可确认的修改计划...",
+                    detail="后端已收到 VS Code 插件读取的项目上下文。",
+                    selected_file_paths=payload.selected_file_paths,
+                ),
+            )
         service = LLMService(payload.model)
+        planning_report_context = payload.report_context
+        planning_code_context = payload.code_context
+        planning_files = [item.model_dump() for item in payload.files]
+        if existing_plan_id and payload.files:
+            file_summaries: list[str] = []
+            file_summary_items: list[tuple[Any, str]] = []
+            total_files = len(payload.files)
+            for index, file_item in enumerate(payload.files, start=1):
+                file_path = file_item.filePath or file_item.fileName or f"file-{index}"
+                _record_agent_plan_progress(
+                    existing_plan_id,
+                    AgentTaskProgressRequest(
+                        phase="file_analyze",
+                        message=f"正在提取第 {index}/{total_files} 个文件的关键点：{Path(str(file_path)).name}",
+                        detail=str(file_path),
+                        selected_file_paths=payload.selected_file_paths,
+                    ),
+                )
+                try:
+                    summary = service.summarize_agent_file_for_plan(
+                        instruction,
+                        file_item.model_dump(),
+                        index,
+                        total_files,
+                    )
+                except Exception as exc:
+                    summary = f"- 关键点提取失败：{str(exc) or exc.__class__.__name__}"
+                if summary:
+                    file_summaries.append(f"File {index}: {file_path}\n{summary}")
+                    file_summary_items.append((file_item, f"File {index}: {file_path}\n{summary}"))
+                _record_agent_plan_progress(
+                    existing_plan_id,
+                    AgentTaskProgressRequest(
+                        phase="file_analyzed",
+                        message=f"已提取第 {index}/{total_files} 个文件的关键点：{Path(str(file_path)).name}",
+                        detail=str(file_path),
+                        selected_file_paths=payload.selected_file_paths,
+                    ),
+                )
+            if file_summaries:
+                planning_report_context = "\n\n".join(
+                    [
+                        str(payload.report_context or "").strip(),
+                        "逐文件关键点摘要：",
+                        *file_summaries,
+                    ]
+                ).strip()
+                planning_code_context = "后端已逐个文件读取完整内容，并提取与本次任务相关的关键点。最终计划请基于逐文件关键点摘要生成统一修改方案。"
+                planning_files = [
+                    {
+                        "code": summary,
+                        "languageId": "text",
+                        "fileName": str(item.fileName or item.filePath or f"file-{index}"),
+                        "filePath": str(item.filePath or item.fileName or f"file-{index}"),
+                        "attention": item.attention,
+                    }
+                    for index, (item, summary) in enumerate(file_summary_items, start=1)
+                ]
         plan = service.generate_agent_plan(
             instruction=instruction,
-            code_context=payload.code_context,
+            code_context=planning_code_context,
             language_code=payload.language_code,
             language_label=payload.language_label,
             file_name=payload.file_name,
             file_path=payload.file_path,
-            report_context=payload.report_context,
-            files=[item.model_dump() for item in payload.files],
+            report_context=planning_report_context,
+            files=planning_files,
             history=history,
             previous_plans=previous_plans,
             selected_file_paths=payload.selected_file_paths,
         )
+        if existing_plan_id:
+            _record_agent_plan_progress(
+                existing_plan_id,
+                AgentTaskProgressRequest(
+                    phase="plan_validate",
+                    message="模型已返回计划，正在校验文件操作结构...",
+                    selected_file_paths=payload.selected_file_paths,
+                ),
+            )
     except Exception as exc:
         traceback.print_exc()
         failure_message = (
@@ -1061,6 +1143,14 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
             session.refresh(plan_row)
             title = chat_session.title
 
+        _record_agent_plan_progress(
+            plan_row.id,
+            AgentTaskProgressRequest(
+                phase="plan_failed",
+                message=failure_message,
+                selected_file_paths=_selected_file_paths(plan_row),
+            ),
+        )
         return AgentPlanResponse(
             session_id=session_id,
             plan_id=plan_row.id,
@@ -1097,7 +1187,7 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
                 plan_row.workspace_root = workspace_root
             plan_row.status = "waiting_confirm" if source == "web" else "pending"
             plan_row.source = source
-            plan_row.apply_result = "网页已确认前的插件计划，等待下一步处理。" if source == "web" else "VS Code 插件已生成计划，等待用户确认应用。"
+            plan_row.apply_result = "插件已生成计划，等待网页确认执行。" if source == "web" else "VS Code 插件已生成计划，等待用户确认应用。"
             plan_row.updated_at = datetime.utcnow()
         else:
             plan_row = AgentPlan(
@@ -1131,6 +1221,15 @@ def plan_agent(payload: AgentPlanRequest) -> AgentPlanResponse:
         session.refresh(plan_row)
         title = chat_session.title
 
+    _record_agent_plan_progress(
+        plan_row.id,
+        AgentTaskProgressRequest(
+            phase="plan_ready",
+            message="计划已生成，等待网页确认执行。",
+            detail=f"已生成 {len(_safe_json_list(plan_row.operations_json))} 个文件操作。",
+            selected_file_paths=_selected_file_paths(plan_row),
+        ),
+    )
     return AgentPlanResponse(
         session_id=session_id,
         plan_id=plan_row.id,
@@ -1161,6 +1260,14 @@ def stream_agent_message(payload: AgentMessageStreamRequest) -> StreamingRespons
             workspace_root = _normalize_workspace_root(payload.workspace_root)
             should_plan = _agent_message_should_plan(payload.intent, payload.message)
             if should_plan:
+                if payload.plan_id and (not selected_paths or not workspace_root):
+                    with Session(engine) as session:
+                        previous_plan = session.get(AgentPlan, payload.plan_id)
+                        if previous_plan:
+                            if not selected_paths:
+                                selected_paths = _selected_file_paths(previous_plan)
+                            if not workspace_root:
+                                workspace_root = _normalize_workspace_root(previous_plan.workspace_root)
                 if payload.source == "web" and not workspace_root:
                     yield sse_event(
                         "error",
@@ -1185,6 +1292,39 @@ def stream_agent_message(payload: AgentMessageStreamRequest) -> StreamingRespons
                     chat_session = session.get(ChatSession, payload.session_id) if payload.session_id else None
                     if chat_session and chat_session.context_type != "agent":
                         chat_session = None
+                    revision_instruction = payload.message
+                    previous_plan = session.get(AgentPlan, payload.plan_id) if payload.plan_id else None
+                    if previous_plan:
+                        if chat_session and previous_plan.session_id != chat_session.id:
+                            yield sse_event(
+                                "error",
+                                error_payload(
+                                    "AGENT_PLAN_SESSION_MISMATCH",
+                                    "要调整的 Agent 计划不属于当前对话。",
+                                    "请刷新会话后重新选择需要调整的计划。",
+                                ),
+                            )
+                            return
+                        chat_session = session.get(ChatSession, previous_plan.session_id)
+                        if not chat_session or chat_session.context_type != "agent":
+                            yield sse_event(
+                                "error",
+                                error_payload(
+                                    "AGENT_PLAN_NOT_FOUND",
+                                    "没有找到要调整的 Agent 计划。",
+                                    "请刷新页面后重新生成计划。",
+                                ),
+                            )
+                            return
+                        previous_plan.status = "rejected"
+                        previous_plan.apply_result = "已根据调整建议生成新版计划，旧计划不再执行。"
+                        previous_plan.updated_at = datetime.utcnow()
+                        session.add(previous_plan)
+                        if not selected_paths:
+                            selected_paths = _selected_file_paths(previous_plan)
+                        if not workspace_root:
+                            workspace_root = _normalize_workspace_root(previous_plan.workspace_root)
+                        revision_instruction = _agent_plan_revision_instruction(previous_plan, payload.message)
                     if not chat_session:
                         title = _ensure_unique_title(
                             session,
@@ -1198,10 +1338,20 @@ def stream_agent_message(payload: AgentMessageStreamRequest) -> StreamingRespons
                     session.add(ChatMessage(session_id=chat_session.id, role="user", content=payload.message))
                     plan_row = AgentPlan(
                         session_id=chat_session.id,
-                        instruction=payload.message,
+                        instruction=revision_instruction,
                         summary="等待 VS Code 插件处理",
                         assumptions_json=json.dumps([], ensure_ascii=False),
-                        warnings_json=json.dumps(["插件将读取工作区文件，并基于当前对话生成可确认的修改计划。"], ensure_ascii=False),
+                        warnings_json=json.dumps(
+                            [
+                                "插件将读取工作区文件，并基于当前对话生成可确认的修改计划。",
+                                *(
+                                    ["这是根据上一版计划调整后生成的新计划。"]
+                                    if previous_plan
+                                    else []
+                                ),
+                            ],
+                            ensure_ascii=False,
+                        ),
                         operations_json=json.dumps([], ensure_ascii=False),
                         selected_files_json=json.dumps(selected_paths, ensure_ascii=False),
                         context_mode=payload.context_mode,
@@ -1236,14 +1386,10 @@ def stream_agent_message(payload: AgentMessageStreamRequest) -> StreamingRespons
                         "plan": plan_item.model_dump(mode="json"),
                     },
                 )
-                yield sse_event(
-                    "done",
-                    {
-                        "session_id": session_id,
-                        "title": title,
-                        "mode": "plan",
-                        "plan_id": plan_item.id,
-                    },
+                yield from _stream_agent_plan_progress_until_done(
+                    plan_id=plan_item.id,
+                    session_id=session_id,
+                    title=title,
                 )
                 return
 
@@ -1641,6 +1787,31 @@ def update_agent_task_result(
     return _agent_plan_item(plan)
 
 
+@router.post("/agent/tasks/{task_id}/progress", response_model=AgentPlanItem)
+def update_agent_task_progress(
+    task_id: str,
+    payload: AgentTaskProgressRequest,
+    session: Session = Depends(get_session),
+) -> AgentPlanItem:
+    plan = session.get(AgentPlan, task_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Agent task not found")
+
+    event = _record_agent_plan_progress(task_id, payload)
+    plan.apply_result = event["message"]
+    if payload.selected_file_paths:
+        plan.selected_files_json = json.dumps(_normalize_selected_file_paths(payload.selected_file_paths), ensure_ascii=False)
+    plan.updated_at = datetime.utcnow()
+    session.add(plan)
+    chat_session = session.get(ChatSession, plan.session_id)
+    if chat_session:
+        chat_session.updated_at = datetime.utcnow()
+        session.add(chat_session)
+    session.commit()
+    session.refresh(plan)
+    return _agent_plan_item(plan)
+
+
 @router.post("/agent/plans/{plan_id}/apply-result", response_model=AgentPlanItem)
 def update_agent_plan_apply_result(
     plan_id: str,
@@ -1672,33 +1843,127 @@ def confirm_agent_plan(
     payload: AgentConfirmRequest,
     session: Session = Depends(get_session),
 ) -> AgentPlanItem:
-    plan = session.get(AgentPlan, plan_id)
-    if not plan:
-        raise HTTPException(status_code=404, detail="Agent plan not found")
-
-    operations = _safe_json_list(plan.operations_json)
-    if payload.action == "apply" and not operations:
-        raise HTTPException(status_code=400, detail="Agent plan has no operations to apply")
-
-    if payload.action == "reject":
-        plan.status = "rejected"
-        plan.apply_result = payload.message or "Web 用户拒绝应用 Agent 计划。"
-    else:
-        plan.status = "confirmed"
-        plan.apply_result = payload.message or "Web 用户已确认应用，等待 VS Code 插件执行。"
-
-    plan.updated_at = datetime.utcnow()
-    session.add(plan)
-
-    chat_session = session.get(ChatSession, plan.session_id)
-    if chat_session:
-        session.add(ChatMessage(session_id=chat_session.id, role="assistant", content=plan.apply_result or ""))
-        chat_session.updated_at = datetime.utcnow()
-        session.add(chat_session)
-
-    session.commit()
-    session.refresh(plan)
+    plan = _confirm_agent_plan_row(session, plan_id, payload)
     return _agent_plan_item(plan)
+
+
+@router.post("/agent/plans/{plan_id}/confirm/stream")
+def confirm_agent_plan_stream(
+    plan_id: str,
+    payload: AgentConfirmRequest,
+) -> StreamingResponse:
+    def event_generator():
+        try:
+            mysql_ok, mysql_message = check_database()
+            if not mysql_ok:
+                yield sse_event("error", _mysql_error_payload(mysql_message))
+                return
+
+            with Session(engine) as session:
+                plan = _confirm_agent_plan_row(session, plan_id, payload)
+                plan_item = _agent_plan_item(plan)
+
+            yield sse_event(
+                "status",
+                {
+                    "phase": "agent_plan_confirmed",
+                    "message": (
+                        "已拒绝 Agent 计划，不会执行文件修改。"
+                        if payload.action == "reject"
+                        else "已确认 Agent 计划，正在等待 VS Code 插件执行..."
+                    ),
+                    "plan_id": plan_item.id,
+                    "status": plan_item.status,
+                },
+            )
+            yield sse_event("plan", {"plan": plan_item.model_dump(mode="json")})
+
+            if payload.action == "reject":
+                yield sse_event(
+                    "done",
+                    {
+                        "mode": "plan_rejected",
+                        "plan_id": plan_item.id,
+                        "status": plan_item.status,
+                    },
+                )
+                return
+
+            deadline = time.monotonic() + 60
+            last_status = plan_item.status
+            last_apply_result = plan_item.apply_result
+            while time.monotonic() < deadline:
+                time.sleep(0.8)
+                with Session(engine) as session:
+                    current = session.get(AgentPlan, plan_id)
+                    if not current:
+                        yield sse_event(
+                            "error",
+                            error_payload(
+                                "AGENT_PLAN_NOT_FOUND",
+                                "Agent 计划不存在，无法继续追踪执行状态。",
+                                "请刷新会话后查看最新结果。",
+                            ),
+                        )
+                        return
+                    current_item = _agent_plan_item(current)
+
+                if current_item.status != last_status or current_item.apply_result != last_apply_result:
+                    last_status = current_item.status
+                    last_apply_result = current_item.apply_result
+                    yield sse_event(
+                        "status",
+                        {
+                            "phase": "agent_plan_execution",
+                            "message": _agent_plan_execution_status_message(current_item),
+                            "plan_id": current_item.id,
+                            "status": current_item.status,
+                        },
+                    )
+                    yield sse_event("plan", {"plan": current_item.model_dump(mode="json")})
+
+                if current_item.status in {"applied", "failed", "rejected"}:
+                    yield sse_event(
+                        "done",
+                        {
+                            "mode": "plan_execution",
+                            "plan_id": current_item.id,
+                            "status": current_item.status,
+                        },
+                    )
+                    return
+
+            yield sse_event(
+                "status",
+                {
+                    "phase": "agent_plan_execution",
+                    "message": "仍在等待 VS Code 插件执行计划，请保持正确工作区在线。",
+                    "plan_id": plan_item.id,
+                    "status": last_status,
+                },
+            )
+            yield sse_event(
+                "done",
+                {
+                    "mode": "plan_execution_waiting",
+                    "plan_id": plan_item.id,
+                    "status": last_status,
+                },
+            )
+        except HTTPException as exc:
+            yield sse_event("error", error_payload(str(exc.status_code), str(exc.detail)))
+        except Exception as exc:
+            traceback.print_exc()
+            yield sse_event(
+                "error",
+                error_payload(
+                    "AGENT_PLAN_CONFIRM_STREAM_FAILED",
+                    f"Agent 计划确认或执行追踪失败：{str(exc) or exc.__class__.__name__}",
+                    "请检查后端日志、VS Code 插件连接和当前工作区状态。",
+                ),
+            )
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream", headers=_stream_headers())
 
 
 def _save_metric(session: Session, report_id: str, metrics: dict) -> None:
@@ -1831,6 +2096,145 @@ def _create_agent_chat_context_request(
         flush=True,
     )
     return request_id
+
+
+def _record_agent_plan_progress(task_id: str, payload: AgentTaskProgressRequest) -> dict[str, Any]:
+    _prune_agent_plan_progress_events()
+    events = _agent_plan_progress_events.setdefault(task_id, [])
+    event = {
+        "sequence": len(events) + 1,
+        "plan_id": task_id,
+        "phase": _normalize_agent_progress_phase(payload.phase),
+        "message": str(payload.message or "").strip()[:800] or "Agent 正在处理计划任务...",
+        "detail": str(payload.detail or "").strip()[:1200],
+        "selected_file_paths": _normalize_selected_file_paths(payload.selected_file_paths),
+        "created_at": datetime.utcnow(),
+    }
+    events.append(event)
+    if len(events) > AGENT_PLAN_PROGRESS_MAX_EVENTS:
+        del events[: len(events) - AGENT_PLAN_PROGRESS_MAX_EVENTS]
+    print(
+        f"[agent-plan-progress] task={task_id} phase={event['phase']} message={event['message']}",
+        flush=True,
+    )
+    return event
+
+
+def _stream_agent_plan_progress_until_done(plan_id: str, session_id: str, title: str):
+    deadline = time.monotonic() + AGENT_PLAN_PROGRESS_TIMEOUT_SECONDS
+    last_sequence = 0
+    last_status = "pending"
+    while time.monotonic() < deadline:
+        _prune_agent_plan_progress_events()
+        for event in _agent_plan_progress_events.get(plan_id, []):
+            sequence = int(event.get("sequence") or 0)
+            if sequence <= last_sequence:
+                continue
+            last_sequence = sequence
+            yield sse_event("status", _agent_plan_progress_sse_payload(event))
+
+        with Session(engine) as session:
+            plan = session.get(AgentPlan, plan_id)
+            if not plan:
+                yield sse_event(
+                    "error",
+                    error_payload(
+                        "AGENT_PLAN_NOT_FOUND",
+                        "Agent 计划不存在，无法继续追踪生成状态。",
+                        "请刷新会话后重新生成计划。",
+                    ),
+                )
+                return
+            plan_item = _agent_plan_item(plan)
+            last_status = plan.status
+
+        if plan_item.status in {"waiting_confirm", "failed", "rejected"}:
+            yield sse_event(
+                "status",
+                {
+                    "phase": "agent_plan_ready" if plan_item.status == "waiting_confirm" else "agent_plan_finished",
+                    "message": _agent_plan_generation_status_message(plan_item),
+                    "plan_id": plan_item.id,
+                    "status": plan_item.status,
+                    "sequence": last_sequence + 1,
+                },
+            )
+            yield sse_event("plan", {"plan": plan_item.model_dump(mode="json")})
+            yield sse_event(
+                "done",
+                {
+                    "session_id": session_id,
+                    "title": title,
+                    "mode": "plan",
+                    "plan_id": plan_item.id,
+                    "status": plan_item.status,
+                },
+            )
+            return
+
+        time.sleep(0.4)
+
+    yield sse_event(
+        "status",
+        {
+            "phase": "agent_plan_waiting",
+            "message": "仍在等待 VS Code 插件生成计划，请保持当前工作区在线。",
+            "plan_id": plan_id,
+            "status": last_status,
+            "sequence": last_sequence + 1,
+        },
+    )
+    yield sse_event(
+        "done",
+        {
+            "session_id": session_id,
+            "title": title,
+            "mode": "plan_waiting",
+            "plan_id": plan_id,
+            "status": last_status,
+        },
+    )
+
+
+def _agent_plan_progress_sse_payload(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "phase": event.get("phase") or "agent_plan_progress",
+        "message": event.get("message") or "Agent 正在处理计划任务...",
+        "detail": event.get("detail") or "",
+        "plan_id": event.get("plan_id") or "",
+        "sequence": event.get("sequence") or 0,
+        "selected_file_paths": event.get("selected_file_paths") or [],
+    }
+
+
+def _normalize_agent_progress_phase(phase: str) -> str:
+    normalized = re.sub(r"[^a-z0-9_]+", "_", str(phase or "").strip().lower()).strip("_")
+    if not normalized:
+        normalized = "progress"
+    if not normalized.startswith("agent_plan_"):
+        normalized = f"agent_plan_{normalized}"
+    return normalized[:80]
+
+
+def _agent_plan_generation_status_message(plan: AgentPlanItem) -> str:
+    if plan.status == "waiting_confirm":
+        return "计划已生成，等待网页确认执行。"
+    if plan.status == "failed":
+        return plan.apply_result or "Agent 计划生成失败。"
+    if plan.status == "rejected":
+        return plan.apply_result or "Agent 计划已拒绝。"
+    return plan.apply_result or "Agent 计划状态已更新。"
+
+
+def _prune_agent_plan_progress_events() -> None:
+    now = datetime.utcnow()
+    expired = [
+        task_id
+        for task_id, events in _agent_plan_progress_events.items()
+        if not events or (now - events[-1].get("created_at", now)).total_seconds() > AGENT_PLAN_PROGRESS_TTL_SECONDS
+    ]
+    for task_id in expired:
+        _agent_plan_progress_events.pop(task_id, None)
 
 
 def _wait_agent_chat_context_result(request_id: str) -> dict[str, Any]:
@@ -3439,6 +3843,73 @@ def _agent_workspace_root_is_online(workspace_root: str) -> bool:
         return False
     snapshot = _workspace_snapshot_response(_agent_workspace_snapshots.get(normalized_workspace_root))
     return bool(snapshot.workspace_root and snapshot.connected and not snapshot.stale)
+
+
+def _confirm_agent_plan_row(session: Session, plan_id: str, payload: AgentConfirmRequest) -> AgentPlan:
+    plan = session.get(AgentPlan, plan_id)
+    if not plan:
+        raise HTTPException(status_code=404, detail="Agent plan not found")
+
+    operations = _safe_json_list(plan.operations_json)
+    if payload.action == "apply" and not operations:
+        raise HTTPException(status_code=400, detail="Agent plan has no operations to apply")
+
+    if payload.action == "reject":
+        plan.status = "rejected"
+        plan.apply_result = payload.message or "Web 用户拒绝应用 Agent 计划。"
+    else:
+        plan.status = "confirmed"
+        plan.apply_result = payload.message or "Web 用户已确认应用，等待 VS Code 插件执行。"
+
+    plan.updated_at = datetime.utcnow()
+    session.add(plan)
+
+    chat_session = session.get(ChatSession, plan.session_id)
+    if chat_session:
+        session.add(ChatMessage(session_id=chat_session.id, role="assistant", content=plan.apply_result or ""))
+        chat_session.updated_at = datetime.utcnow()
+        session.add(chat_session)
+
+    session.commit()
+    session.refresh(plan)
+    return plan
+
+
+def _agent_plan_revision_instruction(previous_plan: AgentPlan, adjustment: str) -> str:
+    previous_operations = _safe_json_list(previous_plan.operations_json)
+    previous_warnings = _safe_json_list(previous_plan.warnings_json)
+    return "\n".join(
+        [
+            "请根据用户的调整建议，基于上一版 Agent 修改计划重新生成一个完整的新计划。",
+            "",
+            "上一版计划摘要：",
+            previous_plan.summary or "无",
+            "",
+            "上一版计划操作：",
+            json.dumps(previous_operations, ensure_ascii=False, indent=2),
+            "",
+            "上一版提醒：",
+            json.dumps(previous_warnings, ensure_ascii=False, indent=2),
+            "",
+            "用户调整建议：",
+            adjustment.strip(),
+            "",
+            "要求：输出的新计划必须完整包含最终要执行的文件操作，不要只描述差异。",
+        ]
+    )
+
+
+def _agent_plan_execution_status_message(plan: AgentPlanItem) -> str:
+    status = plan.status or "confirmed"
+    if status == "confirmed":
+        return "计划已确认，正在等待 VS Code 插件执行。"
+    if status == "applied":
+        return plan.apply_result or "VS Code 插件已完成计划执行。"
+    if status == "failed":
+        return plan.apply_result or "VS Code 插件执行计划失败。"
+    if status == "rejected":
+        return plan.apply_result or "Agent 计划已拒绝执行。"
+    return plan.apply_result or "正在追踪 Agent 计划执行状态。"
 
 
 def _chat_type_label(context_type: str) -> str:

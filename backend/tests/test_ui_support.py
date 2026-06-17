@@ -1,14 +1,17 @@
+import asyncio
 from datetime import datetime, timedelta
 
 import pytest
 from fastapi import HTTPException
 from sqlalchemy import create_engine, text
+from sqlalchemy.pool import StaticPool
 from sqlmodel import Session
 
 import backend.app.api.routes as routes
 from backend.app.api.routes import (
     _analytics_summary,
     _agent_plan_item,
+    _confirm_agent_plan_row,
     _daily_calendar_item,
     _daily_work_context,
     _daily_work_log_item,
@@ -24,6 +27,7 @@ from backend.app.api.routes import (
     _recent_activity,
     _agent_chat_context_requests,
     _create_agent_chat_context_request,
+    confirm_agent_plan_stream,
     select_agent_context,
     list_pending_agent_chat_contexts,
     list_pending_agent_tasks,
@@ -32,10 +36,35 @@ from backend.app.api.routes import (
     update_agent_workspace_heartbeat,
     error_payload,
     parse_report_outline,
+    stream_agent_message,
 )
 from backend.app.models import AgentPlan, AnalysisMetric, ChatMessage, ChatSession, DailyWorkLog, LearningCard, LearningCardMaterial, Report
-from backend.app.schemas import AgentContextFileCandidate, AgentContextSelectRequest, AgentWorkspaceHeartbeatRequest, AgentWorkspaceTreeNode, DailyWorkLogUpdateRequest
+from backend.app.schemas import (
+    AgentConfirmRequest,
+    AgentContextFileCandidate,
+    AgentContextSelectRequest,
+    AgentMessageStreamRequest,
+    AgentTaskProgressRequest,
+    AgentWorkspaceHeartbeatRequest,
+    AgentWorkspaceTreeNode,
+    DailyWorkLogUpdateRequest,
+)
 from backend.app.services.llm_service import LLMService, _parse_json_object
+
+
+async def _collect_streaming_body(response) -> str:
+    chunks: list[str] = []
+    async for chunk in response.body_iterator:
+        chunks.append(chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk)
+    return "".join(chunks)
+
+
+def _create_memory_engine():
+    return create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
 
 
 def test_parse_report_outline_extracts_markdown_headings():
@@ -542,6 +571,63 @@ def test_agent_plan_falls_back_to_openalex_reproduce_doc_after_json_failures():
     assert "模型返回的计划 JSON 不完整" in plan["warnings"][0]
 
 
+def test_agent_plan_falls_back_to_project_readme_after_json_failures():
+    service = object.__new__(LLMService)
+    responses = iter(["我会写 README，但这不是 JSON。", "还是不是 JSON"])
+
+    def fake_complete_text(messages, max_tokens=64, json_object=False):
+        return next(responses)
+
+    service._complete_text = fake_complete_text
+    plan = service.generate_agent_plan(
+        instruction="能否根据你的分析帮我添加一个README.md文件",
+        code_context="",
+        language_code="text",
+        language_label="多文件",
+        files=[
+            {
+                "fileName": "Dockerfile",
+                "filePath": "Dockerfile",
+                "languageId": "dockerfile",
+                "code": "FROM python:3.10-slim\nCMD [\"streamlit\", \"run\", \"app17.py\"]\n",
+            },
+            {
+                "fileName": "requirements-base.txt",
+                "filePath": "requirements-base.txt",
+                "languageId": "text",
+                "code": "streamlit==1.32.0\npandas==2.2.0\nplotly==5.18.0\n",
+            },
+            {
+                "fileName": "requirements-ml.txt",
+                "filePath": "requirements-ml.txt",
+                "languageId": "text",
+                "code": "bertopic==0.16.0\nsentence-transformers==2.5.1\nhdbscan==0.8.33\n",
+            },
+            {
+                "fileName": "app17.py",
+                "filePath": "app17.py",
+                "languageId": "python",
+                "code": "import streamlit as st\nst.set_page_config(page_title='机器学习课堂展示')\n",
+            },
+            {
+                "fileName": "openalex_crawler.py",
+                "filePath": "openalex_crawler.py",
+                "languageId": "python",
+                "code": "import requests\n",
+            },
+        ],
+    )
+
+    operation = plan["operations"][0]
+    assert plan["summary"] == "创建或更新 README 项目说明文档。"
+    assert operation["type"] == "create"
+    assert operation["path"] == "README.md"
+    assert "项目结构" in operation["content"]
+    assert "requirements-base.txt" in operation["content"]
+    assert "streamlit run app17.py" in operation["content"]
+    assert "模型返回的计划 JSON 不完整" in plan["warnings"][0]
+
+
 def test_agent_plan_keeps_json_failure_when_no_fallback_matches():
     service = object.__new__(LLMService)
     responses = iter(["不是 JSON", "仍然不是 JSON"])
@@ -565,6 +651,89 @@ def test_agent_plan_keeps_json_failure_when_no_fallback_matches():
                 }
             ],
         )
+
+
+def test_agent_plan_falls_back_to_project_readme_after_empty_operations():
+    service = object.__new__(LLMService)
+    responses = iter([
+        '{"summary":"添加 README","assumptions":[],"warnings":[],"operations":[]}',
+        '{"summary":"添加 README","assumptions":[],"warnings":[],"operations":[]}',
+    ])
+
+    def fake_complete_text(messages, max_tokens=64, json_object=False):
+        return next(responses)
+
+    service._complete_text = fake_complete_text
+    plan = service.generate_agent_plan(
+        instruction="请为当前项目创建 README.md 项目说明文档",
+        code_context="",
+        language_code="text",
+        language_label="多文件",
+        files=[
+            {
+                "fileName": "README.md",
+                "filePath": "README.md",
+                "languageId": "markdown",
+                "code": "",
+            },
+            {
+                "fileName": "Dockerfile",
+                "filePath": "Dockerfile",
+                "languageId": "dockerfile",
+                "code": "FROM python:3.10-slim\n",
+            },
+            {
+                "fileName": "app17.py",
+                "filePath": "app17.py",
+                "languageId": "python",
+                "code": "import streamlit as st\n",
+            },
+        ],
+    )
+
+    operation = plan["operations"][0]
+    assert operation["type"] == "update"
+    assert operation["path"] == "README.md"
+    assert "本地运行" in operation["content"]
+    assert "模型未生成具体文件操作" in plan["warnings"][0]
+
+
+def test_agent_plan_accepts_local_edit_operations_after_empty_first_plan():
+    service = object.__new__(LLMService)
+    responses = iter([
+        '{"summary":"需要引入 logging","assumptions":[],"warnings":[],"operations":[]}',
+        (
+            '{"summary":"引入 logging","assumptions":[],"warnings":[],"operations":[{'
+            '"type":"update","path":"app17.py","new_path":null,"content":null,'
+            '"reason":"用 logging 记录异常","edits":[{"search":"print(exc)","replace":"logger.exception(exc)"}]}]}'
+        ),
+    ])
+
+    def fake_complete_text(messages, max_tokens=64, json_object=False):
+        return next(responses)
+
+    service._complete_text = fake_complete_text
+    plan = service.generate_agent_plan(
+        instruction="引入 logging 代替 print，记录重要操作和异常。",
+        code_context="print(exc)\n",
+        language_code="python",
+        language_label="Python",
+        files=[
+            {
+                "fileName": "app17.py",
+                "filePath": "app17.py",
+                "languageId": "python",
+                "code": "print(exc)\n",
+            }
+        ],
+        selected_file_paths=["app17.py"],
+    )
+
+    operation = plan["operations"][0]
+    assert operation["type"] == "update"
+    assert operation["path"] == "app17.py"
+    assert operation["content"] is None
+    assert operation["edits"] == [{"search": "print(exc)", "replace": "logger.exception(exc)"}]
 
 
 def test_agent_chat_context_pending_filters_workspace_root():
@@ -626,6 +795,312 @@ def test_pending_agent_tasks_filter_workspace_root():
 
     assert [item.id for item in items] == ["a1"]
     assert items[0].workspace_root == "d:/projecta"
+
+
+def _create_agent_plan_test_tables(engine):
+    with engine.begin() as conn:
+        conn.execute(text("""
+            CREATE TABLE chat_sessions (
+                id VARCHAR(32) PRIMARY KEY,
+                title VARCHAR(160) NOT NULL,
+                context_type VARCHAR(24) NOT NULL,
+                report_id VARCHAR(32),
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id VARCHAR(32) NOT NULL,
+                role VARCHAR(24) NOT NULL,
+                content TEXT NOT NULL,
+                created_at DATETIME NOT NULL
+            )
+        """))
+        conn.execute(text("""
+            CREATE TABLE agent_plans (
+                id VARCHAR(32) PRIMARY KEY,
+                session_id VARCHAR(32) NOT NULL,
+                instruction TEXT NOT NULL,
+                summary VARCHAR(500) NOT NULL,
+                assumptions_json TEXT,
+                warnings_json TEXT,
+                operations_json TEXT,
+                selected_files_json TEXT,
+                context_mode VARCHAR(24),
+                workspace_root VARCHAR(1024),
+                status VARCHAR(24) NOT NULL,
+                source VARCHAR(24) NOT NULL,
+                apply_result TEXT,
+                created_at DATETIME NOT NULL,
+                updated_at DATETIME NOT NULL
+            )
+        """))
+
+
+def test_update_agent_task_progress_records_utf8_message_and_selected_files():
+    engine = _create_memory_engine()
+    _create_agent_plan_test_tables(engine)
+    routes._agent_plan_progress_events.clear()
+    now = datetime.utcnow()
+
+    try:
+        with Session(engine) as session:
+            session.add(ChatSession(id="s1", title="Agent", context_type="agent", created_at=now, updated_at=now))
+            session.add(
+                AgentPlan(
+                    id="p1",
+                    session_id="s1",
+                    instruction="创建复现文档",
+                    summary="等待插件处理",
+                    selected_files_json="[]",
+                    context_mode="ai_auto",
+                    workspace_root="d:/projecta",
+                    status="pending",
+                    source="web",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.commit()
+
+            item = routes.update_agent_task_progress(
+                "p1",
+                AgentTaskProgressRequest(
+                    phase="read_selected_files",
+                    message="正在读取 OpenAlex 项目文件...",
+                    detail="已进入插件文件读取阶段。",
+                    selected_file_paths=["OpenAlex-MCP实验报告.md", "../secret.py", "OpenAlex-MCP实验报告.md"],
+                ),
+                session,
+            )
+
+        assert item.apply_result == "正在读取 OpenAlex 项目文件..."
+        assert item.selected_file_paths == ["OpenAlex-MCP实验报告.md"]
+        event = routes._agent_plan_progress_events["p1"][0]
+        assert event["phase"] == "agent_plan_read_selected_files"
+        assert event["message"] == "正在读取 OpenAlex 项目文件..."
+        assert event["selected_file_paths"] == ["OpenAlex-MCP实验报告.md"]
+    finally:
+        routes._agent_plan_progress_events.clear()
+
+
+def test_stream_agent_plan_progress_forwards_progress_and_final_plan(monkeypatch):
+    engine = _create_memory_engine()
+    _create_agent_plan_test_tables(engine)
+    routes._agent_plan_progress_events.clear()
+    now = datetime.utcnow()
+    monkeypatch.setattr(routes, "engine", engine)
+
+    try:
+        with Session(engine) as session:
+            session.add(ChatSession(id="s1", title="Agent", context_type="agent", created_at=now, updated_at=now))
+            session.add(
+                AgentPlan(
+                    id="p1",
+                    session_id="s1",
+                    instruction="创建复现文档",
+                    summary="创建 OpenAlex 复现说明",
+                    operations_json='[{"type":"create","path":"reproduce.md","content":"# 复现"}]',
+                    selected_files_json='["OpenAlex-MCP实验报告.md"]',
+                    context_mode="ai_auto",
+                    workspace_root="d:/projecta",
+                    status="waiting_confirm",
+                    source="web",
+                    apply_result="计划已生成，等待网页确认执行。",
+                    created_at=now,
+                    updated_at=now,
+                )
+            )
+            session.commit()
+
+        routes._record_agent_plan_progress(
+            "p1",
+            AgentTaskProgressRequest(
+                phase="context_ready",
+                message="已打包项目上下文，准备生成计划。",
+                detail="上下文 1 个文件。",
+                selected_file_paths=["OpenAlex-MCP实验报告.md"],
+            ),
+        )
+
+        body = "".join(routes._stream_agent_plan_progress_until_done("p1", "s1", "Agent"))
+
+        assert "event: status" in body
+        assert "已打包项目上下文，准备生成计划。" in body
+        assert "计划已生成，等待网页确认执行。" in body
+        assert "event: plan" in body
+        assert "event: done" in body
+        assert '"status": "waiting_confirm"' in body
+        assert "reproduce.md" in body
+    finally:
+        routes._agent_plan_progress_events.clear()
+
+
+def test_confirm_agent_plan_row_marks_confirmed_and_writes_message():
+    engine = _create_memory_engine()
+    _create_agent_plan_test_tables(engine)
+    now = datetime.utcnow()
+
+    with Session(engine) as session:
+        session.add(ChatSession(id="s1", title="Agent", context_type="agent", created_at=now, updated_at=now))
+        session.add(
+            AgentPlan(
+                id="p1",
+                session_id="s1",
+                instruction="创建脚本",
+                summary="创建脚本",
+                operations_json='[{"type":"create","path":"run.py","content":"print(1)"}]',
+                selected_files_json="[]",
+                context_mode="ai_auto",
+                workspace_root="d:/projecta",
+                status="waiting_confirm",
+                source="web",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+
+        plan = _confirm_agent_plan_row(session, "p1", AgentConfirmRequest(action="apply", message="确认执行"))
+        messages = [row[0] for row in session.exec(text("SELECT content FROM chat_messages")).all()]
+
+    assert plan.status == "confirmed"
+    assert plan.apply_result == "确认执行"
+    assert messages == ["确认执行"]
+
+
+def test_stream_agent_message_revision_rejects_old_plan_and_inherits_workspace(monkeypatch):
+    engine = _create_memory_engine()
+    _create_agent_plan_test_tables(engine)
+    now = datetime.utcnow()
+    monkeypatch.setattr(routes, "engine", engine)
+    monkeypatch.setattr(routes, "check_database", lambda: (True, "ok"))
+    monkeypatch.setattr(routes, "_agent_workspace_root_is_online", lambda workspace_root: workspace_root == "d:/projecta")
+    monkeypatch.setattr(
+        routes,
+        "_stream_agent_plan_progress_until_done",
+        lambda plan_id, session_id, title: iter([routes.sse_event("done", {"plan_id": plan_id, "mode": "plan"})]),
+    )
+
+    with Session(engine) as session:
+        session.add(ChatSession(id="s1", title="Agent", context_type="agent", created_at=now, updated_at=now))
+        session.add(
+            AgentPlan(
+                id="p1",
+                session_id="s1",
+                instruction="创建脚本",
+                summary="创建脚本",
+                warnings_json='["提醒"]',
+                operations_json='[{"type":"create","path":"run.py","content":"print(1)"}]',
+                selected_files_json='["README.md"]',
+                context_mode="ai_auto",
+                workspace_root="d:/projecta",
+                status="waiting_confirm",
+                source="web",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+
+    response = stream_agent_message(
+        AgentMessageStreamRequest(
+            message="把文件名改成 openalex_pipeline.py",
+            session_id="s1",
+            intent="plan",
+            context_mode="ai_auto",
+            source="web",
+            plan_id="p1",
+        )
+    )
+    body = asyncio.run(_collect_streaming_body(response))
+
+    with Session(engine) as session:
+        old_plan = session.get(AgentPlan, "p1")
+        new_plans = list(session.exec(text("SELECT workspace_root, selected_files_json, instruction FROM agent_plans WHERE id != 'p1'")).all())
+
+    assert "event: plan" in body
+    assert old_plan is not None
+    assert old_plan.status == "rejected"
+    assert old_plan.apply_result == "已根据调整建议生成新版计划，旧计划不再执行。"
+    assert len(new_plans) == 1
+    assert new_plans[0][0] == "d:/projecta"
+    assert new_plans[0][1] == '["README.md"]'
+    assert "上一版计划摘要" in new_plans[0][2]
+
+
+def test_confirm_agent_plan_stream_emits_rejected_plan(monkeypatch):
+    engine = _create_memory_engine()
+    _create_agent_plan_test_tables(engine)
+    now = datetime.utcnow()
+    monkeypatch.setattr(routes, "engine", engine)
+    monkeypatch.setattr(routes, "check_database", lambda: (True, "ok"))
+
+    with Session(engine) as session:
+        session.add(ChatSession(id="s1", title="Agent", context_type="agent", created_at=now, updated_at=now))
+        session.add(
+            AgentPlan(
+                id="p1",
+                session_id="s1",
+                instruction="创建脚本",
+                summary="创建脚本",
+                operations_json='[{"type":"create","path":"run.py","content":"print(1)"}]',
+                selected_files_json="[]",
+                context_mode="ai_auto",
+                workspace_root="d:/projecta",
+                status="waiting_confirm",
+                source="web",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+
+    response = confirm_agent_plan_stream("p1", AgentConfirmRequest(action="reject", message="暂不执行"))
+    body = asyncio.run(_collect_streaming_body(response))
+
+    assert "event: status" in body
+    assert "event: plan" in body
+    assert "event: done" in body
+    assert '"status": "rejected"' in body
+    assert "暂不执行" in body
+
+
+def test_update_agent_plan_apply_result_allows_confirmed_progress():
+    engine = _create_memory_engine()
+    _create_agent_plan_test_tables(engine)
+    now = datetime.utcnow()
+
+    with Session(engine) as session:
+        session.add(ChatSession(id="s1", title="Agent", context_type="agent", created_at=now, updated_at=now))
+        session.add(
+            AgentPlan(
+                id="p1",
+                session_id="s1",
+                instruction="引入 logging",
+                summary="引入 logging",
+                operations_json='[{"type":"update","path":"app17.py","content":null,"edits":[{"search":"print(exc)","replace":"logger.exception(exc)"}]}]',
+                selected_files_json='["app17.py"]',
+                context_mode="ai_auto",
+                workspace_root="d:/projecta",
+                status="confirmed",
+                source="web",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        session.commit()
+
+        item = routes.update_agent_plan_apply_result(
+            "p1",
+            routes.AgentApplyResultRequest(status="confirmed", message="正在准备第 1/1 个操作：update app17.py"),
+            session,
+        )
+
+    assert item.status == "confirmed"
+    assert item.apply_result == "正在准备第 1/1 个操作：update app17.py"
 
 
 def test_agent_workspace_heartbeat_returns_current_snapshot():

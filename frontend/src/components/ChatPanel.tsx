@@ -17,6 +17,16 @@ type ConversationTurn = {
   preview: string;
 };
 
+type AgentPlanAnchorMap = Record<string, number>;
+
+type AgentPlanProgressEvent = {
+  phase: string;
+  message: string;
+  detail?: string;
+  sequence?: number;
+  selected_file_paths?: string[];
+};
+
 const CHAT_AUTO_FOLLOW_THRESHOLD = 80;
 const WORKSPACE_HEARTBEAT_DELAYED_SECONDS = 20;
 const WORKSPACE_HEARTBEAT_STALE_SECONDS = 60;
@@ -67,6 +77,7 @@ export function ChatPanel({
   const [activeSessionId, setActiveSessionId] = useState<string | null>(sessionId ?? null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [agentPlans, setAgentPlans] = useState<AgentPlan[]>([]);
+  const [agentPlanAnchors, setAgentPlanAnchors] = useState<AgentPlanAnchorMap>({});
   const [input, setInput] = useState("");
   const [model, setModel] = useState(settings?.default_model_label ?? "DeepSeek-V4-Flash");
   const [loading, setLoading] = useState(false);
@@ -79,17 +90,20 @@ export function ChatPanel({
   const [agentIntent, setAgentIntent] = useState<AgentIntent>("auto");
   const [activeTurnMessageIndex, setActiveTurnMessageIndex] = useState<number | null>(null);
   const [agentStatusMessage, setAgentStatusMessage] = useState("");
+  const [agentExecutionStatusMessage, setAgentExecutionStatusMessage] = useState("");
+  const [agentPlanRuntimeMessages, setAgentPlanRuntimeMessages] = useState<Record<string, string>>({});
+  const [agentPlanProgressEvents, setAgentPlanProgressEvents] = useState<Record<string, AgentPlanProgressEvent[]>>({});
   const messagesScrollRef = useRef<HTMLDivElement | null>(null);
   const turnNodeRefs = useRef<Record<number, HTMLDivElement | null>>({});
   const sessionSnapshotRef = useRef("");
   const autoFollowBottomRef = useRef(true);
+  const streamingAssistantIndexRef = useRef<number | null>(null);
   const inputResizeRef = useRef<{ startY: number; startHeight: number } | null>(null);
   const inputResizeCleanupRef = useRef<(() => void) | null>(null);
 
   const models = settings?.models ?? { "DeepSeek-V4-Flash": "deepseek-v4-flash" };
   const isReportMode = mode === "report";
   const isAgentMode = mode === "agent";
-  const canSend = !loading && Boolean(input.trim()) && (!isReportMode || Boolean(reportId));
   const panelTitle = title ?? (isReportMode ? "结合报告继续问 AI" : isAgentMode ? "Agent 对话" : "AI 对话");
   const reportPromptHint = "围绕当前报告提问，回复会随报告一起保存";
   const panelEmptyText = emptyText ?? (isReportMode ? "报告保存完成后即可开始上下文对话" : isAgentMode ? "描述你希望 Agent 修改、创建或检查的文件" : "开始一个新的聊天");
@@ -102,6 +116,15 @@ export function ChatPanel({
     "--chat-input-offset": liftOnInputResize ? `${inputOffset}px` : "0px"
   } as CSSProperties;
   const shouldRenderMessages = loadingSession || messages.length > 0 || !isReportMode || !reportId;
+  const plansByMessageIndex = useMemo(
+    () => groupAgentPlansByMessageIndex(messages, agentPlans, agentPlanAnchors),
+    [agentPlanAnchors, agentPlans, messages]
+  );
+  const activeConfirmablePlan = useMemo(() => findActiveConfirmableAgentPlan(agentPlans), [agentPlans]);
+  const isPlanConfirmMode = isAgentMode && Boolean(activeConfirmablePlan) && !loading;
+  const canSend = isPlanConfirmMode
+    ? !loading && !confirmingPlanId
+    : !loading && Boolean(input.trim()) && (!isReportMode || Boolean(reportId));
   const conversationTurns = useMemo<ConversationTurn[]>(() => {
     return messages.reduce<ConversationTurn[]>((turns, message, index) => {
       if (message.role !== "user" || !message.content.trim()) return turns;
@@ -244,6 +267,7 @@ export function ChatPanel({
         sessionSnapshotRef.current = nextSnapshot;
         setMessages(nextMessages);
         setAgentPlans(nextPlans);
+        setAgentPlanAnchors((previous) => ({ ...buildAgentPlanAnchors(nextMessages, nextPlans), ...previous }));
 
         if (silent) {
           autoFollowBottomRef.current = wasNearBottom;
@@ -294,6 +318,9 @@ export function ChatPanel({
     if (!sessionId) {
       setMessages([]);
       setAgentPlans([]);
+      setAgentPlanAnchors({});
+      setAgentPlanRuntimeMessages({});
+      setAgentPlanProgressEvents({});
     }
   }, [sessionId]);
 
@@ -345,7 +372,7 @@ export function ChatPanel({
     };
   }, [isReportMode, reportId]);
 
-  async function sendMessage(rawMessage: string, options: { clearInput?: boolean } = {}) {
+  async function sendMessage(rawMessage: string, options: { clearInput?: boolean; planId?: string | null } = {}) {
     const message = rawMessage.trim();
     if (!message || loading || (isReportMode && !reportId)) return;
     if (isAgentMode) {
@@ -358,11 +385,16 @@ export function ChatPanel({
 
     setError("");
     setAgentStatusMessage("");
+    setAgentExecutionStatusMessage("");
     setLoading(true);
     if (options.clearInput ?? true) setInput("");
     autoFollowBottomRef.current = true;
     setActiveTurnMessageIndex(null);
-    setMessages((previous) => [...previous, { role: "user", content: message }, { role: "assistant", content: "" }]);
+    setMessages((previous) => {
+      const assistantIndex = previous.length + 1;
+      streamingAssistantIndexRef.current = assistantIndex;
+      return [...previous, { role: "user", content: message }, { role: "assistant", content: "" }];
+    });
 
     try {
       if (isAgentMode) {
@@ -372,37 +404,70 @@ export function ChatPanel({
             {
               message,
               session_id: activeSessionId,
-              intent: agentIntent,
+              intent: options.planId ? "plan" : agentIntent,
               code_context: codeContext,
               report_context: reportContext || null,
               selected_file_paths: selectedFilePaths,
               context_mode: contextMode,
               model,
               source: "web",
-              workspace_root: workspace?.workspace_root ?? null
+              workspace_root: workspace?.workspace_root ?? null,
+              plan_id: options.planId ?? null
             },
             {
               onStatus: (data) => {
                 if (data.phase === "agent_context") {
                   setAgentStatusMessage(String(data.message || "插件正在读取上下文文件..."));
                   followMessagesBottom();
+                } else if (String(data.phase || "").startsWith("agent_plan")) {
+                  const planId = String(data.plan_id || "");
+                  const messageText = String(data.message || "Agent 正在处理计划任务...");
+                  setAgentStatusMessage(messageText);
+                  if (planId) {
+                    const progressEvent: AgentPlanProgressEvent = {
+                      phase: String(data.phase || "agent_plan_progress"),
+                      message: messageText,
+                      detail: String(data.detail || ""),
+                      sequence: Number(data.sequence || 0),
+                      selected_file_paths: Array.isArray(data.selected_file_paths)
+                        ? data.selected_file_paths.map(String)
+                        : []
+                    };
+                    setAgentPlanRuntimeMessages((previous) => ({ ...previous, [planId]: messageText }));
+                    setAgentPlanProgressEvents((previous) => ({
+                      ...previous,
+                      [planId]: appendAgentPlanProgressEvent(previous[planId] ?? [], progressEvent)
+                    }));
+                  }
+                  followMessagesBottom();
                 }
               },
               onPlan: (data) => {
                 const plan = data.plan as AgentPlan | undefined;
                 if (!plan) return;
-                setAgentPlans((previous) => {
-                  const planId = plan.plan_id ?? plan.id;
-                  if (planId && previous.some((item) => (item.plan_id ?? item.id) === planId)) return previous;
-                  return [...previous, plan];
-                });
+                const planId = getAgentPlanId(plan);
+                const anchorIndex = streamingAssistantIndexRef.current;
+                setAgentPlans((previous) => upsertAgentPlan(previous, plan));
+                if (planId && anchorIndex !== null) {
+                  setAgentPlanAnchors((previous) => ({ ...previous, [planId]: anchorIndex }));
+                }
+                if (planId && (plan.status === "waiting_confirm" || plan.status === "failed" || plan.status === "rejected")) {
+                  setAgentPlanProgressEvents((previous) => ({
+                    ...previous,
+                    [planId]: appendAgentPlanProgressEvent(previous[planId] ?? [], {
+                      phase: "agent_plan_ready",
+                      message: plan.status === "waiting_confirm" ? "计划已生成，等待网页确认执行。" : plan.apply_result || "Agent 计划状态已更新。",
+                    })
+                  }));
+                }
                 setMessages((previous) => {
                   const next = [...previous];
-                  const last = next[next.length - 1];
+                  const targetIndex = anchorIndex ?? next.length - 1;
+                  const last = next[targetIndex];
                   if (last?.role === "assistant") {
-                    next[next.length - 1] = {
+                    next[targetIndex] = {
                       ...last,
-                      content: `Agent 修改任务已创建。\n\n摘要：${plan.summary}\n状态：${plan.apply_result || "等待 VS Code 插件读取文件并生成计划。"}`
+                      content: agentPlanInlineMessage(plan)
                     };
                   }
                   return next;
@@ -424,11 +489,13 @@ export function ChatPanel({
                   applySessionId(nextSessionId);
                   onSessionSaved?.(nextSessionId);
                 }
+                streamingAssistantIndexRef.current = null;
                 setLoading(false);
               },
               onError: (messageText) => {
                 setAgentStatusMessage("");
                 setError(agentFriendlyError(messageText, true));
+                streamingAssistantIndexRef.current = null;
                 setLoading(false);
               }
             }
@@ -510,6 +577,15 @@ export function ChatPanel({
   }
 
   async function send() {
+    if (isPlanConfirmMode && activeConfirmablePlan) {
+      const adjustment = input.trim();
+      if (adjustment) {
+        await sendMessage(adjustment, { clearInput: true, planId: getAgentPlanId(activeConfirmablePlan) });
+      } else {
+        await confirmAgentPlan(activeConfirmablePlan, "apply");
+      }
+      return;
+    }
     await sendMessage(input, { clearInput: true });
   }
 
@@ -531,12 +607,18 @@ export function ChatPanel({
     if (!activeSessionId) {
       setMessages([]);
       setAgentPlans([]);
+      setAgentPlanAnchors({});
+      setAgentPlanRuntimeMessages({});
+      setAgentPlanProgressEvents({});
       return;
     }
     await api.deleteChatSession(activeSessionId);
     applySessionId(null);
     setMessages([]);
     setAgentPlans([]);
+    setAgentPlanAnchors({});
+    setAgentPlanRuntimeMessages({});
+    setAgentPlanProgressEvents({});
     onSessionSaved?.("");
   }
 
@@ -549,12 +631,49 @@ export function ChatPanel({
 
     setConfirmingPlanId(planId);
     setError("");
+    setAgentExecutionStatusMessage("");
+    let streamFailed = false;
     try {
-      await api.confirmAgentPlan(planId, {
-        action,
-        message: action === "apply" ? "Web 用户确认应用 Agent 计划。" : "Web 用户拒绝应用 Agent 计划。"
-      });
-      if (activeSessionId) {
+      await streamPost(
+        `/api/agent/plans/${planId}/confirm/stream`,
+        {
+          action,
+          message: action === "apply" ? "Web 用户确认应用 Agent 计划。" : "Web 用户拒绝应用 Agent 计划。"
+        },
+        {
+          onDelta: () => undefined,
+          onStatus: (data) => {
+            const messageText = String(data.message || "");
+            const phase = String(data.phase || "agent_plan_execution");
+            setAgentExecutionStatusMessage(messageText);
+            setAgentPlanRuntimeMessages((previous) => ({ ...previous, [planId]: messageText }));
+            if (messageText) {
+              setAgentPlanProgressEvents((previous) => ({
+                ...previous,
+                [planId]: appendAgentPlanProgressEvent(previous[planId] ?? [], {
+                  phase,
+                  message: messageText,
+                  sequence: Number(data.sequence || 0),
+                })
+              }));
+            }
+            followMessagesBottom();
+          },
+          onPlan: (data) => {
+            const nextPlan = data.plan as AgentPlan | undefined;
+            if (!nextPlan) return;
+            setAgentPlans((previous) => upsertAgentPlan(previous, nextPlan));
+          },
+          onDone: () => {
+            setAgentExecutionStatusMessage("");
+          },
+          onError: (messageText) => {
+            streamFailed = true;
+            setError(agentFriendlyError(messageText, true));
+          }
+        }
+      );
+      if (!streamFailed && activeSessionId) {
         await loadSession(activeSessionId, { silent: true });
         onSessionSaved?.(activeSessionId);
       }
@@ -651,18 +770,6 @@ export function ChatPanel({
             </div>
           ) : messages.length || agentPlans.length ? (
             <div className="space-y-3">
-              {agentPlans.length ? (
-                <div className="agent-plan-card-list">
-                  {agentPlans.map((plan) => (
-                    <AgentPlanCard
-                      key={plan.id ?? plan.plan_id ?? plan.summary}
-                      plan={plan}
-                      busy={confirmingPlanId === (plan.plan_id ?? plan.id)}
-                      onConfirm={(action) => void confirmAgentPlan(plan, action)}
-                    />
-                  ))}
-                </div>
-              ) : null}
               {messages.map((message, index) => (
                 <div
                   key={`${message.created_at ?? index}-${message.role}`}
@@ -691,6 +798,23 @@ export function ChatPanel({
                           agentStatusMessage || "..."
                         ) : ""}
                       </div>
+                      {plansByMessageIndex[index]?.length ? (
+                        <div className="agent-plan-card-list agent-plan-card-list-inline">
+                          {plansByMessageIndex[index].map((plan) => {
+                            const planId = getAgentPlanId(plan);
+                            return (
+                              <AgentPlanCard
+                                key={planId ?? plan.summary}
+                                plan={plan}
+                                progressEvents={planId ? agentPlanProgressEvents[planId] ?? [] : []}
+                                busy={confirmingPlanId === planId}
+                                runtimeMessage={planId ? agentPlanRuntimeMessages[planId] : ""}
+                                onConfirm={(action) => void confirmAgentPlan(plan, action)}
+                              />
+                            );
+                          })}
+                        </div>
+                      ) : null}
                       {message.content ? (
                         <div className="chat-message-actions">
                           <button
@@ -718,6 +842,23 @@ export function ChatPanel({
                   )}
                 </div>
               ))}
+              {plansByMessageIndex[-1]?.length ? (
+                <div className="agent-plan-card-list agent-plan-card-list-inline agent-plan-card-list-orphan">
+                  {plansByMessageIndex[-1].map((plan) => {
+                    const planId = getAgentPlanId(plan);
+                    return (
+                      <AgentPlanCard
+                        key={planId ?? plan.summary}
+                        plan={plan}
+                        progressEvents={planId ? agentPlanProgressEvents[planId] ?? [] : []}
+                        busy={confirmingPlanId === planId}
+                        runtimeMessage={planId ? agentPlanRuntimeMessages[planId] : ""}
+                        onConfirm={(action) => void confirmAgentPlan(plan, action)}
+                      />
+                    );
+                  })}
+                </div>
+              ) : null}
             </div>
           ) : (
             <div className="empty-state flex-col gap-2 text-center">
@@ -747,8 +888,22 @@ export function ChatPanel({
         />
       ) : null}
 
+      {isPlanConfirmMode && activeConfirmablePlan ? (
+        <div className="agent-plan-confirm-strip">
+          <div>
+            <strong>计划等待确认</strong>
+            <span>{activeConfirmablePlan.summary}</span>
+          </div>
+          {agentExecutionStatusMessage ? <em>{agentExecutionStatusMessage}</em> : null}
+        </div>
+      ) : null}
+
       <div
-        className={["chat-panel-input-row", isResizingInput ? "chat-panel-input-row-resizing" : ""].filter(Boolean).join(" ")}
+        className={[
+          "chat-panel-input-row",
+          isPlanConfirmMode ? "chat-panel-input-row-plan-confirm" : "",
+          isResizingInput ? "chat-panel-input-row-resizing" : ""
+        ].filter(Boolean).join(" ")}
       >
         <div
           aria-label="拖拽调整输入框高度"
@@ -768,12 +923,12 @@ export function ChatPanel({
               void send();
             }
           }}
-          placeholder={isReportMode ? "围绕这份报告继续追问" : isAgentMode ? (agentIntent === "plan" ? "描述要生成修改计划的任务..." : agentIntent === "chat" ? "询问项目结构、代码问题或调试思路..." : "提问或描述修改目标，系统会自动判断是否生成计划...") : "随便聊点什么"}
+          placeholder={inputPlaceholder(isReportMode, isAgentMode, agentIntent, isPlanConfirmMode)}
           value={input}
         />
         <button className="btn btn-primary chat-panel-send" disabled={!canSend} onClick={send} type="button">
-          <Send size={15} />
-          <span>发送</span>
+          {confirmingPlanId ? <Loader2 className="animate-spin" size={15} /> : isPlanConfirmMode && !input.trim() ? <Check size={15} /> : <Send size={15} />}
+          <span>{isPlanConfirmMode && !input.trim() ? "确认执行计划" : isPlanConfirmMode ? "调整计划" : "发送"}</span>
         </button>
       </div>
     </section>
@@ -918,6 +1073,115 @@ function contextModeLabel(mode: AgentContextMode) {
   if (mode === "ai_auto") return "AI 自动选择";
   if (mode === "hybrid") return "手动 + AI 补充";
   return "手动选择";
+}
+
+function getAgentPlanId(plan: AgentPlan) {
+  return plan.plan_id ?? plan.id ?? null;
+}
+
+function upsertAgentPlan(plans: AgentPlan[], plan: AgentPlan) {
+  const planId = getAgentPlanId(plan);
+  if (!planId) return [...plans, plan];
+  const existingIndex = plans.findIndex((item) => getAgentPlanId(item) === planId);
+  if (existingIndex < 0) return [...plans, plan];
+  const next = [...plans];
+  next[existingIndex] = { ...next[existingIndex], ...plan };
+  return next;
+}
+
+function appendAgentPlanProgressEvent(events: AgentPlanProgressEvent[], event: AgentPlanProgressEvent) {
+  const exists = events.some((item) => {
+    if (event.sequence && item.sequence) return item.sequence === event.sequence;
+    return item.phase === event.phase && item.message === event.message;
+  });
+  if (exists) return events;
+  return [...events, event].slice(-8);
+}
+
+function findActiveConfirmableAgentPlan(plans: AgentPlan[]) {
+  return [...plans]
+    .reverse()
+    .find((plan) => plan.status === "waiting_confirm" && plan.operations.length > 0) ?? null;
+}
+
+function groupAgentPlansByMessageIndex(
+  messages: ChatMessage[],
+  plans: AgentPlan[],
+  anchors: AgentPlanAnchorMap
+) {
+  const grouped: Record<number, AgentPlan[]> = {};
+  for (const plan of plans) {
+    const planId = getAgentPlanId(plan);
+    const anchoredIndex = planId ? anchors[planId] : undefined;
+    const messageIndex = typeof anchoredIndex === "number"
+      ? anchoredIndex
+      : inferAgentPlanMessageIndex(messages, plan);
+    if (!grouped[messageIndex]) grouped[messageIndex] = [];
+    grouped[messageIndex].push(plan);
+  }
+  return grouped;
+}
+
+function inferAgentPlanMessageIndex(messages: ChatMessage[], plan: AgentPlan) {
+  if (!messages.length) return -1;
+  const planTime = parseMaybeDate(plan.created_at ?? plan.updated_at);
+  if (planTime !== null) {
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index];
+      if (message.role !== "assistant") continue;
+      const messageTime = parseMaybeDate(message.created_at);
+      if (messageTime !== null && messageTime >= planTime - 2000) return index;
+    }
+  }
+  const matchingIndex = messages.findIndex(
+    (message) => message.role === "assistant" && message.content.includes(plan.summary)
+  );
+  if (matchingIndex >= 0) return matchingIndex;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index].role === "assistant") return index;
+  }
+  return -1;
+}
+
+function buildAgentPlanAnchors(messages: ChatMessage[], plans: AgentPlan[]) {
+  const anchors: AgentPlanAnchorMap = {};
+  for (const plan of plans) {
+    const planId = getAgentPlanId(plan);
+    if (!planId) continue;
+    anchors[planId] = inferAgentPlanMessageIndex(messages, plan);
+  }
+  return anchors;
+}
+
+function parseMaybeDate(value?: string | null) {
+  if (!value) return null;
+  const normalized = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value) ? value : `${value.replace(/\s+/, "T")}Z`;
+  const time = new Date(normalized).getTime();
+  return Number.isNaN(time) ? null : time;
+}
+
+function agentPlanInlineMessage(plan: AgentPlan) {
+  if (plan.status === "pending") {
+    return `Agent 修改任务已创建。\n\n摘要：${plan.summary}\n状态：${plan.apply_result || "等待 VS Code 插件读取文件并生成计划。"}`;
+  }
+  if (plan.status === "waiting_confirm") {
+    return `Agent 计划已生成。\n\n摘要：${plan.summary}\n操作数：${plan.operations.length}\n状态：等待网页确认。`;
+  }
+  return `Agent 计划已更新。\n\n摘要：${plan.summary}\n状态：${plan.apply_result || agentPlanStatusText(plan.status ?? "")}`;
+}
+
+function inputPlaceholder(
+  isReportMode: boolean,
+  isAgentMode: boolean,
+  agentIntent: AgentIntent,
+  isPlanConfirmMode: boolean
+) {
+  if (isPlanConfirmMode) return "输入调整建议，回车重新生成计划；留空点击按钮确认执行计划";
+  if (isReportMode) return "围绕这份报告继续追问";
+  if (!isAgentMode) return "随便聊点什么";
+  if (agentIntent === "plan") return "描述要生成修改计划的任务...";
+  if (agentIntent === "chat") return "询问项目结构、代码问题或调试思路...";
+  return "提问或描述修改目标，系统会自动判断是否生成计划...";
 }
 
 function contextModeHint(mode: AgentContextMode, selectedCount: number, workspace?: WorkspaceSnapshot | null) {
@@ -1135,11 +1399,15 @@ function agentFriendlyError(message: string, isAgentMode: boolean) {
 
 function AgentPlanCard({
   plan,
+  progressEvents = [],
   busy = false,
+  runtimeMessage = "",
   onConfirm
 }: {
   plan: AgentPlan;
+  progressEvents?: AgentPlanProgressEvent[];
   busy?: boolean;
+  runtimeMessage?: string;
   onConfirm?: (action: "apply" | "reject") => void;
 }) {
   const status = plan.status ?? "pending";
@@ -1158,7 +1426,7 @@ function AgentPlanCard({
       </div>
       <p>
         {plan.source === "web"
-          ? "来自网页端。插件会生成计划；网页确认后插件才会应用到 VS Code 工作区。"
+          ? "来自网页端，确认前不会修改 VS Code 工作区。"
           : "来自 VS Code 插件。"}
       </p>
       <div className="agent-plan-card-meta">
@@ -1175,13 +1443,30 @@ function AgentPlanCard({
           {plan.selected_file_paths.length > 8 ? <em>+{plan.selected_file_paths.length - 8}</em> : null}
         </div>
       ) : null}
+      {progressEvents.length && ["pending", "confirmed", "applied", "failed"].includes(status) ? (
+        <div className="agent-plan-progress-list" aria-label="Agent 计划生成进度">
+          {progressEvents.map((event, index) => (
+            <div className="agent-plan-progress-item" key={`${event.sequence ?? index}-${event.phase}`}>
+              <span />
+              <div>
+                <strong>{event.message}</strong>
+                {event.detail ? <small>{event.detail}</small> : null}
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : null}
       {plan.operations.length ? (
         <div className="agent-plan-operation-list">
           {plan.operations.slice(0, 6).map((operation, index) => (
             <div className="agent-plan-operation" key={`${operation.type}-${operation.path}-${index}`}>
               <span className="agent-plan-operation-type">{operation.type}</span>
-              <span className="agent-plan-operation-path">{operation.path}</span>
-              {operation.reason ? <span className="agent-plan-operation-reason">{operation.reason}</span> : null}
+              <div className="agent-plan-operation-body">
+                <code className="agent-plan-operation-path">{operation.path}</code>
+                {operation.new_path ? <code className="agent-plan-operation-path">→ {operation.new_path}</code> : null}
+                {operation.edits?.length ? <span className="agent-plan-operation-reason">局部编辑 {operation.edits.length} 处</span> : null}
+                {operation.reason ? <span className="agent-plan-operation-reason">{operation.reason}</span> : null}
+              </div>
             </div>
           ))}
           {plan.operations.length > 6 ? (
@@ -1190,17 +1475,23 @@ function AgentPlanCard({
         </div>
       ) : null}
       {guidance ? <p className={`agent-plan-card-guidance agent-plan-card-guidance-${status}`}>{guidance}</p> : null}
-      {plan.apply_result ? <p className="agent-plan-card-result">{plan.apply_result}</p> : null}
-      {canConfirm ? (
-        <div className="agent-plan-card-actions">
-          <button className="btn btn-primary h-8" disabled={busy} onClick={() => onConfirm("apply")} type="button">
-            {busy ? <Loader2 className="animate-spin" size={14} /> : <Check size={14} />}
-            应用修改
-          </button>
-          <button className="btn btn-secondary h-8" disabled={busy} onClick={() => onConfirm("reject")} type="button">
-            拒绝
-          </button>
-        </div>
+      {plan.apply_result && status !== "pending" ? <p className="agent-plan-card-result">{plan.apply_result}</p> : null}
+      {runtimeMessage && status === "confirmed" ? <p className="agent-plan-card-runtime">{runtimeMessage}</p> : null}
+      {canConfirm || status === "waiting_confirm" ? (
+        <footer className="agent-plan-card-footer">
+          <span>确认后插件才会开始修改文件。</span>
+          {canConfirm ? (
+            <div className="agent-plan-card-actions">
+              <button className="btn btn-primary h-8" disabled={busy} onClick={() => onConfirm("apply")} type="button">
+                {busy ? <Loader2 className="animate-spin" size={14} /> : <Check size={14} />}
+                确认执行计划
+              </button>
+              <button className="btn btn-secondary h-8" disabled={busy} onClick={() => onConfirm("reject")} type="button">
+                拒绝
+              </button>
+            </div>
+          ) : null}
+        </footer>
       ) : null}
     </article>
   );
