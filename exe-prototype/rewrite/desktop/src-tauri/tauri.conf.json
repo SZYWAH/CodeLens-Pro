@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "CodeLens Pro Next",
+  "version": "1.0.0",
+  "identifier": "com.local.codelensnext",
+  "build": {
+    "beforeDevCommand": "npm run dev --prefix ../web",
+    "devUrl": "http://127.0.0.1:1420",
+    "frontendDist": "../../web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "CodeLens Pro Next",
+        "width": 1280,
+        "height": 820,
+        "minWidth": 980,
+        "minHeight": 680,
+        "resizable": true,
+        "visible": true
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": false,
+    "targets": "all"
+  }
+}

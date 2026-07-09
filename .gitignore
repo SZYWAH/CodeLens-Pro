@@ -11,3 +11,11 @@ logs/
 storage/
 CodeLens/report_history/
 vscode-extension/CodeLens/report_history/
+
+# CodeLens Pro Next build artifacts
+exe-prototype/.cache/
+exe-prototype/outputs/
+exe-prototype/**/target/
+exe-prototype/rewrite/web/dist/
+exe-prototype/rewrite/web/node_modules/
+exe-prototype/rewrite/desktop/node_modules/

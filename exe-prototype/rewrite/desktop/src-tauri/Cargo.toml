@@ -1,0 +1,17 @@
+[package]
+name = "codelens_pro_next_desktop"
+version = "1.0.0"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+anyhow = "1"
+codelens_next_core = { path = "../../core" }
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_UI_WindowsAndMessaging"] }
