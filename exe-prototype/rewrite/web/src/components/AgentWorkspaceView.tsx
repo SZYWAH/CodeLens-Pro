@@ -465,7 +465,9 @@ function ExecutionFlow({
 
 function describeAgentContext(context: string, workspaces: WorkspaceSummary[], workspace: WorkspaceDetail | null, findings: Finding[], reports: ReportSummary[]) {
   const [kind, rawId = ""] = context.split("|", 2);
-  if (!kind || kind === "none") return "无指定上下文，将作为通用开发任务处理";
+  if (!kind || kind === "none") {
+    return workspace ? `当前工作区：${workspace.summary.name}` : "尚未打开工作区，将生成通用草稿";
+  }
   if (kind === "workspace") return `工作区：${workspaces.find((item) => item.id === rawId)?.name || "当前工作区"}`;
   if (kind === "file") {
     const path = rawId.includes("::") ? rawId.split("::").slice(1).join("::") : rawId;

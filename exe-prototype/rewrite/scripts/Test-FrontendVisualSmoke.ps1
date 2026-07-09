@@ -166,10 +166,10 @@ $knowledgeCardsText = New-TextFromCodepoints @(0x77e5, 0x8bc6, 0x5361, 0x7247)
 $localProductText = New-TextFromCodepoints @(0x672c, 0x5730, 0x684c, 0x9762, 0x5de5, 0x5177)
 $traceabilityText = New-TextFromCodepoints @(0x5173, 0x8054, 0x6d1e, 0x5bdf)
 $mainlineAlignmentText = New-TextFromCodepoints @(0x4eca, 0x65e5, 0x5de5, 0x4f5c, 0x4e3b, 0x7ebf)
-$localLongTermText = New-TextFromCodepoints @(0x4ece, 0x6700, 0x8fd1, 0x5de5, 0x4f5c, 0x7ee7, 0x7eed, 0x63a8, 0x8fdb, 0x9879, 0x76ee, 0x5ba1, 0x67e5)
+$acceptanceFlowText = New-TextFromCodepoints @(0x4eca, 0x65e5, 0x9a8c, 0x6536, 0x94fe, 0x8def)
 $codeSnippetText = New-TextFromCodepoints @(0x4ee3, 0x7801, 0x7247, 0x6bb5)
 $emptyReportText = New-TextFromCodepoints @(0x62a5, 0x544a, 0x6b63, 0x6587, 0x4e3a, 0x7a7a)
-Assert-SourceText -Needles @($activityGalaxyText, $agentWorkspaceText, $knowledgeCardsText, $localProductText, $traceabilityText, $mainlineAlignmentText, $localLongTermText, $codeSnippetText, $emptyReportText)
+Assert-SourceText -Needles @($activityGalaxyText, $agentWorkspaceText, $knowledgeCardsText, $localProductText, $traceabilityText, $mainlineAlignmentText, $acceptanceFlowText, $codeSnippetText, $emptyReportText)
 Assert-BundleText -Needles @("CodeLens Pro Next")
 
 $browser = Find-Browser

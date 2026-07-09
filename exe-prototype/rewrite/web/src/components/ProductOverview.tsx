@@ -275,11 +275,43 @@ function ProductAlignmentBoard({
     }
   ];
 
-  const stages = [
-    ["v0.7", "视觉与信息架构", "统一侧边栏、顶部栏、报告阅读器、活动星图和设计系统。"],
-    ["v0.8", "核心页面联动", "补齐分析工作台、历史报告、代码对比、AI 对话和项目导览联动。"],
-    ["v0.9", "学习与 Agent 深化", "增强卡片候选、标签建议、学习材料、Agent 确认执行和结果追踪。"],
-    ["v1.0", "本地桌面工具", "形成可长期使用的本地 exe，支持无 Key 本地分析和有 Key AI 增强。"]
+  const acceptanceSteps = [
+    {
+      label: "导入工作区",
+      done: Boolean(activity?.workspace_count),
+      target: "projects" as OverviewTarget,
+      detail: activity?.workspace_count ? `${activity.workspace_count} 个工作区可继续审查` : "等待导入真实项目文件夹"
+    },
+    {
+      label: "生成审查报告",
+      done: Boolean(activity?.report_count),
+      target: "history" as OverviewTarget,
+      detail: activity?.report_count ? `${activity.report_count} 份报告已保存` : "从工作区生成第一份项目报告"
+    },
+    {
+      label: "处理问题清单",
+      done: Boolean(activity?.finding_count),
+      target: "findings" as OverviewTarget,
+      detail: activity?.finding_count ? `${unresolvedFindings || activity.finding_count} 个问题待复查` : "报告生成后自动形成问题入口"
+    },
+    {
+      label: "沉淀知识卡片",
+      done: Boolean(activity?.card_count),
+      target: "cards" as OverviewTarget,
+      detail: activity?.card_count ? `${reviewCards || activity.card_count} 张卡片待复习` : "从问题或报告生成卡片"
+    },
+    {
+      label: "确认 Agent 草稿",
+      done: Boolean(activity?.agent_task_count),
+      target: "agent" as OverviewTarget,
+      detail: activity?.agent_task_count ? `${activeAgentTasks || activity.agent_task_count} 个计划可推进` : "先生成只写入 .codelens-agent 的草稿"
+    },
+    {
+      label: "写入每日日志",
+      done: Boolean(dailySummary?.activity_count),
+      target: "logs" as OverviewTarget,
+      detail: dailySummary?.activity_count ? `今日已有 ${dailySummary.activity_count} 条活动` : "把审查、卡片和 Agent 结果沉淀到今天"
+    }
   ];
 
   return (
@@ -317,12 +349,16 @@ function ProductAlignmentBoard({
         ))}
       </div>
 
-      <div className="overview-version-road-next">
-        {stages.map(([version, title, detail], index) => (
-          <article className={index === 0 ? "active" : ""} key={version}>
-            <span>{version}</span>
-            <strong>{title}</strong>
-            <p>{detail}</p>
+      <div className="overview-version-road-next" aria-label="今日验收链路">
+        {acceptanceSteps.map((step, index) => (
+          <article className={step.done ? "active" : ""} key={step.label}>
+            <span>{step.done ? "已完成" : `第 ${index + 1} 步`}</span>
+            <strong>{step.label}</strong>
+            <p>{step.detail}</p>
+            <button className="mini-button" type="button" onClick={() => onNavigate(step.target)}>
+              进入
+              <ArrowRight size={14} />
+            </button>
           </article>
         ))}
       </div>

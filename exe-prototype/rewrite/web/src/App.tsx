@@ -1741,7 +1741,7 @@ export default function App() {
       navGroups={navGroups}
       onRefresh={refreshAll}
       statusText={statusText}
-      version={health?.version ? `v${health.version}` : "v1.0.0"}
+      version={health?.version || "1.0.0"}
     >
 
         {view === "overview" && (

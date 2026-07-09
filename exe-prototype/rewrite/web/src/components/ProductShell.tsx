@@ -58,6 +58,7 @@ export function ProductShell({
   const [commandOpen, setCommandOpen] = useState(false);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const commandInputRef = useRef<HTMLInputElement | null>(null);
+  const displayVersion = version.startsWith("v") ? version : `v${version}`;
   const activeGroupIndex = Math.max(0, navGroups.findIndex((group) => group.items.some((item) => item.active)));
   const activeGroup = navGroups[activeGroupIndex] || navGroups[0];
   const activeItem = activeGroup?.items.find((item) => item.active);
@@ -156,7 +157,7 @@ export function ProductShell({
         <section className="product-status-dock">
           <StatusBadge ok={databaseOk} text={databaseOk ? "SQLite 正常" : "数据库异常"} />
           <StatusBadge ok={llmConfigured} text={llmConfigured ? "LLM 已配置" : "本地分析"} />
-          <StatusBadge ok text={version} />
+          <StatusBadge ok text={displayVersion} />
         </section>
       </aside>
 
@@ -248,7 +249,7 @@ export function ProductShell({
             <div className="product-topbar-state">
               <StatusBadge ok={databaseOk} text={databaseOk ? "SQLite 正常" : "数据库异常"} />
               <StatusBadge ok={llmConfigured} text={llmConfigured ? "LLM 增强" : "本地规则"} />
-              <StatusBadge ok text={`v${version}`} />
+              <StatusBadge ok text={displayVersion} />
             </div>
             <button className="icon-button refresh-button" onClick={onRefresh} title="刷新当前数据">
               <RefreshCw size={18} />
