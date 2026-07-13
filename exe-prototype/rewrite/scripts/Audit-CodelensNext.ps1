@@ -5,6 +5,7 @@ param(
     [switch]$SkipReleaseBuild,
     [switch]$SkipVisualSmoke,
     [switch]$SkipInteractionSmoke,
+    [switch]$CaptureInteractionScreenshots,
     [switch]$SkipLaunchSmoke
 )
 
@@ -71,18 +72,42 @@ function Assert-NoPattern {
 
     Push-Location $ProjectRoot
     try {
-        $rgArgs = @("-n", $Pattern)
-        foreach ($glob in $ExcludeGlobs) {
-            $rgArgs += @("-g", "!$glob")
+        $ripgrep = Get-Command rg -ErrorAction SilentlyContinue
+        if ($ripgrep) {
+            $rgArgs = @("-n", $Pattern)
+            foreach ($glob in $ExcludeGlobs) {
+                $rgArgs += @("-g", "!$glob")
+            }
+            $rgArgs += $Paths
+            $matches = & $ripgrep.Source @rgArgs
+            if ($LASTEXITCODE -eq 0) {
+                $matches | Write-Host
+                throw "Unexpected text found during audit: $Description"
+            }
+            if ($LASTEXITCODE -gt 1) {
+                throw "rg failed while checking: $Description"
+            }
+            return
         }
-        $rgArgs += $Paths
-        $matches = & rg @rgArgs
-        if ($LASTEXITCODE -eq 0) {
-            $matches | Write-Host
+
+        $candidateFiles = New-Object System.Collections.Generic.List[System.IO.FileInfo]
+        foreach ($path in $Paths) {
+            if (Test-Path -LiteralPath $path -PathType Container) {
+                foreach ($file in Get-ChildItem -LiteralPath $path -Recurse -File) {
+                    $candidateFiles.Add($file)
+                }
+            } elseif (Test-Path -LiteralPath $path -PathType Leaf) {
+                $candidateFiles.Add((Get-Item -LiteralPath $path))
+            }
+        }
+        $filteredFiles = @($candidateFiles | Where-Object {
+            $relativePath = $_.FullName.Substring($ProjectRoot.Path.Length).TrimStart('\').Replace('\', '/')
+            -not @($ExcludeGlobs | Where-Object { $relativePath -like $_ }).Count
+        })
+        $matches = @($filteredFiles | Select-String -Pattern $Pattern -CaseSensitive -ErrorAction SilentlyContinue)
+        if ($matches.Count -gt 0) {
+            $matches | ForEach-Object { "{0}:{1}:{2}" -f $_.Path, $_.LineNumber, $_.Line } | Write-Host
             throw "Unexpected text found during audit: $Description"
-        }
-        if ($LASTEXITCODE -gt 1) {
-            throw "rg failed while checking: $Description"
         }
     } finally {
         Pop-Location
@@ -133,7 +158,11 @@ if (-not $SkipInteractionSmoke) {
     if (-not (Test-Path $interactionSmokeScript)) {
         throw "Frontend interaction smoke script was not found: $interactionSmokeScript"
     }
-    Invoke-CheckedCommand -FilePath powershell -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $interactionSmokeScript, "-OutputDir", (Join-Path $OutputRoot "v14.15-route-audit"))
+    $interactionArguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $interactionSmokeScript, "-OutputDir", (Join-Path $OutputRoot "v14.15-route-audit"))
+    if ($CaptureInteractionScreenshots) {
+        $interactionArguments += "-CaptureScreenshots"
+    }
+    Invoke-CheckedCommand -FilePath powershell -Arguments $interactionArguments
 }
 
 if (-not $SkipVisualSmoke) {
@@ -142,26 +171,31 @@ if (-not $SkipVisualSmoke) {
 }
 
 Write-Host "Running Rust core tests..." -ForegroundColor Cyan
-Invoke-CheckedCommand -FilePath cargo -Arguments @("test", "--manifest-path", $CoreManifest, "-j", "1")
+Invoke-CheckedCommand -FilePath cargo -Arguments @("test", "--manifest-path", $CoreManifest, "--locked", "-j", "1")
 
 Write-Host "Running Tauri cargo check..." -ForegroundColor Cyan
-Invoke-CheckedCommand -FilePath cargo -Arguments @("check", "--manifest-path", $DesktopManifest, "-j", "1")
+Invoke-CheckedCommand -FilePath cargo -Arguments @("check", "--manifest-path", $DesktopManifest, "--locked", "-j", "1")
 
 if (-not $SkipReleaseBuild) {
     Write-Host "Running release build..." -ForegroundColor Cyan
     Invoke-CheckedCommand -FilePath powershell -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "Build-CodelensNext.ps1"), "-MaxCpuPercent", "$MaxCpuPercent", "-MinFreeMemoryGB", "$MinFreeMemoryGB")
 }
 
-if (-not (Test-Path $OutputExe)) {
-    throw "Expected output exe was not found: $OutputExe"
-}
-
-$exeItem = Get-Item $OutputExe
-if ($exeItem.Length -lt 5MB) {
-    throw "Output exe is unexpectedly small: $([math]::Round($exeItem.Length / 1MB, 2)) MB"
+$exeItem = $null
+if (-not $SkipReleaseBuild) {
+    if (-not (Test-Path $OutputExe)) {
+        throw "Expected output exe was not found: $OutputExe"
+    }
+    $exeItem = Get-Item $OutputExe
+    if ($exeItem.Length -lt 5MB) {
+        throw "Output exe is unexpectedly small: $([math]::Round($exeItem.Length / 1MB, 2)) MB"
+    }
 }
 
 if (-not $SkipLaunchSmoke) {
+    if ($SkipReleaseBuild) {
+        throw "Launch smoke requires a release build. Remove -SkipReleaseBuild or add -SkipLaunchSmoke."
+    }
     Write-Host "Running launch/close smoke test..." -ForegroundColor Cyan
     $existing = Get-Process | Where-Object { $_.Path -eq $exeItem.FullName }
     if ($existing) {
@@ -191,8 +225,8 @@ if (-not $SkipLaunchSmoke) {
 [pscustomobject]@{
     Passed = $true
     Version = $ExpectedVersion
-    Exe = $OutputExe
-    ExeSizeMB = [math]::Round($exeItem.Length / 1MB, 2)
-    ExeLastWriteTime = $exeItem.LastWriteTime
+    Exe = if ($exeItem) { $OutputExe } else { $null }
+    ExeSizeMB = if ($exeItem) { [math]::Round($exeItem.Length / 1MB, 2) } else { 0 }
+    ExeLastWriteTime = if ($exeItem) { $exeItem.LastWriteTime } else { $null }
     CacheRoot = $CacheRoot
 } | Format-List

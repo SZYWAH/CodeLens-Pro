@@ -2,6 +2,7 @@ param(
     [int]$Port = 1422,
     [string]$OutputDir = "",
     [switch]$Quick,
+    [switch]$CaptureScreenshots,
     [int]$ReadyTimeoutSeconds = 60
 )
 
@@ -14,9 +15,11 @@ $WebRoot = Join-Path $RewriteRoot "web"
 if (-not $OutputDir) {
     $OutputDir = Join-Path $PrototypeRoot "outputs\codelens-next\v14.15-route-audit"
 }
+$OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 
 $JsonPath = Join-Path $OutputDir "interaction-smoke.json"
 $MarkdownPath = Join-Path $OutputDir "interaction-smoke.md"
+$ScreenshotDir = Join-Path $OutputDir "screenshots"
 $BrowserUserDataRoot = Join-Path $OutputDir ".interaction-browser"
 $CdpCommandId = 0
 $RouteResults = New-Object 'System.Collections.Generic.List[object]'
@@ -264,6 +267,24 @@ function Invoke-CdpJson {
         throw "Page evaluation returned no JSON value."
     }
     return ($value | ConvertFrom-Json)
+}
+
+function Save-CdpScreenshot {
+    param(
+        [Parameter(Mandatory = $true)]$Client,
+        [Parameter(Mandatory = $true)][string]$Path
+    )
+
+    $message = Invoke-CdpCommand -Client $Client -Method "Page.captureScreenshot" -Parameters @{
+        format = "png"
+        fromSurface = $true
+        captureBeyondViewport = $false
+    }
+    $encoded = [string]$message.result.data
+    if (-not $encoded) {
+        throw "CDP screenshot returned no image data."
+    }
+    [System.IO.File]::WriteAllBytes($Path, [Convert]::FromBase64String($encoded))
 }
 
 function Wait-PageSettled {
@@ -1039,6 +1060,12 @@ $RunStatus = "failed"
 
 try {
     New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null
+    if ($CaptureScreenshots) {
+        if (Test-Path $ScreenshotDir) {
+            Remove-Item -LiteralPath $ScreenshotDir -Recurse -Force
+        }
+        New-Item -ItemType Directory -Force -Path $ScreenshotDir | Out-Null
+    }
     if (Test-Path $BrowserUserDataRoot) {
         Remove-Item -LiteralPath $BrowserUserDataRoot -Recurse -Force
     }
@@ -1132,10 +1159,17 @@ try {
                     informationalFindings = @()
                     focusFailureCount = 0
                     focusChecks = @()
+                    screenshot = ""
                     error = ""
                 }
                 try {
                     Navigate-CdpPage -Client $CdpClient -Url $routeRecord.url -Theme $matrixCase.theme
+                    if ($CaptureScreenshots) {
+                        $screenshotName = "$($matrixCase.id)-$($route.name).png"
+                        $screenshotPath = Join-Path $ScreenshotDir $screenshotName
+                        Save-CdpScreenshot -Client $CdpClient -Path $screenshotPath
+                        $routeRecord.screenshot = "screenshots/$screenshotName"
+                    }
                     $snapshot = Get-VisibleControlSnapshot -Client $CdpClient -KnownOwnerSelectorText ($KnownOwnerSelectors -join ",")
                     $routeRecord.controlCount = @($snapshot.controls).Count
                     $routeRecord.renderedControlCount = [int]$snapshot.renderedControlCount
@@ -1232,4 +1266,5 @@ if ($RunError) {
     MatrixCases = $CaseResults.Count
     Routes = $RouteResults.Count
     Quick = [bool]$Quick
+    Screenshots = if ($CaptureScreenshots) { @(Get-ChildItem -LiteralPath $ScreenshotDir -Filter "*.png" -File).Count } else { 0 }
 } | Format-List

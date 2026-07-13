@@ -64,7 +64,7 @@ function Get-DirectorySizeMB {
 
 if (-not $SkipTests) {
     Write-Host "Running Rust core tests..." -ForegroundColor Cyan
-    Invoke-CheckedCommand cargo test --manifest-path $CoreManifest
+    Invoke-CheckedCommand cargo test --manifest-path $CoreManifest --locked
 }
 
 Write-Host "Installing web dependencies..." -ForegroundColor Cyan
