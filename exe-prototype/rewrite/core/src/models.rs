@@ -68,6 +68,7 @@ pub struct AnalysisRequest {
     pub code: String,
     pub language: Option<String>,
     pub title: Option<String>,
+    pub source_label: Option<String>,
     pub mode_group: Option<String>,
     pub mode: Option<String>,
     pub mode_label: Option<String>,
@@ -126,6 +127,7 @@ pub struct ReportSummary {
     pub id: String,
     pub title: String,
     pub language: String,
+    pub review_focus: Option<String>,
     pub summary: String,
     pub analysis_source: String,
     pub report_type: String,
@@ -591,6 +593,35 @@ pub struct ActivityLink {
 pub struct ActivityGalaxyData {
     pub nodes: Vec<ActivityNode>,
     pub links: Vec<ActivityLink>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityStarRoute {
+    pub page: Option<String>,
+    pub target_id: Option<String>,
+    pub session_id: Option<String>,
+    pub plan_id: Option<String>,
+    pub context_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityStarItem {
+    pub id: String,
+    pub kind: String,
+    pub kind_label: String,
+    pub title: String,
+    pub subtitle: String,
+    pub status: String,
+    pub target_id: String,
+    pub created_at: String,
+    pub route: Option<ActivityStarRoute>,
+    pub weight: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ActivityConstellationData {
+    pub items: Vec<ActivityStarItem>,
+    pub code_line_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

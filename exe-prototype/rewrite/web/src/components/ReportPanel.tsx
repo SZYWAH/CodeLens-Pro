@@ -8,20 +8,26 @@ export function ReportPanel({
   onCopy,
   onExport,
   onGenerateCandidates,
-  onCreateAgentPlan,
   onOpenFindings,
   onAddDailyLog,
-  onChatAboutReport
+  onChatAboutReport,
+  onRename,
+  variant = "full",
+  loading = false,
+  operationBusy = false
 }: {
   report: ReportDetail | null;
   traceability: TraceabilitySnapshot | null;
   onCopy: () => void;
   onExport: (kind: "md" | "html") => void;
   onGenerateCandidates?: () => void;
-  onCreateAgentPlan?: () => void;
   onOpenFindings?: () => void;
   onAddDailyLog?: () => void;
   onChatAboutReport?: () => void;
+  onRename?: (id: string, title: string) => Promise<void>;
+  variant?: "embedded" | "full";
+  loading?: boolean;
+  operationBusy?: boolean;
 }) {
   return (
     <ReportReader
@@ -30,10 +36,13 @@ export function ReportPanel({
       onCopy={onCopy}
       onExport={onExport}
       onGenerateCandidates={onGenerateCandidates}
-      onCreateAgentPlan={onCreateAgentPlan}
       onOpenFindings={onOpenFindings}
       onAddDailyLog={onAddDailyLog}
       onChatAboutReport={onChatAboutReport}
+      onRename={onRename}
+      variant={variant}
+      loading={loading}
+      operationBusy={operationBusy}
     />
   );
 }

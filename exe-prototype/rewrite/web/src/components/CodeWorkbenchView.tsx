@@ -1,6 +1,10 @@
-import { AlertTriangle, Bot, CheckCircle2, Clipboard, Eraser, FileCode2, FolderOpen, GraduationCap, Loader2, MessageSquare, Play, Route, RotateCcw, ShieldAlert, Sparkles } from "lucide-react";
-import type { ReportDetail, ReportMetrics, TraceabilitySnapshot } from "../types";
+import { Check, Clipboard, Eraser, FileCode2, FolderOpen, Loader2, Play, RotateCcw } from "lucide-react";
+import { useEffect, useState, type KeyboardEvent } from "react";
+import type { ReportDetail, ReportMetrics, ReportSummary, TraceabilitySnapshot, WorkspaceDetail, WorkspaceSummary } from "../types";
+import { AccessibleListbox } from "./AccessibleListbox";
 import { ReportPanel } from "./ReportPanel";
+import { ProjectWorkspaceView } from "./ProjectWorkspaceView";
+import { ProductToolbar } from "./ProductShell";
 
 const languages = ["auto", "Python", "TypeScript", "JavaScript", "Rust", "Java", "C/C++", "Plain Text"];
 const modeGroups = [
@@ -23,7 +27,7 @@ const reportModes: Record<string, Array<{ value: string; label: string; detail: 
 };
 
 export function CodeWorkbenchView(props: {
-  title: string;
+  workbenchMode: "project" | "single";
   language: string;
   modeGroup: string;
   mode: string;
@@ -31,8 +35,16 @@ export function CodeWorkbenchView(props: {
   code: string;
   report: ReportDetail | null;
   traceability: TraceabilitySnapshot | null;
-  busy: boolean;
-  onTitleChange: (value: string) => void;
+  workspaces?: WorkspaceSummary[];
+  activeWorkspace?: WorkspaceDetail | null;
+  recentReports?: ReportSummary[];
+  workspaceTraceability: TraceabilitySnapshot | null;
+  workspaceQuery: string;
+  workspaceStream: string;
+  singleBusy: boolean;
+  reportOperationBusy: boolean;
+  workspaceBusy: boolean;
+  onWorkbenchModeChange: (value: "project" | "single") => void;
   onLanguageChange: (value: string) => void;
   onModeGroupChange: (value: string) => void;
   onModeChange: (value: string) => void;
@@ -45,171 +57,193 @@ export function CodeWorkbenchView(props: {
   onCopyReport: () => void;
   onExportReport: (kind: "md" | "html") => void;
   onGenerateCandidates: () => void;
-  onCreateAgentPlan: () => void;
   onOpenFindings: () => void;
   onAddDailyLog: () => void;
   onChatAboutReport: () => void;
+  onRenameReport: (id: string, title: string) => Promise<void>;
+  onImportWorkspace?: () => void;
+  onAnalyzeWorkspace?: () => void;
+  onWorkspaceQueryChange?: (value: string) => void;
+  onSearchWorkspaces?: (query: string) => void;
+  onOpenWorkspace?: (id: string) => void;
+  onDeleteWorkspace?: (id: string) => void;
+  onRescanWorkspace?: () => void;
+  onOpenCodeMap?: () => void;
+  onOpenProjectGuide?: () => void;
+  onOpenReport?: (id: string) => void;
+  onOpenWorkspaceFindings?: () => void;
+  onOpenWorkspaceCards?: () => void;
+  onOpenWorkspaceLogs?: () => void;
 }) {
+  const [singleMobilePane, setSingleMobilePane] = useState<"code" | "report">("code");
+  const [codeCopyState, setCodeCopyState] = useState<"copied" | "error" | null>(null);
   const metrics = estimateMetrics(props.code);
-  const reviewHints = buildReviewHints(props.code, metrics);
   const modes = reportModes[props.modeGroup] || reportModes.function;
   const activeMode = modes.find((item) => item.value === props.mode) || modes[0];
-  const readiness = buildSingleReadiness(props.code, metrics, props.report, props.traceability);
-  const routeSteps = buildSingleRouteSteps(props.report, props.traceability);
+
+  useEffect(() => {
+    setSingleMobilePane(props.report ? "report" : "code");
+  }, [props.report?.id]);
+
+  useEffect(() => {
+    if (!codeCopyState) return;
+    const timeout = window.setTimeout(() => setCodeCopyState(null), 1800);
+    return () => window.clearTimeout(timeout);
+  }, [codeCopyState]);
+
+  function changeWorkbenchMode(value: "project" | "single") {
+    if (value === "single") setSingleMobilePane("code");
+    props.onWorkbenchModeChange(value);
+  }
+
+  function analyzeSingleFile() {
+    props.onAnalyze();
+  }
+
+  async function copyCode() {
+    try {
+      if (!navigator.clipboard) throw new Error("clipboard unavailable");
+      await navigator.clipboard.writeText(props.code);
+      setCodeCopyState("copied");
+    } catch {
+      setCodeCopyState("error");
+    }
+  }
+
+  function handleTabsKeyDown<T extends string>(
+    event: KeyboardEvent<HTMLButtonElement>,
+    values: readonly T[],
+    current: T,
+    onChange: (value: T) => void
+  ) {
+    const currentIndex = values.indexOf(current);
+    let nextIndex = currentIndex;
+    if (event.key === "ArrowRight") nextIndex = (currentIndex + 1) % values.length;
+    else if (event.key === "ArrowLeft") nextIndex = (currentIndex - 1 + values.length) % values.length;
+    else if (event.key === "Home") nextIndex = 0;
+    else if (event.key === "End") nextIndex = values.length - 1;
+    else return;
+    const next = values[nextIndex];
+    onChange(next);
+    const tabList = event.currentTarget.closest('[role="tablist"]');
+    const nextTab = tabList?.querySelector<HTMLButtonElement>('[data-tab-value="' + next + '"]');
+    nextTab?.focus();
+    event.preventDefault();
+  }
 
   return (
-    <section className="single-workbench-next">
-      <aside className="single-workbench-editor-next">
-        <div className="workbench-hero-next compact">
-          <div>
-            <span>单文件分析</span>
-            <h3>代码工作台</h3>
-            <p>粘贴片段或导入单个文件，先完成本地规则分析，再把报告继续送入问题、卡片、日志、对话和 Agent 闭环。</p>
-          </div>
-          <button className="primary-button" onClick={props.onAnalyze} disabled={props.busy || !props.code.trim()} type="button">
-            {props.busy ? <Loader2 className="spin" size={18} /> : <Play size={18} />}
-            生成报告
+    <section className="code-workbench-v12">
+      <ProductToolbar>
+        <div className="product-toolbar-context-next">{props.workbenchMode === "project" ? "项目审查主线" : "单文件快速分析"}</div>
+        <div className="workbench-mode-switch-v12" role="tablist" aria-label="工作台模式">
+          <button aria-controls="workbench-panel-project" className={props.workbenchMode === "project" ? "active" : ""} data-tab-value="project" id="workbench-tab-project-desktop" onClick={() => changeWorkbenchMode("project")} onKeyDown={(event) => handleTabsKeyDown(event, ["project", "single"] as const, props.workbenchMode, changeWorkbenchMode)} role="tab" aria-selected={props.workbenchMode === "project"} tabIndex={props.workbenchMode === "project" ? 0 : -1} type="button"><FolderOpen size={15} />项目</button>
+          <button aria-controls="workbench-panel-single" className={props.workbenchMode === "single" ? "active" : ""} data-tab-value="single" id="workbench-tab-single-desktop" onClick={() => changeWorkbenchMode("single")} onKeyDown={(event) => handleTabsKeyDown(event, ["project", "single"] as const, props.workbenchMode, changeWorkbenchMode)} role="tab" aria-selected={props.workbenchMode === "single"} tabIndex={props.workbenchMode === "single" ? 0 : -1} type="button"><FileCode2 size={15} />单文件</button>
+        </div>
+      </ProductToolbar>
+
+      <div className="workbench-mobile-mode-v142" role="tablist" aria-label="工作台模式">
+        <button aria-controls="workbench-panel-project" className={props.workbenchMode === "project" ? "active" : ""} data-tab-value="project" id="workbench-tab-project-mobile" onClick={() => changeWorkbenchMode("project")} onKeyDown={(event) => handleTabsKeyDown(event, ["project", "single"] as const, props.workbenchMode, changeWorkbenchMode)} role="tab" aria-selected={props.workbenchMode === "project"} tabIndex={props.workbenchMode === "project" ? 0 : -1} type="button"><FolderOpen size={15} />项目审查</button>
+        <button aria-controls="workbench-panel-single" className={props.workbenchMode === "single" ? "active" : ""} data-tab-value="single" id="workbench-tab-single-mobile" onClick={() => changeWorkbenchMode("single")} onKeyDown={(event) => handleTabsKeyDown(event, ["project", "single"] as const, props.workbenchMode, changeWorkbenchMode)} role="tab" aria-selected={props.workbenchMode === "single"} tabIndex={props.workbenchMode === "single" ? 0 : -1} type="button"><FileCode2 size={15} />单文件</button>
+      </div>
+
+      {props.workbenchMode === "project" && (
+        <div aria-labelledby="workbench-tab-project-desktop" id="workbench-panel-project" role="tabpanel">
+          <ProjectWorkspaceView
+            workspaces={props.workspaces || []}
+            activeWorkspace={props.activeWorkspace || null}
+            recentReports={props.recentReports || []}
+            traceability={props.workspaceTraceability}
+            query={props.workspaceQuery}
+            stream={props.workspaceStream}
+            busy={props.workspaceBusy}
+            onQueryChange={props.onWorkspaceQueryChange || (() => undefined)}
+            onSearch={props.onSearchWorkspaces || (() => undefined)}
+            onImport={props.onImportWorkspace || (() => undefined)}
+            onOpen={props.onOpenWorkspace || (() => undefined)}
+            onDelete={props.onDeleteWorkspace || (() => undefined)}
+            onRescan={props.onRescanWorkspace || (() => undefined)}
+            onAnalyze={props.onAnalyzeWorkspace || (() => undefined)}
+            onMap={props.onOpenCodeMap || (() => undefined)}
+            onGuide={props.onOpenProjectGuide || (() => undefined)}
+            onOpenReport={props.onOpenReport || (() => undefined)}
+            onOpenFindings={props.onOpenWorkspaceFindings || (() => undefined)}
+            onOpenCards={props.onOpenWorkspaceCards || (() => undefined)}
+            onOpenLogs={props.onOpenWorkspaceLogs || (() => undefined)}
+          />
+        </div>
+      )}
+
+      {props.workbenchMode === "single" && (
+      <section aria-label="单文件分析" className={`single-workbench-v12 ${props.report ? "has-report" : "no-report"} show-${singleMobilePane}`} id="workbench-panel-single" role="tabpanel">
+      {props.report && <div className="single-mobile-tabs-v142" role="tablist" aria-label="单文件工作区">
+        <button aria-controls="single-pane-code" className={singleMobilePane === "code" ? "active" : ""} data-tab-value="code" id="single-tab-code" onClick={() => setSingleMobilePane("code")} onKeyDown={(event) => handleTabsKeyDown(event, ["code", "report"] as const, singleMobilePane, setSingleMobilePane)} role="tab" aria-selected={singleMobilePane === "code"} tabIndex={singleMobilePane === "code" ? 0 : -1} type="button"><FileCode2 size={15} />代码</button>
+        <button aria-controls="single-pane-report" className={singleMobilePane === "report" ? "active" : ""} data-tab-value="report" id="single-tab-report" onClick={() => setSingleMobilePane("report")} onKeyDown={(event) => handleTabsKeyDown(event, ["code", "report"] as const, singleMobilePane, setSingleMobilePane)} role="tab" aria-selected={singleMobilePane === "report"} tabIndex={singleMobilePane === "report" ? 0 : -1} type="button"><Play size={15} />报告</button>
+      </div>}
+      <aside aria-label="待分析代码" className="single-workbench-editor-next single-workbench-editor-v12 single-code-pane-v142" id="single-pane-code" role="tabpanel">
+        <header className="single-editor-head-v12">
+          <div><span>单文件审查</span><strong>{activeMode.label}</strong><small>{activeMode.detail}</small></div>
+          <button className="primary-button" onClick={analyzeSingleFile} disabled={props.singleBusy || !props.code.trim()} type="button">
+            {props.singleBusy ? <Loader2 className="spin" size={17} /> : <Play size={17} />}生成报告
           </button>
-        </div>
+        </header>
 
-        <div className="single-control-grid-next">
-          <label>
-            报告标题
-            <input value={props.title} onChange={(event) => props.onTitleChange(event.target.value)} placeholder="例如：登录模块异常处理审查" />
-          </label>
-          <label>
-            语言
-            <select value={props.language} onChange={(event) => props.onLanguageChange(event.target.value)}>
-              {languages.map((item) => <option key={item} value={item}>{item === "auto" ? "自动识别" : item}</option>)}
-            </select>
-          </label>
-          <label>
-            分析类型
-            <select value={props.modeGroup} onChange={(event) => props.onModeGroupChange(event.target.value)}>
-              {modeGroups.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-            </select>
-          </label>
-          <label>
-            分析模式
-            <select value={props.mode} onChange={(event) => props.onModeChange(event.target.value)}>
-              {modes.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
-            </select>
+        {props.singleBusy && <div className="single-generation-v142" aria-live="polite"><Loader2 className="spin" size={16} /><span><strong>正在生成单文件报告</strong><small>完成后将在右侧打开，不会清空当前代码。</small></span></div>}
+
+        <div className="single-control-grid-next single-controls-v12">
+          <AccessibleListbox label="语言" value={props.language} onChange={props.onLanguageChange} options={languages.map((item) => ({ value: item, label: item === "auto" ? "自动识别" : item }))} disabled={props.singleBusy} />
+          <AccessibleListbox label="分析类型" value={props.modeGroup} onChange={props.onModeGroupChange} options={modeGroups} disabled={props.singleBusy} />
+          <AccessibleListbox label="审查重点" value={props.mode} onChange={props.onModeChange} options={modes.map(({ value, label }) => ({ value, label }))} disabled={props.singleBusy} />
+          <label className="single-card-candidate-toggle-v147" title="报告完成后额外提取可保存的知识卡片候选，默认不会增加生成步骤。">
+            <input checked={props.generateCards} disabled={props.singleBusy} onChange={(event) => props.onGenerateCardsChange(event.target.checked)} type="checkbox" />
+            <span>生成后提取知识卡片候选</span>
           </label>
         </div>
 
-        <section className="single-mode-card-next">
-          <div>
-            <span>当前模式</span>
-            <strong>{activeMode.label}</strong>
-            <p>{activeMode.detail}</p>
+        <div className="single-code-frame-next single-code-frame-v12">
+          <div className="single-code-head-v142">
+            <div className="pane-title"><FileCode2 size={16} />待分析代码</div>
+            <nav className="single-editor-toolbar-next single-toolbar-v12" aria-label="代码编辑操作">
+              <button className="secondary-button" disabled={props.singleBusy} onClick={props.onImportFile} type="button"><FolderOpen size={15} />导入</button>
+              <button className="secondary-button" disabled={props.singleBusy} onClick={props.onLoadSample} type="button"><RotateCcw size={15} />示例</button>
+              <button className="secondary-button" onClick={copyCode} disabled={props.singleBusy || !props.code.trim()} type="button">{codeCopyState === "copied" ? <Check size={15} /> : <Clipboard size={15} />}{codeCopyState === "copied" ? "已复制" : codeCopyState === "error" ? "复制失败" : "复制"}</button>
+              <button className="secondary-button danger" onClick={props.onClear} disabled={props.singleBusy || !props.code.trim()} type="button"><Eraser size={15} />清空</button>
+            </nav>
           </div>
-          <label>
-            <input checked={props.generateCards} onChange={(event) => props.onGenerateCardsChange(event.target.checked)} type="checkbox" />
-            <span>报告生成后同步提取知识卡片候选</span>
-          </label>
-        </section>
-
-        <section className="single-command-center-next">
-          <article className="single-readiness-next">
-            <span>输入成熟度</span>
-            <strong>{readiness.score}</strong>
-            <p>{readiness.label}</p>
-            <div><i style={{ width: `${readiness.score}%` }} /></div>
-          </article>
-          <div className="single-command-grid-next">
-            <CommandCard
-              icon={<FileCode2 size={16} />}
-              title="输入质量"
-              detail={readiness.detail}
-              state={props.code.trim() ? "ready" : "missing"}
-            />
-            <CommandCard
-              icon={<ShieldAlert size={16} />}
-              title="审查模式"
-              detail={`${activeMode.label}：${activeMode.detail}`}
-              state="ready"
-            />
-            <CommandCard
-              icon={<GraduationCap size={16} />}
-              title="学习沉淀"
-              detail={props.generateCards ? "报告完成后会同步提取知识卡片候选。" : "可打开卡片候选开关，把高价值结论沉淀下来。"}
-              state={props.generateCards ? "ready" : "warning"}
-            />
-            <CommandCard
-              icon={<Bot size={16} />}
-              title="下一步闭环"
-              detail={props.report ? "报告已可进入问题、卡片、日志、对话和 Agent。" : "先生成报告，再继续进入项目审查闭环。"}
-              state={props.report ? "ready" : "missing"}
-            />
-          </div>
-        </section>
-
-        <section className="single-route-board-next">
-          <div className="section-title-next">
-            <span><Route size={15} />分析闭环路线</span>
-            <small>把一次代码分析推进成可复盘、可学习、可改进的记录</small>
-          </div>
-          <div className="single-route-steps-next">
-            {routeSteps.map((step, index) => (
-              <article className={step.done ? "done" : step.active ? "active" : ""} key={step.title}>
-                <span>{step.done ? <CheckCircle2 size={15} /> : index + 1}</span>
-                <strong>{step.title}</strong>
-                <small>{step.detail}</small>
-              </article>
-            ))}
-          </div>
-          <div className="single-route-actions-next">
-            <button onClick={props.onAnalyze} disabled={props.busy || !props.code.trim()} type="button"><Play size={15} />生成报告</button>
-            <button onClick={props.onOpenFindings} disabled={!props.report} type="button"><ShieldAlert size={15} />问题清单</button>
-            <button onClick={props.onGenerateCandidates} disabled={!props.report} type="button"><GraduationCap size={15} />卡片候选</button>
-            <button onClick={props.onChatAboutReport} disabled={!props.report} type="button"><MessageSquare size={15} />围绕报告对话</button>
-            <button onClick={props.onCreateAgentPlan} disabled={!props.report} type="button"><Bot size={15} />Agent 计划</button>
-          </div>
-        </section>
-
-        <div className="single-editor-toolbar-next">
-          <button className="secondary-button" onClick={props.onImportFile} type="button"><FolderOpen size={16} />导入文件</button>
-          <button className="secondary-button" onClick={props.onLoadSample} type="button"><RotateCcw size={16} />载入示例</button>
-          <button className="secondary-button" onClick={() => navigator.clipboard?.writeText(props.code)} disabled={!props.code.trim()} type="button"><Clipboard size={16} />复制代码</button>
-          <button className="secondary-button" onClick={props.onClear} disabled={!props.code.trim()} type="button"><Eraser size={16} />清空</button>
-        </div>
-
-        <div className="single-code-frame-next">
-          <div className="pane-title"><FileCode2 size={17} />待分析代码</div>
           <textarea
             spellCheck={false}
+            disabled={props.singleBusy}
             value={props.code}
             onChange={(event) => props.onCodeChange(event.target.value)}
             placeholder="在这里粘贴需要分析的代码..."
           />
         </div>
 
-        <div className="single-metric-strip-next">
+        <div className="single-metric-strip-next single-metrics-v12">
           <Metric label="总行数" value={metrics.total_lines} />
           <Metric label="有效行" value={metrics.non_empty_lines} />
           <Metric label="注释行" value={metrics.comment_lines} />
           <Metric label="复杂度" value={metrics.complexity_score} />
         </div>
 
-        <section className="single-review-hints-next">
-          <span><Sparkles size={15} />本地预判</span>
-          {reviewHints.map((hint) => <p key={hint}>{hint}</p>)}
-        </section>
       </aside>
 
-      <main className="single-workbench-report-next">
+      {props.report && <main aria-label="单文件审查报告" className="single-workbench-report-next single-workbench-report-v12 single-report-pane-v142" id="single-pane-report" role="tabpanel">
         <ReportPanel
           report={props.report}
           traceability={props.traceability}
+          variant="embedded"
+          operationBusy={props.reportOperationBusy}
           onCopy={props.onCopyReport}
           onExport={props.onExportReport}
           onGenerateCandidates={props.onGenerateCandidates}
-          onCreateAgentPlan={props.onCreateAgentPlan}
           onOpenFindings={props.onOpenFindings}
           onAddDailyLog={props.onAddDailyLog}
           onChatAboutReport={props.onChatAboutReport}
+          onRename={props.onRenameReport}
         />
-      </main>
+      </main>}
+      </section>
+      )}
     </section>
   );
 }
@@ -221,73 +255,6 @@ function Metric({ label, value }: { label: string; value: number }) {
       <strong>{value}</strong>
     </article>
   );
-}
-
-function CommandCard({ icon, title, detail, state }: { icon: JSX.Element; title: string; detail: string; state: "ready" | "warning" | "missing" }) {
-  return (
-    <article className={state}>
-      <span>{icon}</span>
-      <strong>{title}</strong>
-      <small>{detail}</small>
-    </article>
-  );
-}
-
-function buildSingleReadiness(code: string, metrics: ReportMetrics, report: ReportDetail | null, traceability: TraceabilitySnapshot | null) {
-  if (!code.trim()) {
-    return {
-      score: 0,
-      label: "等待输入代码",
-      detail: "粘贴代码或导入文件后，会先计算行数、复杂度和风险词。"
-    };
-  }
-  const sizeScore = Math.min(28, Math.max(8, metrics.non_empty_lines));
-  const complexityScore = metrics.complexity_score > 0 ? Math.min(18, metrics.complexity_score * 2) : 6;
-  const reportScore = report ? 26 : 0;
-  const traceCounts = traceability?.counts;
-  const closureScore = traceCounts ? Math.min(28, (traceCounts.findings + traceCounts.cards + traceCounts.chats + traceCounts.daily_logs + traceCounts.agent_tasks) * 6) : 0;
-  const score = Math.min(100, Math.round(sizeScore + complexityScore + reportScore + closureScore));
-  const label = score >= 80 ? "已形成完整分析闭环" : score >= 55 ? "报告主线已启动" : score >= 28 ? "输入可分析，等待生成报告" : "输入较短，适合快速审查";
-  const detail = report
-    ? `当前报告包含 ${report.risks.length} 个风险、${report.suggestions.length} 条建议，可继续进入闭环。`
-    : `${metrics.non_empty_lines} 行有效代码，复杂度 ${metrics.complexity_score}，建议先生成结构化报告。`;
-  return { score, label, detail };
-}
-
-function buildSingleRouteSteps(report: ReportDetail | null, traceability: TraceabilitySnapshot | null) {
-  const counts = traceability?.counts;
-  return [
-    {
-      title: "输入代码",
-      detail: "粘贴片段或导入单文件，先形成本地指标。",
-      done: true,
-      active: false
-    },
-    {
-      title: "生成报告",
-      detail: report ? "当前报告已生成，可以进入阅读和导出。" : "等待生成结构化报告。",
-      done: Boolean(report),
-      active: !report
-    },
-    {
-      title: "拆成问题",
-      detail: counts?.findings ? `${counts.findings} 个问题已关联。` : "把报告中的风险沉淀到问题清单。",
-      done: Boolean(counts?.findings),
-      active: Boolean(report && !counts?.findings)
-    },
-    {
-      title: "学习与复盘",
-      detail: counts ? `${counts.cards} 张卡片 / ${counts.daily_logs} 篇日志。` : "生成卡片并加入每日日志。",
-      done: Boolean(counts && (counts.cards > 0 || counts.daily_logs > 0)),
-      active: Boolean(report && counts && counts.findings > 0 && counts.cards + counts.daily_logs === 0)
-    },
-    {
-      title: "Agent 改进",
-      detail: counts?.agent_tasks ? `${counts.agent_tasks} 个计划已生成。` : "围绕报告生成可确认的改进计划。",
-      done: Boolean(counts?.agent_tasks),
-      active: Boolean(report && !counts?.agent_tasks)
-    }
-  ];
 }
 
 function estimateMetrics(code: string): ReportMetrics {
@@ -305,16 +272,4 @@ function estimateMetrics(code: string): ReportMetrics {
     risk_count: 0,
     suggestion_count: 0
   };
-}
-
-function buildReviewHints(code: string, metrics: ReportMetrics) {
-  if (!code.trim()) return ["等待输入代码后，会先给出本地复杂度、风险词和审查入口预判。"];
-  const lower = code.toLowerCase();
-  const hints = [];
-  if (metrics.complexity_score > 8) hints.push("分支和控制流较密集，建议优先拆分路径并补充回归测试。");
-  if (lower.includes("todo") || lower.includes("fixme")) hints.push("检测到 TODO/FIXME，建议确认是否影响当前交付。");
-  if (lower.includes("password") || lower.includes("api_key") || lower.includes("secret")) hints.push("检测到疑似敏感字段，注意不要在日志、报告或仓库中暴露密钥。");
-  if (lower.includes("innerhtml") || lower.includes("eval(") || lower.includes("exec(")) hints.push("检测到高风险动态执行或 DOM 写入模式，建议重点审查输入边界。");
-  if (hints.length === 0) hints.push("暂未发现明显高风险词，建议继续检查异常处理、边界输入和测试覆盖。");
-  return hints.slice(0, 4);
 }

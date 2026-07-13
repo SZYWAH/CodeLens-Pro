@@ -33,6 +33,60 @@ pub async fn generate_report(
     complete_chat(settings, api_key, &messages).await
 }
 
+pub async fn generate_report_title(
+    settings: &Settings,
+    api_key: &str,
+    request: &AnalysisRequest,
+    report: &ReportDetail,
+    fallback: &str,
+) -> anyhow::Result<String> {
+    let source = request.source_label.as_deref().unwrap_or("未提供文件名");
+    let code_excerpt = request.code.chars().take(6000).collect::<String>();
+    let report_excerpt = report.full_report.chars().take(7000).collect::<String>();
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: "你是代码审查报告命名助手。请根据代码、审查重点和报告内容生成一个清晰的中文短标题。只输出标题本身，不要解释、引号、Markdown 或句号；长度控制在 8 到 18 个汉字左右。".to_string(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: format!(
+                "文件来源：{source}\n语言：{}\n审查重点：{}\n本地兜底标题：{fallback}\n\n代码：\n```\n{code_excerpt}\n```\n\n报告：\n{report_excerpt}",
+                report.language,
+                request.mode_label.as_deref().unwrap_or("代码审查"),
+            ),
+        },
+    ];
+    let generated = complete_chat(settings, api_key, &messages).await?;
+    validate_report_title(&generated).ok_or_else(|| anyhow!("LLM returned an invalid report title"))
+}
+
+fn validate_report_title(value: &str) -> Option<String> {
+    let mut title = value
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .trim_matches(|character| matches!(character, '#' | '`' | '"' | '\'' | '“' | '”' | '《' | '》' | '。' | '：' | ':'))
+        .trim()
+        .to_string();
+    if title.starts_with("标题") {
+        title = title
+            .trim_start_matches("标题")
+            .trim_start_matches(|character| matches!(character, '：' | ':'))
+            .trim()
+            .to_string();
+    }
+    let count = title.chars().count();
+    if !(4..=36).contains(&count) || title.contains('\n') {
+        return None;
+    }
+    if matches!(title.as_str(), "代码审查" | "代码分析报告" | "单文件代码审查") {
+        return None;
+    }
+    Some(title)
+}
+
 pub async fn complete_chat(
     settings: &Settings,
     api_key: &str,
@@ -247,7 +301,7 @@ fn build_prompt(request: &AnalysisRequest, local_report: &ReportDetail) -> Strin
         .or(request.mode.as_deref())
         .unwrap_or("综合代码审查");
     format!(
-        "语言：{}\n分析模式：{}\n本地摘要：{}\n本地风险：{}\n\n请按当前分析模式生成中文结构化报告，并给出可继续进入问题清单、知识卡片、每日日志和 Agent 计划的行动建议。\n\n代码：\n```{}\n{}\n```",
+        "语言：{}\n分析模式：{}\n本地摘要：{}\n本地风险：{}\n\n请按当前分析模式生成中文结构化报告，并给出可继续进入问题清单、知识卡片、每日日志和可选行动草稿的行动建议。\n\n代码：\n```{}\n{}\n```",
         local_report.language,
         profile,
         local_report.summary,

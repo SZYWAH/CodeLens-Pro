@@ -1,24 +1,15 @@
-import {
-  Bot,
-  CalendarDays,
-  CheckCircle2,
-  ChevronLeft,
-  ChevronRight,
-  Clipboard,
-  Clock3,
-  Download,
-  Edit3,
-  FileText,
-  GraduationCap,
-  Layers3,
-  Loader2,
-  RefreshCw,
-  Save,
-  Sparkles
-} from "lucide-react";
-import type { ReactNode } from "react";
-import { useMemo, useState } from "react";
-import type { AgentTask, DailyLog, DailySummary, LearningCalendarItem, LearningCard, LearningCenterData } from "../types";
+import { BookOpen, CalendarDays, ChevronLeft, ChevronRight, Clipboard, Download, Edit3, FileText, GraduationCap, Loader2, Menu, MoreHorizontal, PanelLeftClose, PanelLeftOpen, RefreshCw, Save, Sparkles, X } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { DailyLog, DailySummary, LearningCard, LearningCenterData } from "../types";
+import { ProductToolbar } from "./ProductShell";
+
+const collapsedKey = "codelens.logs.collapsed";
+type EditorMode = "read" | "edit";
+type Confirmation =
+  | { kind: "navigate"; date: string }
+  | { kind: "regenerate" }
+  | { kind: "refresh" }
+  | { kind: "discard-edit" };
 
 export function DailyLearningCenterView(props: {
   date: string;
@@ -27,357 +18,238 @@ export function DailyLearningCenterView(props: {
   center: LearningCenterData | null;
   draft: DailyLog | null;
   busy: boolean;
-  onDateChange: (value: string) => void;
-  onGenerate: () => void;
-  onSave: () => void;
+  onDateChange: (value: string) => Promise<boolean>;
+  onGenerate: () => Promise<boolean>;
+  onSave: () => Promise<boolean>;
   onStartManual: () => void;
-  onCopy: () => void;
-  onExport: () => void;
-  onRefresh: () => void;
-  onOpenCard: (id: string) => void;
-  onOpenAgent: (id: string) => void;
+  onCopy: () => void | Promise<void>;
+  onExport: () => void | Promise<void>;
+  onRefresh: () => Promise<boolean>;
+  onOpenCard: (id: string) => void | Promise<void>;
   onDraftTitleChange: (value: string) => void;
   onDraftContentChange: (value: string) => void;
   onOpenLog: (log: DailyLog) => void;
+  onDiscardDraft: () => void;
 }) {
-  const [dateRailCollapsed, setDateRailCollapsed] = useState(false);
-  const reviewCards = props.center?.review_cards || [];
-  const recentTasks = props.center?.recent_agent_tasks || [];
+  const [collapsed, setCollapsed] = useState(() => typeof window !== "undefined" && window.localStorage.getItem(collapsedKey) === "true");
+  const [mobileIndex, setMobileIndex] = useState(false);
+  const [associationsOpen, setAssociationsOpen] = useState(false);
+  const [toolbarMoreOpen, setToolbarMoreOpen] = useState(false);
+  const [mode, setMode] = useState<EditorMode>("read");
+  const [loadingDate, setLoadingDate] = useState<string | null>(null);
+  const [confirmation, setConfirmation] = useState<Confirmation | null>(null);
+  const [confirmationBusy, setConfirmationBusy] = useState(false);
+  const restoreFocusRef = useRef<HTMLElement | null>(null);
+  const confirmActionRef = useRef<HTMLButtonElement | null>(null);
+
   const calendar = props.center?.calendar || [];
-  const selectedDay = calendar.find((item) => item.date === props.date) || null;
-  const monthStats = buildMonthStats(calendar);
-  const summary = props.summary || props.center?.today || null;
-  const focusItems = buildFocusItems(summary, reviewCards, recentTasks);
-  const selectedMonth = props.date.slice(0, 7);
-  const todayKey = new Date().toISOString().slice(0, 10);
-  const isFutureDate = props.date > todayKey;
-  const hasActivity = Boolean((summary?.activity_count || 0) > 0 || selectedDay?.activity_count);
+  const reviewCards = props.center?.review_cards || [];
   const savedLog = props.logs.find((log) => log.date === props.date) || null;
+  const summary = props.summary || props.center?.today || null;
+  const selectedDay = calendar.find((item) => item.date === props.date) || null;
+  const historyLogs = useMemo(() => [...props.logs].sort((left, right) => right.date.localeCompare(left.date)), [props.logs]);
+  const today = new Date().toISOString().slice(0, 10);
+  const isFuture = props.date > today;
+  const dirty = Boolean(mode === "edit" && props.draft && (!savedLog || props.draft.title !== savedLog.title || props.draft.content !== savedLog.content));
+  const month = props.date.slice(0, 7);
+  const activityCount = selectedDay?.activity_count || summary?.activity_count || 0;
+  const draftState = props.busy ? "正在处理" : savedLog ? mode === "edit" ? (dirty ? "未保存修改" : "正在编辑") : "已保存" : props.draft ? "草稿" : "未记录";
 
-  function changeMonth(delta: number) {
-    const [year, month] = selectedMonth.split("-").map(Number);
-    const next = new Date(year, month - 1 + delta, 1);
-    const key = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}`;
-    props.onDateChange(key === todayKey.slice(0, 7) ? todayKey : `${key}-01`);
+  useEffect(() => { window.localStorage.setItem(collapsedKey, String(collapsed)); }, [collapsed]);
+  useEffect(() => {
+    if (props.draft?.date === props.date && !savedLog) setMode("edit");
+    if (savedLog && props.draft?.date === props.date && props.draft.title === savedLog.title && props.draft.content === savedLog.content) setMode("read");
+  }, [props.date, props.draft?.id, props.draft?.updated_at, savedLog?.id, savedLog?.updated_at]);
+  useEffect(() => {
+    if (!confirmation) return;
+    const frame = window.requestAnimationFrame(() => confirmActionRef.current?.focus());
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !confirmationBusy) {
+        event.preventDefault();
+        closeConfirmation();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [confirmation, confirmationBusy]);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || confirmation) return;
+      if (toolbarMoreOpen) {
+        event.preventDefault();
+        setToolbarMoreOpen(false);
+      } else if (associationsOpen) {
+        event.preventDefault();
+        setAssociationsOpen(false);
+      } else if (mobileIndex) {
+        event.preventDefault();
+        setMobileIndex(false);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [associationsOpen, confirmation, mobileIndex, toolbarMoreOpen]);
+
+  function closeConfirmation() {
+    setConfirmation(null);
+    window.requestAnimationFrame(() => restoreFocusRef.current?.focus());
   }
 
-  return (
-    <section className="learning-center-next">
-      {dateRailCollapsed ? (
-        <button className="daily-log-spine-next" onClick={() => setDateRailCollapsed(false)} type="button" title="展开日期栏">
-          <strong>{props.date.slice(5)}</strong>
-          <span>{selectedDay?.activity_count || summary?.activity_count || 0} 活动</span>
-          <ChevronRight size={16} />
-        </button>
-      ) : (
-        <aside className="learning-rail-next">
-          <div className="learning-hero-next">
-            <span>每日学习</span>
-            <h3>每日学习中心</h3>
-            <p>把当天报告、对话、问题、卡片和 Agent 计划整理成可复盘的开发日记，让项目审查进入长期学习闭环。</p>
-          </div>
-
-          <section className="daily-month-control-next">
-            <button className="mini-button" onClick={() => changeMonth(-1)} type="button"><ChevronLeft size={15} />上个月</button>
-            <strong>{formatMonthLabel(selectedMonth)}</strong>
-            <button className="mini-button" onClick={() => changeMonth(1)} type="button">下个月<ChevronRight size={15} /></button>
-          </section>
-
-          <section className="learning-date-card-next">
-            <label>
-              日期
-              <input type="date" value={props.date} onChange={(event) => props.onDateChange(event.target.value)} />
-            </label>
-            <div className="button-row wrap">
-              <button className="secondary-button" type="button" onClick={() => props.onDateChange(todayKey)}>回到今天</button>
-              <button className="secondary-button" type="button" onClick={props.onRefresh}>
-                <RefreshCw size={16} />
-                刷新
-              </button>
-            </div>
-            <button className="primary-button full" onClick={props.onGenerate} disabled={props.busy || isFutureDate}>
-              {props.busy ? <Loader2 className="spin" size={18} /> : <Sparkles size={18} />}
-              {savedLog ? "重新生成草稿" : "生成日志草稿"}
-            </button>
-            <button className="secondary-button full" onClick={props.onStartManual} type="button">
-              <Edit3 size={16} />
-              手动写日志
-            </button>
-            <div className="learning-day-summary-next">
-              <span>{savedLog ? "已保存日志" : hasActivity ? "待整理" : "等待活动"}</span>
-              <strong>{selectedDay?.activity_count || summary?.activity_count || 0}</strong>
-              <small>当天活动</small>
-            </div>
-          </section>
-
-          <section className="learning-calendar-next">
-            <div className="section-title-next">
-              <span><CalendarDays size={15} />活动日历</span>
-              <h3>本月学习轨迹</h3>
-            </div>
-            <div className="learning-month-strip-next">
-              <small>活跃天数 <strong>{monthStats.activeDays}</strong></small>
-              <small>日志天数 <strong>{monthStats.logDays}</strong></small>
-              <small>总活动 <strong>{monthStats.totalActivity}</strong></small>
-            </div>
-            <div className="calendar-grid calendar-grid-rich-next">
-              {calendar.map((item) => {
-                const activityLevel = Math.min(4, item.activity_count);
-                return (
-                  <button className={item.date === props.date ? "calendar-day active" : "calendar-day"} key={item.date} onClick={() => props.onDateChange(item.date)} type="button">
-                    <strong>{item.date.slice(8)}</strong>
-                    <span>{item.has_log ? "已记录" : item.activity_count ? "待整理" : "空白"}</span>
-                    <i>{item.report_count} 报告 · {item.card_count} 卡片</i>
-                    <em aria-hidden="true">
-                      {Array.from({ length: 4 }).map((_, index) => <b key={index} className={index < activityLevel ? "lit" : ""} />)}
-                    </em>
-                  </button>
-                );
-              })}
-              {calendar.length === 0 && <p className="muted">暂无日历数据。</p>}
-            </div>
-          </section>
-
-          <section className="learning-log-list-next">
-            <div className="section-title-next">
-              <span>历史日志</span>
-              <h3>已保存复盘</h3>
-            </div>
-            <div className="report-list">
-              {props.logs.map((log) => (
-                <article className={log.date === props.date ? "report-row active" : "report-row"} key={log.id}>
-                  <button className="report-main" onClick={() => props.onOpenLog(log)} type="button">
-                    <strong>{log.title}</strong>
-                    <span>{log.date} · {formatTime(log.updated_at)}</span>
-                    <p>{log.content.slice(0, 120)}</p>
-                  </button>
-                </article>
-              ))}
-              {props.logs.length === 0 && <div className="empty small">暂无已保存日志。</div>}
-            </div>
-          </section>
-
-          <button className="daily-log-collapse-next" onClick={() => setDateRailCollapsed(true)} type="button">
-            <ChevronLeft size={15} />
-            收起日期栏
-          </button>
-        </aside>
-      )}
-
-      <main className="learning-main-next">
-        <section className="daily-main-hero-next">
-          <div>
-            <span>学习闭环</span>
-            <h3>{props.date} 复盘工作台</h3>
-            <p>{isFutureDate ? "这是未来日期，可以提前手写计划，但不会生成活动汇总。" : "从活动汇总、复习队列和 Agent 计划生成可长期回看的学习日志。"}</p>
-          </div>
-          <div className="button-row wrap">
-            <button className="secondary-button" onClick={props.onCopy} disabled={!props.draft} type="button">
-              <Clipboard size={16} />
-              复制 Markdown
-            </button>
-            <button className="secondary-button" onClick={props.onExport} disabled={props.busy} type="button">
-              <Download size={16} />
-              导出日志
-            </button>
-            <button className="primary-button" onClick={props.onSave} disabled={props.busy || !props.draft} type="button">
-              <Save size={18} />
-              保存日志
-            </button>
-          </div>
-        </section>
-
-        {summary && (
-          <div className="learning-metrics-next">
-            <Metric label="报告" value={summary.report_count} />
-            <Metric label="对话" value={summary.chat_message_count} />
-            <Metric label="问题" value={summary.finding_count} />
-            <Metric label="卡片" value={summary.card_count} />
-            <Metric label="Agent" value={summary.agent_task_count} />
-            <Metric label="活动" value={summary.activity_count} />
-          </div>
-        )}
-
-        <section className="daily-flow-next">
-          {focusItems.map((item, index) => (
-            <article className={item.done ? "done" : ""} key={item.title}>
-              <span>{item.icon}</span>
-              <strong>{index + 1}. {item.title}</strong>
-              <p>{item.detail}</p>
-            </article>
-          ))}
-        </section>
-
-        <section className="daily-editor-next">
-          <div className="report-head">
-            <div>
-              <h3>{props.draft ? "编辑学习日志" : "学习日志草稿"}</h3>
-              <p>草稿可以继续编辑，再保存到本地 SQLite。日志会与报告、卡片、对话、问题和 Agent 计划一起进入活动星图。</p>
-            </div>
-            <div className="daily-editor-state-next">
-              <span>{savedLog ? "已有保存版本" : "未保存"}</span>
-              <strong>{props.draft ? `${props.draft.content.length} 字符` : "等待草稿"}</strong>
-            </div>
-          </div>
-          {props.draft ? (
-            <>
-              <label>
-                标题
-                <input value={props.draft.title} onChange={(event) => props.onDraftTitleChange(event.target.value)} />
-              </label>
-              <label>
-                内容
-                <textarea value={props.draft.content} onChange={(event) => props.onDraftContentChange(event.target.value)} />
-              </label>
-            </>
-          ) : (
-            <div className="workbench-empty-next compact">
-              <FileText size={34} />
-              <h3>还没有日志草稿</h3>
-              <p>点击“生成日志草稿”或“手动写日志”，系统会把当天活动整理成可编辑内容。</p>
-            </div>
-          )}
-        </section>
-
-        <div className="learning-side-grid-next">
-          <ListPanel title="今日亮点" icon={<Sparkles size={16} />} items={summary?.highlights || []} />
-          <CardReviewPanel cards={reviewCards} onOpenCard={props.onOpenCard} />
-          <AgentReviewPanel tasks={recentTasks} onOpenAgent={props.onOpenAgent} />
-        </div>
-      </main>
-    </section>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: number }) {
-  return (
-    <div className="metric">
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </div>
-  );
-}
-
-function ListPanel({ title, icon, items }: { title: string; icon: ReactNode; items: string[] }) {
-  return (
-    <article className="v04-panel daily-panel-next">
-      <h3>{icon}{title}</h3>
-      <div className="simple-list">
-        {items.map((item, index) => <p key={`${item}-${index}`}>{item}</p>)}
-        {items.length === 0 && <p className="muted">暂无条目。</p>}
-      </div>
-    </article>
-  );
-}
-
-function CardReviewPanel({ cards, onOpenCard }: { cards: LearningCard[]; onOpenCard: (id: string) => void }) {
-  return (
-    <article className="v04-panel daily-panel-next">
-      <h3><GraduationCap size={16} />待复习卡片</h3>
-      <div className="simple-list">
-        {cards.slice(0, 8).map((card) => (
-          <button className="daily-link-row-next" key={card.id} onClick={() => onOpenCard(card.id)} type="button">
-            <strong>{cardStatusLabel(card.status)}</strong>
-            <span>{card.title}</span>
-          </button>
-        ))}
-        {cards.length === 0 && <p className="muted">暂无待复习卡片。</p>}
-      </div>
-    </article>
-  );
-}
-
-function AgentReviewPanel({ tasks, onOpenAgent }: { tasks: AgentTask[]; onOpenAgent: (id: string) => void }) {
-  return (
-    <article className="v04-panel daily-panel-next">
-      <h3><Bot size={16} />近期 Agent 计划</h3>
-      <div className="simple-list">
-        {tasks.slice(0, 8).map((task) => (
-          <button className="daily-link-row-next" key={task.id} onClick={() => onOpenAgent(task.id)} type="button">
-            <strong>{taskStatusLabel(task.status)}</strong>
-            <span>{task.title}</span>
-          </button>
-        ))}
-        {tasks.length === 0 && <p className="muted">暂无近期 Agent 计划。</p>}
-      </div>
-    </article>
-  );
-}
-
-function buildMonthStats(calendar: LearningCalendarItem[]) {
-  return calendar.reduce(
-    (acc, item) => ({
-      activeDays: acc.activeDays + (item.activity_count > 0 ? 1 : 0),
-      logDays: acc.logDays + (item.has_log ? 1 : 0),
-      totalActivity: acc.totalActivity + item.activity_count
-    }),
-    { activeDays: 0, logDays: 0, totalActivity: 0 }
-  );
-}
-
-function buildFocusItems(summary: DailySummary | null, reviewCards: LearningCard[], tasks: AgentTask[]) {
-  const reportCount = summary?.report_count || 0;
-  const findingCount = summary?.finding_count || 0;
-  const cardCount = summary?.card_count || 0;
-  const agentCount = summary?.agent_task_count || 0;
-  return [
-    {
-      icon: <FileText size={16} />,
-      title: "分析输入",
-      detail: reportCount ? `今天产生 ${reportCount} 份报告。` : "还没有报告输入，先完成一次项目分析或代码对比。",
-      done: reportCount > 0
-    },
-    {
-      icon: <Layers3 size={16} />,
-      title: "问题复盘",
-      detail: findingCount ? `今天沉淀 ${findingCount} 个问题。` : "把报告中的风险拆成问题清单，便于追踪。",
-      done: findingCount > 0
-    },
-    {
-      icon: <GraduationCap size={16} />,
-      title: "学习沉淀",
-      detail: cardCount || reviewCards.length ? `今日卡片 ${cardCount} 张，待复习 ${reviewCards.length} 张。` : "从问题或报告生成知识卡片。",
-      done: cardCount > 0 || reviewCards.length > 0
-    },
-    {
-      icon: <CheckCircle2 size={16} />,
-      title: "改进计划",
-      detail: agentCount || tasks.length ? `今日 Agent ${agentCount} 个，近期计划 ${tasks.length} 个。` : "把关键问题转成可确认执行的 Agent 计划。",
-      done: agentCount > 0 || tasks.length > 0
+  async function commitDate(value: string) {
+    setLoadingDate(value);
+    setConfirmation(null);
+    try {
+      await props.onDateChange(value);
+      setMobileIndex(false);
+      setAssociationsOpen(false);
+    } finally {
+      setLoadingDate(null);
     }
-  ];
-}
-
-function cardStatusLabel(value: string) {
-  const map: Record<string, string> = {
-    new: "未掌握",
-    reviewing: "复习中",
-    mastered: "已掌握"
-  };
-  return map[value] || value;
-}
-
-function taskStatusLabel(value: string) {
-  const map: Record<string, string> = {
-    planned: "已计划",
-    pending: "待确认",
-    applied: "已应用",
-    failed: "失败",
-    partial: "部分应用"
-  };
-  return map[value] || value;
-}
-
-function formatTime(value: string) {
-  if (!value) return "暂无";
-  try {
-    return new Date(value).toLocaleString("zh-CN", { hour12: false });
-  } catch {
-    return value;
   }
+
+  function requestDate(value: string, trigger?: HTMLElement | null) {
+    if (props.busy || loadingDate || value === props.date) return;
+    if (dirty) {
+      restoreFocusRef.current = trigger || null;
+      setConfirmation({ kind: "navigate", date: value });
+      return;
+    }
+    void commitDate(value);
+  }
+
+  function requestRefresh(trigger?: HTMLElement | null) {
+    if (props.busy || loadingDate) return;
+    if (dirty) {
+      restoreFocusRef.current = trigger || null;
+      setConfirmation({ kind: "refresh" });
+      return;
+    }
+    void props.onRefresh();
+  }
+
+  function requestGenerate(trigger?: HTMLElement | null) {
+    if (props.busy || isFuture) return;
+    if (savedLog || dirty) {
+      restoreFocusRef.current = trigger || null;
+      setConfirmation({ kind: "regenerate" });
+      return;
+    }
+    void generateDraft();
+  }
+
+  async function generateDraft() {
+    setMode("edit");
+    const generated = await props.onGenerate();
+    if (!generated && savedLog) setMode("read");
+  }
+
+  function discardCurrentDraft() {
+    if (savedLog) props.onOpenLog(savedLog);
+    else props.onDiscardDraft();
+    setMode("read");
+  }
+
+  async function confirmAction() {
+    if (!confirmation) return;
+    setConfirmationBusy(true);
+    try {
+      if (confirmation.kind === "navigate") {
+        const saved = await props.onSave();
+        if (saved) await commitDate(confirmation.date);
+        return;
+      }
+      if (confirmation.kind === "regenerate") {
+        setConfirmation(null);
+        await generateDraft();
+        return;
+      }
+      if (confirmation.kind === "refresh") {
+        discardCurrentDraft();
+        setConfirmation(null);
+        await props.onRefresh();
+        return;
+      }
+      discardCurrentDraft();
+      closeConfirmation();
+    } finally {
+      setConfirmationBusy(false);
+    }
+  }
+
+  function discardAndContinue() {
+    if (!confirmation) return;
+    if (confirmation.kind === "navigate") {
+      const target = confirmation.date;
+      discardCurrentDraft();
+      void commitDate(target);
+      return;
+    }
+    if (confirmation.kind === "regenerate") {
+      setConfirmation(null);
+      void generateDraft();
+      return;
+    }
+    discardCurrentDraft();
+    closeConfirmation();
+  }
+
+  function changeMonth(delta: number, trigger?: HTMLElement | null) {
+    const [year, value] = month.split("-").map(Number);
+    const next = new Date(year, value - 1 + delta, 1);
+    const key = `${next.getFullYear()}-${String(next.getMonth() + 1).padStart(2, "0")}`;
+    requestDate(key === today.slice(0, 7) ? today : `${key}-01`, trigger);
+  }
+
+  return <section className={`logs-workspace-v136 ${collapsed ? "is-collapsed" : ""}`}>
+    <ProductToolbar>
+      <div className="logs-toolbar-context-v136"><span>复盘记录</span><strong>{props.date}</strong><em>{activityCount} 项活动 · {draftState}</em></div>
+      <nav className="logs-toolbar-actions-v136">
+        {!props.draft && !isFuture && <button className="primary-button" disabled={props.busy} onClick={(event) => requestGenerate(event.currentTarget)} type="button">{props.busy ? <Loader2 className="spin" size={14} /> : <Sparkles size={14} />}生成草稿</button>}
+        {!props.draft && <button disabled={props.busy} onClick={() => { setMode("edit"); props.onStartManual(); }} type="button"><Edit3 size={14} />手动编写</button>}
+        {props.draft && mode === "read" && <button className="primary-button" disabled={props.busy} onClick={() => setMode("edit")} type="button"><Edit3 size={14} />编辑</button>}
+        {props.draft && mode === "edit" && <button className="primary-button" disabled={props.busy || !props.draft.title.trim()} onClick={() => void props.onSave()} type="button">{props.busy ? <Loader2 className="spin" size={14} /> : <Save size={14} />}保存</button>}
+        <button className="logs-associations-trigger-v136" onClick={() => setAssociationsOpen(true)} type="button"><BookOpen size={14} />今日关联</button>
+        <div className="product-toolbar-overflow-next logs-toolbar-overflow-v136">
+          <button aria-expanded={toolbarMoreOpen} aria-label="更多日志操作" onClick={() => setToolbarMoreOpen((value) => !value)} type="button"><MoreHorizontal size={15} /></button>
+          {toolbarMoreOpen && <div>
+            <button disabled={!props.draft} onClick={() => { setToolbarMoreOpen(false); void props.onCopy(); }} type="button"><Clipboard size={14} />复制 Markdown</button>
+            <button disabled={props.busy || !props.draft} onClick={() => { setToolbarMoreOpen(false); void props.onExport(); }} type="button"><Download size={14} />导出 Markdown</button>
+          </div>}
+        </div>
+      </nav>
+    </ProductToolbar>
+
+    <button className="logs-mobile-index-v136" onClick={() => setMobileIndex(true)} type="button"><Menu size={15} />选择日期与历史日志</button>
+    <div className="logs-layout-v136">
+      {mobileIndex && <button className="logs-index-scrim-v136" aria-label="关闭日期索引" onClick={() => setMobileIndex(false)} type="button" />}
+      <aside className={`logs-index-v136 ${mobileIndex ? "is-open" : ""}`}>
+        <header><div><strong>{collapsed ? props.date.slice(5) : "日期与日志"}</strong>{!collapsed && <span>{historyLogs.length} 篇已保存</span>}</div><button className="logs-mobile-close-v136" aria-label="关闭日期索引" onClick={() => setMobileIndex(false)} type="button"><X size={16} /></button><button className="logs-collapse-v136" aria-label={collapsed ? "展开日期索引" : "收起日期索引"} onClick={() => setCollapsed(!collapsed)} type="button">{collapsed ? <PanelLeftOpen size={15} /> : <PanelLeftClose size={15} />}</button></header>
+        {!collapsed && <>
+          <div className="logs-month-v136"><button aria-label="上个月" disabled={Boolean(loadingDate) || props.busy} onClick={(event) => changeMonth(-1, event.currentTarget)} type="button"><ChevronLeft size={15} /></button><strong>{formatMonth(month)}</strong><button aria-label="下个月" disabled={Boolean(loadingDate) || props.busy} onClick={(event) => changeMonth(1, event.currentTarget)} type="button"><ChevronRight size={15} /></button></div>
+          <label className="logs-date-input-v136"><CalendarDays size={14} /><input disabled={Boolean(loadingDate) || props.busy} onChange={(event) => requestDate(event.target.value, event.currentTarget)} type="date" value={props.date} /><button disabled={props.date === today || Boolean(loadingDate) || props.busy} onClick={(event) => requestDate(today, event.currentTarget)} type="button">今天</button></label>
+          <div className="logs-calendar-v136">{calendar.map((item) => <button aria-current={item.date === props.date ? "date" : undefined} className={item.date === props.date ? "active" : ""} disabled={Boolean(loadingDate) || props.busy} key={item.date} onClick={(event) => requestDate(item.date, event.currentTarget)} title={`${item.activity_count} 项活动`} type="button"><strong>{item.date.slice(8)}</strong><i className={item.has_log ? "has-log" : item.activity_count ? "has-activity" : ""} /></button>)}</div>
+          <div className="logs-history-v136"><header><div><strong>历史日志</strong><span>{historyLogs.length} 篇</span></div><button aria-label="刷新日志" disabled={Boolean(loadingDate) || props.busy} onClick={(event) => requestRefresh(event.currentTarget)} type="button"><RefreshCw className={loadingDate ? "spin" : undefined} size={13} /></button></header>{historyLogs.map((log) => <button aria-current={log.date === props.date ? "page" : undefined} className={log.date === props.date ? "active" : ""} disabled={Boolean(loadingDate) || props.busy} key={log.id} onClick={(event) => requestDate(log.date, event.currentTarget)} type="button"><strong>{log.title}</strong><small>{log.date} · {formatTime(log.updated_at)}</small>{loadingDate === log.date && <Loader2 className="spin" size={13} />}</button>)}{!historyLogs.length && <p>暂无已保存日志。</p>}</div>
+        </>}
+      </aside>
+
+      <main className="log-document-v136" aria-busy={Boolean(loadingDate)}>
+        <header className="log-document-head-v136"><div><span>每日复盘</span><strong>{props.date}</strong><p>{isFuture ? "未来日期仅支持手动记录计划。" : activityCount ? `已汇集 ${activityCount} 项本地活动，可整理为一篇复盘。` : "当天没有新增活动，也可以主动沉淀学习记录。"}</p></div><span className={`log-state-badge-v136 ${savedLog ? "saved" : props.draft ? "draft" : "empty"}`}>{draftState}</span></header>
+        {summary && <dl className="log-meta-v136"><Meta label="报告" value={summary.report_count} /><Meta label="对话" value={summary.chat_message_count} /><Meta label="问题" value={summary.finding_count} /><Meta label="卡片" value={summary.card_count} /><Meta label="活动" value={summary.activity_count} /></dl>}
+        {loadingDate ? <div className="log-loading-v136"><Loader2 className="spin" size={18} /><strong>正在切换到 {loadingDate}</strong><span>同步当天摘要、历史日志与待复习内容。</span></div> : props.draft ? mode === "edit" ? <section className="log-editor-v136"><header><div><strong>编辑日志</strong><span>{dirty ? "有未保存修改" : savedLog ? "与保存版本一致" : "新草稿"}</span></div><button onClick={(event) => { if (dirty) { restoreFocusRef.current = event.currentTarget; setConfirmation({ kind: "discard-edit" }); } else { discardCurrentDraft(); } }} type="button">取消编辑</button></header><label>标题<input onChange={(event) => props.onDraftTitleChange(event.target.value)} value={props.draft.title} /></label><label>Markdown 内容<textarea onChange={(event) => props.onDraftContentChange(event.target.value)} value={props.draft.content} /></label></section> : <article className="log-reader-v136"><header><span>{props.date} · 已保存日志</span><h3>{props.draft.title}</h3><small>最后更新于 {formatTime(props.draft.updated_at)}</small></header><div className="report-document-rich">{props.draft.content.split("\n").map(renderLine)}</div></article> : <div className="log-empty-v136"><div className="log-empty-icon-v136"><FileText size={24} /></div><strong>{isFuture ? "未来日期尚无日志" : activityCount ? "当天活动尚未整理" : "当天暂无日志"}</strong><p>{isFuture ? "可以手动写下计划或预习重点，不会生成活动汇总。" : "从本地活动生成草稿，或从空白日志开始记录。"}</p><div>{!isFuture && <button className="primary-button" onClick={(event) => requestGenerate(event.currentTarget)} type="button"><Sparkles size={14} />生成草稿</button>}<button onClick={() => { setMode("edit"); props.onStartManual(); }} type="button"><Edit3 size={14} />手动编写</button></div></div>}
+      </main>
+    </div>
+
+    {associationsOpen && <><button className="logs-drawer-scrim-v136" aria-label="关闭今日关联" onClick={() => setAssociationsOpen(false)} type="button" /><aside aria-label="今日关联" className="logs-drawer-v136"><header><div><strong>今日关联</strong><span>{props.date}</span></div><button aria-label="关闭今日关联" onClick={() => setAssociationsOpen(false)} type="button"><X size={17} /></button></header><section><h4>活动摘要</h4><dl><Meta label="报告" value={summary?.report_count || 0} /><Meta label="问题" value={summary?.finding_count || 0} /><Meta label="卡片" value={summary?.card_count || 0} /><Meta label="活动" value={summary?.activity_count || 0} /></dl></section><section><h4>今日亮点</h4>{summary?.highlights?.map((item, index) => <p key={`${item}-${index}`}>{item}</p>)}{!summary?.highlights?.length && <p className="muted">暂无亮点记录。</p>}</section><section><h4>待复习卡片</h4>{reviewCards.map((card) => <button className="log-card-link-v136" key={card.id} onClick={() => void props.onOpenCard(card.id)} type="button"><GraduationCap size={14} /><span><strong>{card.title}</strong><small>{cardStatus(card.status)}</small></span></button>)}{!reviewCards.length && <p className="muted">暂无待复习卡片。</p>}</section></aside></>}
+
+    {confirmation && <div className="logs-confirm-layer-v136" role="presentation"><button aria-label="继续编辑" className="logs-confirm-scrim-v136" disabled={confirmationBusy} onClick={closeConfirmation} type="button" /><section aria-labelledby="logs-confirm-title-v136" aria-modal="true" className="logs-confirm-dialog-v136" role="dialog"><header><Edit3 size={18} /><div><strong id="logs-confirm-title-v136">{confirmation.kind === "regenerate" ? "重新生成当天草稿？" : confirmation.kind === "navigate" ? "保存修改后再切换日期？" : confirmation.kind === "refresh" ? "放弃修改并刷新日志？" : "放弃未保存修改？"}</strong><span>{confirmation.kind === "navigate" ? `将从 ${props.date} 切换到 ${confirmation.date}` : "当前编辑内容尚未写入本地日志。"}</span></div></header><p>{confirmation.kind === "regenerate" ? "重新生成会替换当前编辑区中的草稿内容；已保存日志在再次保存前不会被覆盖。" : confirmation.kind === "navigate" ? "可以先保存当前日志，也可以放弃修改后直接切换。" : confirmation.kind === "refresh" ? "刷新会恢复已保存的本地日志，并重新读取当天活动与待复习卡片。" : savedLog ? "将恢复到最近一次保存的日志内容。" : "将放弃当前未保存的草稿。"}</p><footer>{confirmation.kind === "navigate" && <button disabled={confirmationBusy} onClick={discardAndContinue} type="button">放弃修改</button>}<button disabled={confirmationBusy} onClick={closeConfirmation} type="button">继续编辑</button><button className={confirmation.kind === "discard-edit" ? "danger-button" : "primary-button"} disabled={confirmationBusy} onClick={() => void confirmAction()} ref={confirmActionRef} type="button">{confirmationBusy ? <Loader2 className="spin" size={14} /> : null}{confirmation.kind === "navigate" ? "保存后切换" : confirmation.kind === "regenerate" ? "重新生成" : confirmation.kind === "refresh" ? "放弃并刷新" : "放弃修改"}</button></footer></section></div>}
+  </section>;
 }
 
-function formatMonthLabel(value: string) {
-  const [year, month] = value.split("-");
-  return `${year} 年 ${Number(month)} 月`;
-}
+function Meta({ label, value }: { label: string; value: number }) { return <div><dt>{label}</dt><dd>{value}</dd></div>; }
+function renderLine(line: string, index: number) { const text = line.trim(); if (text.startsWith("# ")) return <h3 key={index}>{text.slice(2)}</h3>; if (text.startsWith("## ")) return <h4 key={index}>{text.slice(3)}</h4>; if (text.startsWith("### ")) return <h5 key={index}>{text.slice(4)}</h5>; if (text.startsWith("- ")) return <p className="doc-list" key={index}>{text}</p>; if (!text) return <div className="doc-gap" key={index} />; return <p key={index}>{line}</p>; }
+function formatMonth(value: string) { const [year, month] = value.split("-"); return `${year}年 ${Number(month)}月`; }
+function formatTime(value: string) { try { return new Date(value).toLocaleString("zh-CN", { hour12: false }); } catch { return value; } }
+function cardStatus(value: string) { return ({ new: "未掌握", reviewing: "复习中", mastered: "已掌握" } as Record<string, string>)[value] || value; }

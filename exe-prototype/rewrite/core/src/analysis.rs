@@ -39,7 +39,7 @@ pub fn analyze_locally(request: &AnalysisRequest) -> ReportDetail {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-        .unwrap_or_else(|| format!("{} 代码分析 - {}", language, Utc::now().format("%Y-%m-%d %H:%M")));
+        .unwrap_or_else(|| local_report_title(request, &language));
 
     let metrics = ReportMetrics {
         total_lines,
@@ -73,6 +73,72 @@ pub fn analyze_locally(request: &AnalysisRequest) -> ReportDetail {
         files: Vec::new(),
         created_at: Utc::now().to_rfc3339(),
     }
+}
+
+pub fn local_report_title(request: &AnalysisRequest, language: &str) -> String {
+    let subject = request
+        .source_label
+        .as_deref()
+        .and_then(file_stem)
+        .or_else(|| extract_code_subject(&request.code))
+        .unwrap_or_else(|| language.to_string());
+    let mode = request
+        .mode_label
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| mode_title(request.mode.as_deref()));
+    compact_title(&format!("{subject} {mode}"))
+}
+
+fn file_stem(value: &str) -> Option<String> {
+    let file_name = value.rsplit(['/', '\\']).next()?.trim();
+    let stem = file_name.rsplit_once('.').map(|(stem, _)| stem).unwrap_or(file_name).trim();
+    (!stem.is_empty()).then(|| compact_title(stem))
+}
+
+fn extract_code_subject(code: &str) -> Option<String> {
+    const PREFIXES: &[&str] = &[
+        "async function ", "function ", "async fn ", "fn ", "def ", "class ", "struct ", "interface ",
+    ];
+    for line in code.lines().map(str::trim_start) {
+        for prefix in PREFIXES {
+            if let Some(rest) = line.strip_prefix(prefix) {
+                let name = rest
+                    .trim_start()
+                    .split(|character: char| !character.is_ascii_alphanumeric() && character != '_' && character != '$')
+                    .next()
+                    .unwrap_or("")
+                    .trim();
+                if !name.is_empty() {
+                    return Some(compact_title(name));
+                }
+            }
+        }
+    }
+    None
+}
+
+fn mode_title(mode: Option<&str>) -> String {
+    match mode.unwrap_or_default() {
+        "func_comment" => "函数解读".to_string(),
+        "risk_review" => "风险审查".to_string(),
+        "refactor" => "重构建议".to_string(),
+        "test_plan" => "测试建议".to_string(),
+        "script_review" => "脚本审查".to_string(),
+        "architecture" => "结构审查".to_string(),
+        _ => "代码审查".to_string(),
+    }
+}
+
+pub fn compact_title(value: &str) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut title = normalized.chars().take(60).collect::<String>();
+    if title.is_empty() {
+        title = "代码审查".to_string();
+    }
+    title
 }
 
 pub fn detect_language(code: &str) -> String {
@@ -240,7 +306,7 @@ fn profile_suggestions(profile: &str) -> Vec<String> {
     if profile.contains("重构") || profile.contains("结构") {
         return vec![
             "先标出职责边界，再小步抽取 helper 或模块，避免一次性大改。".to_string(),
-            "重构前后保留行为等价验证，必要时让 Agent 生成分步计划。".to_string(),
+            "重构前后保留行为等价验证，必要时生成确认式行动草稿。".to_string(),
         ];
     }
     if profile.contains("注释") || profile.contains("解释") {
@@ -251,8 +317,38 @@ fn profile_suggestions(profile: &str) -> Vec<String> {
     }
     vec![
         "按风险优先级处理输入边界、异常路径、敏感信息和高复杂度分支。".to_string(),
-        "把高价值结论继续流转到问题清单、知识卡片或 Agent 计划。".to_string(),
+        "把高价值结论继续流转到问题清单、知识卡片或行动草稿。".to_string(),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request(code: &str, source_label: Option<&str>) -> AnalysisRequest {
+        AnalysisRequest {
+            code: code.to_string(),
+            language: Some("TypeScript".to_string()),
+            title: None,
+            source_label: source_label.map(str::to_string),
+            mode_group: Some("function".to_string()),
+            mode: Some("risk_review".to_string()),
+            mode_label: Some("风险审查".to_string()),
+            use_llm: Some(false),
+        }
+    }
+
+    #[test]
+    fn local_report_title_prefers_imported_file_name() {
+        let request = request("function loadUserProfile() {}", Some(r"C:\\work\\auth-service.ts"));
+        assert_eq!(local_report_title(&request, "TypeScript"), "auth-service 风险审查");
+    }
+
+    #[test]
+    fn local_report_title_uses_code_subject_without_source_file() {
+        let request = request("async function loadUserProfile() {}", None);
+        assert_eq!(local_report_title(&request, "TypeScript"), "loadUserProfile 风险审查");
+    }
 }
 
 fn summarize(language: &str, total_lines: usize, complexity_score: usize, risk_count: usize) -> String {
@@ -309,7 +405,7 @@ fn render_local_report(
         .join("\n");
 
     format!(
-        "# 代码分析报告\n\n## 摘要\n{summary}\n\n## 分析模式\n- 当前模式：{profile}\n- 后续动作：可继续生成知识卡片、加入每日日志，或围绕本报告创建 Agent 计划。\n\n## 指标\n- 总行数：{}\n- 有效行：{}\n- 注释行：{}\n- 复杂度评分：{}\n\n## 风险点\n{risk_lines}\n\n## 改进建议\n{suggestion_lines}\n",
+        "# 代码分析报告\n\n## 摘要\n{summary}\n\n## 分析模式\n- 当前模式：{profile}\n- 后续动作：可继续生成知识卡片、加入每日日志，必要时围绕本报告创建行动草稿。\n\n## 指标\n- 总行数：{}\n- 有效行：{}\n- 注释行：{}\n- 复杂度评分：{}\n\n## 风险点\n{risk_lines}\n\n## 改进建议\n{suggestion_lines}\n",
         metrics.total_lines,
         metrics.non_empty_lines,
         metrics.comment_lines,

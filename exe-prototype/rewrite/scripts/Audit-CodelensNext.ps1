@@ -4,6 +4,7 @@ param(
     [double]$MinFreeMemoryGB = 2,
     [switch]$SkipReleaseBuild,
     [switch]$SkipVisualSmoke,
+    [switch]$SkipInteractionSmoke,
     [switch]$SkipLaunchSmoke
 )
 
@@ -123,6 +124,18 @@ try {
     Pop-Location
 }
 
+Write-Host "Running frontend scale audit..." -ForegroundColor Cyan
+Invoke-CheckedCommand -FilePath powershell -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "Test-FrontendScaleAudit.ps1"))
+
+if (-not $SkipInteractionSmoke) {
+    Write-Host "Running frontend interaction smoke test..." -ForegroundColor Cyan
+    $interactionSmokeScript = Join-Path $ScriptDir "Test-FrontendInteractionSmoke.ps1"
+    if (-not (Test-Path $interactionSmokeScript)) {
+        throw "Frontend interaction smoke script was not found: $interactionSmokeScript"
+    }
+    Invoke-CheckedCommand -FilePath powershell -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $interactionSmokeScript, "-OutputDir", (Join-Path $OutputRoot "v14.15-route-audit"))
+}
+
 if (-not $SkipVisualSmoke) {
     Write-Host "Running frontend visual smoke test..." -ForegroundColor Cyan
     Invoke-CheckedCommand -FilePath powershell -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "Test-FrontendVisualSmoke.ps1"), "-SkipBuild", "-OutputDir", $OutputRoot, "-AllowNoScreenshot")
@@ -155,19 +168,23 @@ if (-not $SkipLaunchSmoke) {
         throw "The app is already running. Close it before launch smoke testing."
     }
 
-    $process = Start-Process -FilePath $exeItem.FullName -PassThru -WindowStyle Hidden
+    # A hidden GUI process has no closable main-window handle on Windows, so the
+    # smoke test must launch the real app window before exercising WM_CLOSE.
+    $process = Start-Process -FilePath $exeItem.FullName -PassThru
     Start-Sleep -Seconds 6
     $running = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
     if (-not $running) {
         throw "The app exited before the smoke test could close it."
     }
 
-    [void]$running.CloseMainWindow()
-    Start-Sleep -Seconds 4
-    $stillRunning = Get-Process -Id $process.Id -ErrorAction SilentlyContinue
-    if ($stillRunning) {
+    $closeAccepted = $running.CloseMainWindow()
+    if (-not $closeAccepted) {
         Stop-Process -Id $process.Id -Force
-        throw "The app did not close after CloseMainWindow; the smoke-test process was stopped."
+        throw "The app did not expose a closable main window; the smoke-test process was stopped."
+    }
+    if (-not $running.WaitForExit(6000)) {
+        Stop-Process -Id $process.Id -Force
+        throw "The app did not close within 6 seconds after CloseMainWindow; the smoke-test process was stopped."
     }
 }
 

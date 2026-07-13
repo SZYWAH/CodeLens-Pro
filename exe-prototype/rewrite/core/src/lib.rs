@@ -20,16 +20,17 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 pub use models::{
-    ActivityDay, ActivityEvent, ActivityGalaxyData, ActivityLink, ActivityNode, ActivitySummary,
-    AgentApplyRequest, AgentApplyResult, AgentFileOperation, AgentPlanRequest, AgentStep,
-    AgentTask, AnalysisRequest, AnalysisResponse, AppHealth, CardMaterial, ChatMessageItem,
-    ChatSessionDetail, ChatSessionSummary, ChatStreamRequest, CodeMap, CodeSymbol, DailyLog,
-    DailySummary, DiffAnalyzeRequest, FileDependency, Finding, LanguageStat, LearningCalendarItem,
-    LearningCard, LearningCardCandidate, LearningCardCreate, LearningCenterData, LlmTestResult,
-    ModelProfile, ModelProfileInput, ProductArchiveImportResult, ProductArchiveResult, ProjectAnalyzeRequest, ProjectFileInput,
-    ProjectGuide, ProjectGuideItem, ProjectImportResult, ReportDetail, ReportFile, ReportMetrics,
-    ReportSummary, Settings, SettingsUpdate,
-    TraceabilityCounts, TraceabilityLink, TraceabilityNode, TraceabilitySnapshot,
+    ActivityConstellationData, ActivityDay, ActivityEvent, ActivityGalaxyData, ActivityLink,
+    ActivityNode, ActivityStarItem, ActivityStarRoute, ActivitySummary, AgentApplyRequest,
+    AgentApplyResult, AgentFileOperation, AgentPlanRequest, AgentStep, AgentTask, AnalysisRequest,
+    AnalysisResponse, AppHealth, CardMaterial, ChatMessageItem, ChatSessionDetail,
+    ChatSessionSummary, ChatStreamRequest, CodeMap, CodeSymbol, DailyLog, DailySummary,
+    DiffAnalyzeRequest, FileDependency, Finding, LanguageStat, LearningCalendarItem, LearningCard,
+    LearningCardCandidate, LearningCardCreate, LearningCenterData, LlmTestResult, ModelProfile,
+    ModelProfileInput, ProductArchiveImportResult, ProductArchiveResult, ProjectAnalyzeRequest,
+    ProjectFileInput, ProjectGuide, ProjectGuideItem, ProjectImportResult, ReportDetail,
+    ReportFile, ReportMetrics, ReportSummary, Settings, SettingsUpdate, TraceabilityCounts,
+    TraceabilityLink, TraceabilityNode, TraceabilitySnapshot,
     WorkspaceBridgeFile, WorkspaceBridgeInboxApplyResult, WorkspaceBridgeInboxRequest,
     WorkspaceBridgeManifestResult, WorkspaceBridgeStatus, WorkspaceDetail, WorkspaceFile,
     WorkspaceFileHotspot, WorkspaceSummary,
@@ -162,16 +163,22 @@ impl CoreApp {
         let settings = self.settings()?;
         let api_key = storage::load_api_key(&self.database_path)?;
         let mut local_report = analysis::analyze_locally(&request);
+        let has_custom_title = request
+            .title
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
         let mut warnings = Vec::new();
+        let mut llm_report_ready = false;
 
         let should_try_llm = request.use_llm.unwrap_or(true) && settings.enable_llm;
         if should_try_llm {
-            match api_key {
+            match api_key.as_deref() {
                 Some(key) if !key.trim().is_empty() => {
-                    match llm::generate_report(&settings, &key, &request, &local_report).await {
+                    match llm::generate_report(&settings, key, &request, &local_report).await {
                         Ok(ai_report) => {
                             local_report.full_report = ai_report;
                             local_report.analysis_source = "llm".to_string();
+                            llm_report_ready = true;
                         }
                         Err(err) => {
                             self.log_event("llm", &format!("LLM failed, using local fallback: {err}"));
@@ -187,6 +194,19 @@ impl CoreApp {
                 }
             }
         }
+
+        if !has_custom_title && llm_report_ready {
+            if let Some(key) = api_key.as_deref().filter(|value| !value.trim().is_empty()) {
+                match llm::generate_report_title(&settings, key, &request, &local_report, &local_report.title).await {
+                    Ok(title) => local_report.title = title,
+                    Err(err) => {
+                        self.log_event("llm", &format!("report title failed, using local fallback: {err}"));
+                        warnings.push("报告正文已生成；自动命名失败，已使用本地语义标题。".to_string());
+                    }
+                }
+            }
+        }
+        local_report.title = storage::unique_report_title(&self.database_path, &local_report.title, None)?;
 
         storage::save_report(&self.database_path, &local_report)?;
         self.record_activity("report", "生成代码分析报告", &local_report.title, Some("report"), Some(&local_report.id));
@@ -344,6 +364,12 @@ impl CoreApp {
 
     pub fn get_report(&self, id: String) -> anyhow::Result<ReportDetail> {
         storage::get_report(&self.database_path, &id)
+    }
+
+    pub fn rename_report(&self, id: String, title: String) -> anyhow::Result<ReportDetail> {
+        let report = storage::rename_report(&self.database_path, &id, &title)?;
+        self.log_event("reports", &format!("report renamed id={id}"));
+        Ok(report)
     }
 
     pub fn delete_report(&self, id: String) -> anyhow::Result<()> {
@@ -650,7 +676,7 @@ impl CoreApp {
     pub fn create_agent_plan(&self, request: AgentPlanRequest) -> anyhow::Result<AgentTask> {
         let task = self.build_agent_task(request)?;
         storage::save_agent_task(&self.database_path, &task)?;
-        self.record_activity("agent", "生成 Agent 计划", &task.title, Some("agent_task"), Some(&task.id));
+        self.record_activity("agent", "生成行动草稿", &task.title, Some("agent_task"), Some(&task.id));
         Ok(task)
     }
 
@@ -670,7 +696,7 @@ impl CoreApp {
 
     pub fn apply_agent_plan(&self, request: AgentApplyRequest) -> anyhow::Result<AgentApplyResult> {
         if !request.confirm {
-            return Err(anyhow!("应用 Agent 计划前必须显式确认。"));
+            return Err(anyhow!("写入行动草稿前必须显式确认。"));
         }
         let mut task = storage::get_agent_task(&self.database_path, &request.task_id)?;
         let root = self.workspace_root_for_agent_task(&task)?;
@@ -712,20 +738,20 @@ impl CoreApp {
                         None,
                         Some(err.to_string()),
                     )?;
-                    messages.push(format!("{} 应用失败：{err}", operation.path));
+                    messages.push(format!("{} 写入失败：{err}", operation.path));
                 }
             }
         }
         let status = if applied_count == selected.len() { "applied" } else { "partial" };
         let summary = format!(
-            "已确认 {} 项操作，成功应用 {} 项。备份目录：{}",
+            "已确认 {} 项操作，成功写入 {} 项。备份目录：{}",
             selected.len(),
             applied_count,
             backup_dir.display()
         );
         storage::update_agent_task_status(&self.database_path, &task.id, status, &summary)?;
         task = storage::get_agent_task(&self.database_path, &task.id)?;
-        self.record_activity("agent", "应用 Agent 计划", &summary, Some("agent_task"), Some(&task.id));
+        self.record_activity("agent", "写入行动草稿", &summary, Some("agent_task"), Some(&task.id));
         Ok(AgentApplyResult {
             task,
             applied_count,
@@ -746,9 +772,9 @@ impl CoreApp {
             .iter()
             .find(|item| item.id == operation_id)
             .cloned()
-            .ok_or_else(|| anyhow!("未找到 Agent 文件操作：{operation_id}"))?;
+            .ok_or_else(|| anyhow!("未找到行动草稿文件操作：{operation_id}"))?;
         if operation.status != "applied" {
-            return Err(anyhow!("只有已应用的 Agent 文件操作可以回滚。"));
+            return Err(anyhow!("只有已写入的行动草稿文件操作可以回滚。"));
         }
         let target = safe_agent_target(&root, &operation.path)?;
         if let Some(backup_path) = operation.backup_path.as_deref().filter(|value| !value.trim().is_empty()) {
@@ -788,7 +814,7 @@ impl CoreApp {
         let summary = format!("已回滚文件操作：{}", operation.path);
         storage::update_agent_task_status(&self.database_path, &task.id, status, &summary)?;
         let next_task = storage::get_agent_task(&self.database_path, &task.id)?;
-        self.record_activity("agent", "回滚 Agent 操作", &summary, Some("agent_task"), Some(&task.id));
+        self.record_activity("agent", "回滚行动草稿操作", &summary, Some("agent_task"), Some(&task.id));
         Ok(next_task)
     }
 
@@ -860,7 +886,7 @@ impl CoreApp {
             heartbeat_at: now.clone(),
             updated_at: now,
             plugin_version: "local-tauri-bridge/1.0".to_string(),
-            message: "本地 Tauri workspace bridge 已就绪，后续可替换为 VS Code 插件心跳。".to_string(),
+            message: "本地 Tauri workspace bridge 已就绪，可作为高级外部工具清单入口。".to_string(),
         };
         storage::save_workspace_bridge_status(&self.database_path, &status)?;
         Ok(status)
@@ -933,11 +959,11 @@ impl CoreApp {
                 "read_only_scan": true,
                 "writes_user_project": false,
                 "agent_requires_confirmation": true,
-                "expected_consumer": "VS Code extension or local automation",
+                "expected_consumer": "external editor or local automation",
                 "notes": [
                     "该清单只导出路径、语言、行数、复杂度和风险计数，不导出源代码正文。",
-                    "外部工具可读取 selected_file_paths 作为 Agent 上下文入口。",
-                    "真正写入用户项目前仍应回到 CodeLens Pro Next 的 Agent 工作区确认。"
+                    "外部工具可读取 selected_file_paths 作为行动草稿上下文入口。",
+                    "真正写入用户项目前仍应回到 CodeLens Pro Next 的行动草稿页确认。"
                 ]
             }
         });
@@ -1203,6 +1229,10 @@ impl CoreApp {
         storage::get_activity_galaxy_data(&self.database_path)
     }
 
+    pub fn get_activity_constellation(&self, limit: Option<usize>) -> anyhow::Result<ActivityConstellationData> {
+        storage::get_activity_constellation(&self.database_path, limit)
+    }
+
     pub fn get_traceability_snapshot(
         &self,
         scope_kind: Option<String>,
@@ -1260,7 +1290,7 @@ impl CoreApp {
         fs::write(&output_path, render_agent_task_markdown(&task))
             .with_context(|| format!("failed to write agent export {}", output_path.display()))?;
         self.log_event("export", &format!("agent task exported to {}", output_path.display()));
-        self.record_activity("agent", "导出 Agent 计划", &task.title, Some("agent_task"), Some(&task.id));
+        self.record_activity("agent", "导出行动草稿", &task.title, Some("agent_task"), Some(&task.id));
         Ok(output_path.display().to_string())
     }
 
@@ -1550,7 +1580,7 @@ impl CoreApp {
             .or_else(|| workspace_id.clone())
             .unwrap_or_else(|| "general".to_string());
         let goal = normalized_optional(payload.goal)
-            .unwrap_or_else(|| "根据外部编辑器上下文生成确认式 Agent 改进计划".to_string());
+            .unwrap_or_else(|| "根据外部编辑器上下文生成确认式行动草稿".to_string());
         let selected_file_paths = payload
             .selected_file_paths
             .unwrap_or_default()
@@ -1627,7 +1657,7 @@ impl CoreApp {
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .unwrap_or("围绕当前上下文生成只读改进计划");
+            .unwrap_or("围绕当前上下文生成确认式行动草稿");
         let context_summary = self.agent_context_summary(&request)?;
         let selected_file_paths = request
             .selected_file_paths
@@ -1639,7 +1669,7 @@ impl CoreApp {
         let step_specs = vec![
             (
                 "确认目标与边界",
-                format!("先阅读上下文，确认本轮目标是：{goal}。当前 Agent 采用人工确认式执行，不自动修改业务代码。"),
+                format!("先阅读上下文，确认本轮目标是：{goal}。当前行动草稿采用人工确认式执行，不自动修改业务代码。"),
                 "如果目标过大，需要拆成更小的验证点，避免一次性改动不可控。",
                 "建议补丁：暂无。此步骤只输出检查清单。",
             ),
@@ -1681,7 +1711,7 @@ impl CoreApp {
         let operation_specs = vec![
             (
                 format!("{task_dir}/plan.md"),
-                "生成 Agent 执行计划",
+                "生成行动草稿计划",
                 "记录目标、上下文、候选文件、步骤拆解、风险和验证路线。",
                 render_agent_operation_markdown(goal, &context_summary, &selected_file_paths),
             ),
@@ -1694,7 +1724,7 @@ impl CoreApp {
             (
                 format!("{task_dir}/context.json"),
                 "生成上下文清单",
-                "保存本次 Agent 计划的上下文类型、上下文编号、候选文件和生成时间，方便后续追踪。",
+                "保存本次行动草稿的上下文类型、上下文编号、候选文件和生成时间，方便后续追踪。",
                 render_agent_context_manifest(&id, &request, goal, &context_summary, &selected_file_paths, &now)?,
             ),
         ];
@@ -1720,11 +1750,11 @@ impl CoreApp {
             id,
             context_kind: request.context_kind,
             context_id: request.context_id,
-            title: format!("Agent 计划：{goal}"),
-            summary: format!("这是一个确认式 Agent 计划，包含 {} 个步骤和 {} 个待确认文件操作。", steps.len(), operations.len()),
+            title: format!("行动草稿：{goal}"),
+            summary: format!("这是一个确认式行动草稿，包含 {} 个步骤和 {} 个待确认文件操作。", steps.len(), operations.len()),
             status: "planned".to_string(),
             selected_file_paths,
-            apply_summary: "等待用户逐项确认后应用。".to_string(),
+            apply_summary: "等待用户逐项确认后写入。".to_string(),
             created_at: now.clone(),
             updated_at: now,
             steps,
@@ -1753,7 +1783,7 @@ impl CoreApp {
                     .ok_or_else(|| anyhow!("报告没有关联工作区，无法安全应用文件操作。"))?;
                 Ok(PathBuf::from(storage::get_workspace(&self.database_path, &workspace_id)?.summary.root_path))
             }
-            _ => Err(anyhow!("当前 Agent 计划没有可应用的工作区上下文。")),
+            _ => Err(anyhow!("当前行动草稿没有可写入的工作区上下文。")),
         }
     }
 
@@ -1908,7 +1938,7 @@ impl CoreApp {
                 .ok()
                 .map(|task| {
                     format!(
-                        "Agent Task: {}\nStatus: {}\nSummary: {}\nSteps:\n{}\nOperations:\n{}",
+                        "Action Draft: {}\nStatus: {}\nSummary: {}\nSteps:\n{}\nOperations:\n{}",
                         task.title,
                         task.status,
                         task.summary,
@@ -2219,7 +2249,7 @@ fn safe_agent_target(root: &Path, operation_path: &str) -> anyhow::Result<PathBu
 
 fn render_agent_operation_markdown(goal: &str, context_summary: &str, selected_file_paths: &[String]) -> String {
     let files = if selected_file_paths.is_empty() {
-        "- 暂未选择候选文件，请在应用前人工确认上下文。".to_string()
+        "- 暂未选择候选文件，请在写入前人工确认上下文。".to_string()
     } else {
         selected_file_paths
             .iter()
@@ -2228,7 +2258,7 @@ fn render_agent_operation_markdown(goal: &str, context_summary: &str, selected_f
             .join("\n")
     };
     format!(
-        "# Agent 执行草稿\n\n## 目标\n{goal}\n\n## 上下文摘要\n{context_summary}\n\n## 候选文件\n{files}\n\n## 建议执行步骤\n1. 先阅读候选文件，确认问题是否可复现。\n2. 小步修改，避免一次性重构多个模块。\n3. 为核心路径补充成功和失败用例。\n4. 运行本地测试、前端构建和隔离检查。\n\n## 安全边界\n本文件由 CodeLens Pro Next v1.0 在用户确认后写入。真正修改业务文件前，请先复制本草稿中的步骤并人工确认影响范围。\n"
+        "# 行动执行草稿\n\n## 目标\n{goal}\n\n## 上下文摘要\n{context_summary}\n\n## 候选文件\n{files}\n\n## 建议执行步骤\n1. 先阅读候选文件，确认问题是否可复现。\n2. 小步修改，避免一次性重构多个模块。\n3. 为核心路径补充成功和失败用例。\n4. 运行本地测试、前端构建和隔离检查。\n\n## 安全边界\n本文件由 CodeLens Pro Next v1.0 在用户确认后写入。真正修改业务文件前，请先复制本草稿中的步骤并人工确认影响范围。\n"
     )
 }
 
@@ -2248,7 +2278,7 @@ fn render_agent_checklist_markdown(goal: &str, steps: &[AgentStep], selected_fil
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "# Agent 执行确认清单\n\n## 目标\n{goal}\n\n## 上下文确认\n{files}\n\n## 步骤确认\n{step_checks}\n\n## 应用前检查\n- [ ] 确认本任务不会越界修改无关文件。\n- [ ] 确认已经理解回滚方式和备份目录。\n- [ ] 确认需要运行的测试或构建命令。\n\n## 应用后验证\n- [ ] 运行相关测试或构建。\n- [ ] 检查页面中文文案和关键交互。\n- [ ] 将结论写入每日日志或知识卡片。\n\n## 回滚提示\n如果应用结果不符合预期，优先在 CodeLens Pro Next 的 Agent 操作中执行回滚；若备份文件存在，也可以人工恢复备份。\n"
+        "# 行动草稿确认清单\n\n## 目标\n{goal}\n\n## 上下文确认\n{files}\n\n## 步骤确认\n{step_checks}\n\n## 写入前检查\n- [ ] 确认本任务不会越界修改无关文件。\n- [ ] 确认已经理解回滚方式和备份目录。\n- [ ] 确认需要运行的测试或构建命令。\n\n## 写入后验证\n- [ ] 运行相关测试或构建。\n- [ ] 检查页面中文文案和关键交互。\n- [ ] 将结论写入每日日志或知识卡片。\n\n## 回滚提示\n如果写入结果不符合预期，优先在 CodeLens Pro Next 的行动草稿操作中执行回滚；若备份文件存在，也可以人工恢复备份。\n"
     )
 }
 
@@ -2375,7 +2405,7 @@ fn render_daily_log(summary: &DailySummary) -> String {
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "# {} 学习日志\n\n## 今日数据\n- 报告：{} 份\n- 对话消息：{} 条\n- 新增问题：{} 个\n- 知识卡片：{} 张\n- Agent 计划：{} 个\n- 活动记录：{} 条\n\n## 关键活动\n{}\n\n## 今日复盘\n今天的重点是把代码审查结果继续沉淀为可复用知识。建议从最高风险问题或最新报告中选择 1 个点做深入复习。\n\n## 明日建议\n- 复查未解决问题清单。\n- 从一张未掌握卡片开始复习。\n- 对一个复杂文件生成 Agent dry-run 计划，但不要直接改用户项目文件。\n",
+        "# {} 学习日志\n\n## 今日数据\n- 报告：{} 份\n- 对话消息：{} 条\n- 新增问题：{} 个\n- 知识卡片：{} 张\n- 行动草稿：{} 个\n- 活动记录：{} 条\n\n## 关键活动\n{}\n\n## 今日复盘\n今天的重点是把代码审查结果继续沉淀为可复用知识。建议从最高风险问题或最新报告中选择 1 个点做深入复习，并确认是否已经形成问题、卡片或日志记录。\n\n## 明日建议\n- 复查未解决问题清单。\n- 从一张未掌握卡片开始复习。\n- 必要时把复杂问题整理成确认式行动草稿；默认只写入 `.codelens-agent`。\n",
         summary.date,
         summary.report_count,
         summary.chat_message_count,
@@ -2549,7 +2579,7 @@ fn invalid_bridge_inbox_request(path: &Path, error: String) -> WorkspaceBridgeIn
 fn render_workspace_bridge_inbox_readme() -> &'static str {
     r#"# CodeLens Pro Next 桥接收件箱
 
-外部编辑器、VS Code 插件或本地脚本可以把 JSON 请求写入本目录，桌面端会在 Agent 工作区中读取这些请求，并由用户确认后生成 Agent 计划。
+外部编辑器或本地脚本可以把 JSON 请求写入本目录，桌面端会在行动草稿页的高级区域中读取这些请求，并由用户确认后生成行动草稿。
 
 ## 请求示例
 
@@ -2569,7 +2599,7 @@ fn render_workspace_bridge_inbox_readme() -> &'static str {
 
 ## 安全约定
 
-- 收件箱请求只会生成 Agent 计划，不会直接修改用户项目。
+- 收件箱请求只会生成行动草稿，不会直接修改用户项目。
 - `selected_file_paths` 最多取前 12 个文件作为上下文。
 - 处理后的请求会移动到 `storage/bridge/processed/`。
 - API Key、密钥和源码正文不应写入该 JSON。
@@ -2606,7 +2636,7 @@ fn render_workspace_bridge_readme(status: &WorkspaceBridgeStatus, generated_at: 
         .join("\n");
 
     format!(
-        "# CodeLens Pro Next 工作区桥接清单\n\n生成时间：{generated_at}\n\n## 工作区\n- 名称：{}\n- 路径：{}\n- 状态：{}\n- 桥接版本：{}\n- 最近心跳：{}\n- 最近同步：{}\n\n## 已选择的 Agent 上下文文件\n{}\n\n## 候选文件 Top 20\n{}\n\n## 给 VS Code 插件或外部工具的约定\n- `manifest.json` 是机器可读清单，可读取 `selected_file_paths` 作为 Agent 上下文入口。\n- 最新清单会同步到 `storage/bridge/current/manifest.json`，插件可以固定读取这个路径。\n- 该清单只包含路径、语言、行数、复杂度和风险计数，不包含源码正文。\n- 外部工具可以根据路径打开真实项目文件，但写入前应回到 CodeLens Pro Next 的 Agent 工作区做人工确认。\n- 当前桌面端不会主动修改导入项目，除非用户在 Agent 工作区勾选并确认文件操作。\n",
+        "# CodeLens Pro Next 工作区桥接清单\n\n生成时间：{generated_at}\n\n## 工作区\n- 名称：{}\n- 路径：{}\n- 状态：{}\n- 桥接版本：{}\n- 最近心跳：{}\n- 最近同步：{}\n\n## 已选择的行动草稿上下文文件\n{}\n\n## 候选文件 Top 20\n{}\n\n## 给外部编辑器或本地脚本的约定\n- `manifest.json` 是机器可读清单，可读取 `selected_file_paths` 作为行动草稿上下文入口。\n- 最新清单会同步到 `storage/bridge/current/manifest.json`，外部工具可以固定读取这个路径。\n- 该清单只包含路径、语言、行数、复杂度和风险计数，不包含源码正文。\n- 外部工具可以根据路径打开真实项目文件，但写入前应回到 CodeLens Pro Next 的行动草稿页做人工确认。\n- 当前桌面端不会主动修改导入项目，除非用户在行动草稿页勾选并确认文件操作。\n",
         status.workspace_name,
         status.workspace_root,
         status.status,
@@ -2620,6 +2650,54 @@ fn render_workspace_bridge_readme(status: &WorkspaceBridgeStatus, generated_at: 
 
 fn render_product_archive_index(manifest: &serde_json::Value, generated_at: &str) -> String {
     let counts = &manifest["counts"];
+    let latest_report = manifest["reports"]
+        .as_array()
+        .and_then(|items| items.first())
+        .map(|item| {
+            format!(
+                "{}｜{}｜{}",
+                item["title"].as_str().unwrap_or("未命名报告"),
+                item["report_type"].as_str().unwrap_or("报告"),
+                item["created_at"].as_str().unwrap_or("")
+            )
+        })
+        .unwrap_or_else(|| "暂无报告".to_string());
+    let latest_workspace = manifest["workspaces"]
+        .as_array()
+        .and_then(|items| items.first())
+        .map(|item| {
+            let summary = &item["summary"];
+            format!(
+                "{}｜{} 个文件｜{}",
+                summary["name"].as_str().unwrap_or("未命名工作区"),
+                summary["file_count"].as_u64().unwrap_or(0),
+                summary["root_path"].as_str().unwrap_or("")
+            )
+        })
+        .unwrap_or_else(|| "暂无工作区".to_string());
+    let unresolved_findings = manifest["findings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            let status = item["status"].as_str().unwrap_or("open");
+            status != "resolved" && status != "ignored"
+        })
+        .count();
+    let pending_action_drafts = manifest["agent_tasks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            let status = item["status"].as_str().unwrap_or("planned");
+            status != "applied" && status != "rolled_back"
+        })
+        .count();
+    let latest_log = manifest["daily_logs"]
+        .as_array()
+        .and_then(|items| items.first())
+        .map(|item| format!("{}｜{}", item["date"].as_str().unwrap_or(""), item["title"].as_str().unwrap_or("未命名日志")))
+        .unwrap_or_else(|| "暂无每日日志".to_string());
     let reports = manifest["reports"]
         .as_array()
         .into_iter()
@@ -2668,7 +2746,7 @@ fn render_product_archive_index(manifest: &serde_json::Value, generated_at: &str
         .collect::<Vec<_>>()
         .join("\n");
     format!(
-        "# CodeLens Pro Next 本地产品档案\n\n生成时间：{generated_at}\n\n## 数据总览\n- 工作区：{}\n- 报告：{}\n- 问题：{}\n- 知识卡片：{}\n- AI 对话：{}\n- 每日日志：{}\n- Agent 计划：{}\n- 活动记录：{}\n\n## 最近报告\n{}\n\n## 工作区\n{}\n\n## 闭环缺口\n{}\n\n## 下一步动作\n{}\n\n## 文件说明\n- `manifest.json`：完整结构化数据，未包含 API Key 明文。\n- `index.md`：当前人工可读摘要。\n",
+        "# CodeLens Pro Next 本地产品档案\n\n生成时间：{generated_at}\n\n## 数据总览\n- 工作区：{}\n- 报告：{}\n- 问题：{}\n- 知识卡片：{}\n- AI 对话：{}\n- 每日日志：{}\n- 行动草稿：{}\n- 活动记录：{}\n\n## 主线闭环状态\n- 最近工作区：{}\n- 最新报告：{}\n- 未解决问题：{} 个\n- 知识卡片：{} 张\n- 最新日志：{}\n- 待确认行动草稿：{} 个\n\n## 最近报告\n{}\n\n## 工作区\n{}\n\n## 闭环缺口\n{}\n\n## 下一步动作\n{}\n\n## 文件说明\n- `manifest.json`：完整结构化数据，未包含 API Key 明文。\n- `index.md`：当前人工可读摘要。\n",
         counts["workspaces"].as_u64().unwrap_or(0),
         counts["reports"].as_u64().unwrap_or(0),
         counts["findings"].as_u64().unwrap_or(0),
@@ -2677,6 +2755,12 @@ fn render_product_archive_index(manifest: &serde_json::Value, generated_at: &str
         counts["daily_logs"].as_u64().unwrap_or(0),
         counts["agent_tasks"].as_u64().unwrap_or(0),
         counts["activity_events"].as_u64().unwrap_or(0),
+        latest_workspace,
+        latest_report,
+        unresolved_findings,
+        counts["cards"].as_u64().unwrap_or(0),
+        latest_log,
+        pending_action_drafts,
         if reports.is_empty() { "- 暂无报告".to_string() } else { reports },
         if workspaces.is_empty() { "- 暂无工作区".to_string() } else { workspaces },
         if gaps.is_empty() { "- 暂无明显缺口".to_string() } else { gaps },
@@ -2752,7 +2836,7 @@ fn render_agent_task_markdown(task: &AgentTask) -> String {
         .iter()
         .map(|operation| {
             format!(
-                "### {}\n\n- 路径：`{}`\n- 类型：{}\n- 状态：{}\n- 已确认：{}\n- 备份：{}\n- 应用时间：{}\n- 错误：{}\n\n{}\n\n```text\n{}\n```",
+                "### {}\n\n- 路径：`{}`\n- 类型：{}\n- 状态：{}\n- 已确认：{}\n- 备份：{}\n- 写入时间：{}\n- 错误：{}\n\n{}\n\n```text\n{}\n```",
                 operation.title,
                 operation.path,
                 operation.operation,
@@ -2769,7 +2853,7 @@ fn render_agent_task_markdown(task: &AgentTask) -> String {
         .join("\n\n");
 
     format!(
-        "# {}\n\n- 上下文类型：{}\n- 上下文 ID：{}\n- 状态：{}\n- 创建时间：{}\n- 更新时间：{}\n\n## 摘要\n{}\n\n## 应用结果\n{}\n\n## 上下文文件\n{}\n\n## 执行步骤\n{}\n\n## 待确认文件操作\n{}\n\n## 人工检查清单\n- 确认上下文文件确实覆盖本次问题范围。\n- 确认每个文件操作只写入预期路径，且没有越权路径。\n- 应用后检查备份路径和错误信息。\n- 真正修改业务代码前，先运行对应测试、构建和隔离检查。\n",
+        "# {}\n\n- 上下文类型：{}\n- 上下文 ID：{}\n- 状态：{}\n- 创建时间：{}\n- 更新时间：{}\n\n## 摘要\n{}\n\n## 写入结果\n{}\n\n## 上下文文件\n{}\n\n## 执行步骤\n{}\n\n## 待确认文件操作\n{}\n\n## 人工检查清单\n- 确认上下文文件确实覆盖本次问题范围。\n- 确认每个文件操作只写入预期路径，且没有越权路径。\n- 写入后检查备份路径和错误信息。\n- 真正修改业务代码前，先运行对应测试、构建和隔离检查。\n",
         task.title,
         task.context_kind,
         task.context_id,
@@ -2777,7 +2861,7 @@ fn render_agent_task_markdown(task: &AgentTask) -> String {
         task.created_at,
         task.updated_at,
         task.summary,
-        if task.apply_summary.is_empty() { "尚未应用任何操作。".to_string() } else { task.apply_summary.clone() },
+        if task.apply_summary.is_empty() { "尚未写入任何操作。".to_string() } else { task.apply_summary.clone() },
         if selected_files.is_empty() { "- 暂无上下文文件".to_string() } else { selected_files },
         if steps.is_empty() { "暂无步骤。".to_string() } else { steps },
         if operations.is_empty() { "暂无文件操作。".to_string() } else { operations }
@@ -2931,6 +3015,7 @@ mod tests {
             code: "function sample() { return 1; }".to_string(),
             language: Some("JavaScript".to_string()),
             title: Some("样例报告".to_string()),
+            source_label: None,
             mode_group: Some("function".to_string()),
             mode: Some("risk_review".to_string()),
             mode_label: Some("风险审查".to_string()),
@@ -2944,6 +3029,46 @@ mod tests {
         let html_path = app.export_report_html(report.id.clone()).expect("html export");
         assert!(fs::read_to_string(md_path).unwrap().contains("# 样例报告"));
         assert!(fs::read_to_string(html_path).unwrap().contains("<h1>样例报告</h1>"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn renames_reports_with_persistence_and_unique_suffix() {
+        let root = test_root();
+        let app = CoreApp::initialize(&root).expect("core app initializes");
+        let first = analysis::analyze_locally(&AnalysisRequest {
+            code: "function first() { return 1; }".to_string(),
+            language: Some("JavaScript".to_string()),
+            title: Some("第一份报告".to_string()),
+            source_label: None,
+            mode_group: Some("function".to_string()),
+            mode: Some("risk_review".to_string()),
+            mode_label: Some("风险审查".to_string()),
+            use_llm: Some(false),
+        });
+        let second = analysis::analyze_locally(&AnalysisRequest {
+            code: "function second() { return 2; }".to_string(),
+            language: Some("JavaScript".to_string()),
+            title: Some("第二份报告".to_string()),
+            source_label: None,
+            mode_group: Some("function".to_string()),
+            mode: Some("risk_review".to_string()),
+            mode_label: Some("风险审查".to_string()),
+            use_llm: Some(false),
+        });
+        storage::save_report(&app.database_path, &first).expect("save first report");
+        storage::save_report(&app.database_path, &second).expect("save second report");
+
+        let renamed = app
+            .rename_report(first.id.clone(), "登录风险审查".to_string())
+            .expect("rename first report");
+        assert_eq!(renamed.title, "登录风险审查");
+        assert_eq!(app.get_report(first.id).expect("reload first report").title, "登录风险审查");
+
+        let duplicate = app
+            .rename_report(second.id, "登录风险审查".to_string())
+            .expect("rename second report");
+        assert_eq!(duplicate.title, "登录风险审查（2）");
         fs::remove_dir_all(root).ok();
     }
 
@@ -2984,6 +3109,81 @@ mod tests {
         storage::save_chat_message(&app.database_path, &session_id, "user", "hello").unwrap();
         let session = app.get_chat_session(session_id).expect("load session");
         assert_eq!(session.messages.len(), 1);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn deleting_report_clears_owned_artifacts_and_preserves_follow_up_records() {
+        let root = test_root();
+        let app = CoreApp::initialize(&root).expect("core app initializes");
+        let report = analysis::analyze_locally(&AnalysisRequest {
+            code: "function eraseReport() { return 1; }".to_string(),
+            language: Some("TypeScript".to_string()),
+            title: Some("删除关联测试".to_string()),
+            source_label: None,
+            mode_group: Some("function".to_string()),
+            mode: Some("risk_review".to_string()),
+            mode_label: Some("风险审查".to_string()),
+            use_llm: Some(false),
+        });
+        storage::save_report(&app.database_path, &report).expect("save report");
+        let summaries = app.list_reports_filtered(None, None).expect("list reports");
+        assert_eq!(summaries[0].review_focus.as_deref(), Some("风险审查"));
+
+        let candidate_id = Uuid::new_v4().to_string();
+        let connection = rusqlite::Connection::open(&app.database_path).expect("open database");
+        connection.execute(
+            r#"
+            INSERT INTO learning_card_candidates (
+                id, source_kind, source_id, workspace_id, report_id, finding_id, title, content,
+                tags_json, difficulty, status, dedupe_key, created_at
+            )
+            VALUES (?1, 'report', ?2, NULL, ?2, NULL, '待审核候选', '候选内容', '[]', 'medium', 'pending', ?3, ?4)
+            "#,
+            rusqlite::params![candidate_id, &report.id, Uuid::new_v4().to_string(), Utc::now().to_rfc3339()],
+        ).expect("save candidate");
+        drop(connection);
+
+        let chat_id = storage::upsert_chat_session(
+            &app.database_path,
+            None,
+            "报告追问".to_string(),
+            Some(report.id.clone()),
+        ).expect("save chat");
+        let task = AgentTask {
+            id: Uuid::new_v4().to_string(),
+            context_kind: "report".to_string(),
+            context_id: report.id.clone(),
+            title: "报告行动草稿".to_string(),
+            summary: "保留草稿但解除报告入口。".to_string(),
+            status: "planned".to_string(),
+            selected_file_paths: Vec::new(),
+            apply_summary: String::new(),
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: Utc::now().to_rfc3339(),
+            steps: Vec::new(),
+            operations: Vec::new(),
+        };
+        storage::save_agent_task(&app.database_path, &task).expect("save agent task");
+        storage::record_activity_event(
+            &app.database_path,
+            "report_created",
+            "删除关联测试",
+            "本地分析报告",
+            Some("report"),
+            Some(&report.id),
+        ).expect("save report activity");
+
+        app.delete_report(report.id.clone()).expect("delete report");
+        assert!(app.get_report(report.id.clone()).is_err());
+        assert_eq!(app.get_chat_session(chat_id).expect("load chat").context_report_id, None);
+        assert_eq!(storage::get_agent_task(&app.database_path, &task.id).expect("load task").context_kind, "deleted_report");
+
+        let connection = rusqlite::Connection::open(&app.database_path).expect("open database after delete");
+        let candidate_count: i64 = connection.query_row("SELECT COUNT(*) FROM learning_card_candidates WHERE report_id = ?1", rusqlite::params![&report.id], |row| row.get(0)).expect("candidate count");
+        let activity_count: i64 = connection.query_row("SELECT COUNT(*) FROM activity_events WHERE entity_kind = 'report' AND entity_id = ?1", rusqlite::params![&report.id], |row| row.get(0)).expect("activity count");
+        assert_eq!(candidate_count, 0);
+        assert_eq!(activity_count, 0);
         fs::remove_dir_all(root).ok();
     }
 
@@ -3176,7 +3376,7 @@ mod tests {
             .export_agent_task_markdown(rolled_back.id.clone())
             .expect("agent export");
         let exported_agent_text = fs::read_to_string(exported_agent).expect("agent export text");
-        assert!(exported_agent_text.contains("Agent 计划"));
+        assert!(exported_agent_text.contains("行动草稿"));
         assert!(exported_agent_text.contains("人工检查清单"));
 
         let request = ProjectAnalyzeRequest {
