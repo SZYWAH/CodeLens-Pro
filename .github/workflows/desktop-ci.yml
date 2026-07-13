@@ -30,7 +30,6 @@ jobs:
       CARGO_HOME: ${{ github.workspace }}\exe-prototype\.cache\cargo-home-next
       CARGO_TARGET_DIR: ${{ github.workspace }}\exe-prototype\.cache\cargo-target-next
       npm_config_cache: ${{ github.workspace }}\exe-prototype\.cache\npm-next
-      CODELENS_TEST_ROOT: ${{ runner.temp }}\codelens-core-tests
 
     steps:
       - name: Checkout
@@ -65,6 +64,8 @@ jobs:
 
       - name: Run static, build, scale and Rust quick gates
         shell: pwsh
+        env:
+          CODELENS_TEST_ROOT: ${{ runner.temp }}\codelens-core-tests
         run: >-
           ./exe-prototype/rewrite/scripts/Audit-CodelensNext.ps1
           -SkipReleaseBuild
