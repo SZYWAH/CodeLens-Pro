@@ -1,6 +1,6 @@
 # CodeLens Pro Next
 
-CodeLens Pro Next 是 CodeLens Pro 的本地独立重写版，面向真实个人开发、项目审查、学习沉淀和确认式 Agent 辅助改进。
+CodeLens Pro Next 是 CodeLens Pro 的本地独立重写版，面向真实个人开发、项目审查、学习沉淀和确认式行动草稿。
 
 ## 架构
 
@@ -23,7 +23,7 @@ CodeLens Pro Next 是 CodeLens Pro 的本地独立重写版，面向真实个人
 - 历史报告
 - 代码对比
 - AI 对话
-- Agent 工作区，支持预览、确认、备份和结果追踪
+- 行动草稿，支持预览、确认、备份和结果追踪
 - 知识卡片
 - 每日学习中心
 - 活动星图

@@ -1,5 +1,13 @@
-import { CheckCircle2, ChevronLeft, ChevronRight, RefreshCw, Search, TriangleAlert, X } from "lucide-react";
-import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { CheckCircle2, ChevronLeft, ChevronRight, Menu, Moon, RefreshCw, Search, Sun, TriangleAlert, X } from "lucide-react";
+import { createContext, ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
+
+const ProductToolbarTargetContext = createContext<HTMLDivElement | null>(null);
+
+export function ProductToolbar({ children }: { children: ReactNode }) {
+  const target = useContext(ProductToolbarTargetContext);
+  return target ? createPortal(children, target) : null;
+}
 
 export type ProductNavItem = {
   key: string;
@@ -37,7 +45,11 @@ export function ProductShell({
   version,
   message,
   error,
+  onDismissMessage,
+  onDismissError,
   onRefresh,
+  theme,
+  onToggleTheme,
   children
 }: {
   statusText: string;
@@ -50,18 +62,24 @@ export function ProductShell({
   version: string;
   message?: string | null;
   error?: string | null;
+  onDismissMessage?: () => void;
+  onDismissError?: () => void;
   onRefresh: () => void;
+  theme: "dark" | "light";
+  onToggleTheme: () => void;
   children: ReactNode;
 }) {
-  const [collapsed, setCollapsed] = useState(false);
+  const [collapsed, setCollapsed] = useState(() => {
+    if (typeof window === "undefined") return true;
+    return window.localStorage.getItem("codelens.shell.expanded") !== "true";
+  });
+  const [mobileOpen, setMobileOpen] = useState(false);
   const [commandQuery, setCommandQuery] = useState("");
   const [commandOpen, setCommandOpen] = useState(false);
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
+  const [toolbarTarget, setToolbarTarget] = useState<HTMLDivElement | null>(null);
   const commandInputRef = useRef<HTMLInputElement | null>(null);
   const displayVersion = version.startsWith("v") ? version : `v${version}`;
-  const activeGroupIndex = Math.max(0, navGroups.findIndex((group) => group.items.some((item) => item.active)));
-  const activeGroup = navGroups[activeGroupIndex] || navGroups[0];
-  const activeItem = activeGroup?.items.find((item) => item.active);
   const commandItems = useMemo(
     () => [
       ...navGroups.flatMap((group) => group.items.map((item) => ({ ...item, group: group.title, keywords: [item.label, item.description || "", group.title] }))),
@@ -107,6 +125,10 @@ export function ProductShell({
   }, [commandQuery]);
 
   useEffect(() => {
+    window.localStorage.setItem("codelens.shell.expanded", String(!collapsed));
+  }, [collapsed]);
+
+  useEffect(() => {
     if (selectedCommandIndex >= commandResults.length) {
       setSelectedCommandIndex(Math.max(0, commandResults.length - 1));
     }
@@ -119,57 +141,92 @@ export function ProductShell({
     setSelectedCommandIndex(0);
   }
 
+  function runNavItem(item: ProductNavItem) {
+    item.onClick();
+    setMobileOpen(false);
+  }
+
+  const shellClassName = [
+    "product-shell",
+    collapsed ? "is-collapsed" : "is-expanded",
+    mobileOpen ? "is-mobile-open" : ""
+  ].filter(Boolean).join(" ");
+  const showLabels = !collapsed || mobileOpen;
+  const runtimeLabel = databaseOk ? "本地就绪" : "数据库异常";
+  const runtimeDetail = `${llmConfigured ? "LLM 增强" : "本地规则"} · ${displayVersion}`;
+
   return (
-    <main className={collapsed ? "product-shell is-collapsed" : "product-shell"}>
+    <main className={shellClassName}>
+      <div className="product-shell-entry-transition" aria-hidden="true" />
       <aside className="product-sidebar">
         <section className="product-brand">
-          <div className="product-brand-mark">CL</div>
-          {!collapsed && (
+          <div className="product-brand-mark" title="CodeLens Pro Next">CL</div>
+          {showLabels && (
             <div>
               <h1>CodeLens Pro Next</h1>
-              <p>{statusText}</p>
+              <p>本地代码审查</p>
             </div>
           )}
           <button className="sidebar-toggle" type="button" onClick={() => setCollapsed((value) => !value)} title={collapsed ? "展开侧边栏" : "收起侧边栏"}>
             {collapsed ? <ChevronRight size={17} /> : <ChevronLeft size={17} />}
+          </button>
+          <button className="product-mobile-close" type="button" onClick={() => setMobileOpen(false)} title="关闭导航">
+            <X size={17} />
           </button>
         </section>
 
         <nav className="product-nav">
           {navGroups.map((group) => (
             <section className="product-nav-group" key={group.title}>
-              {!collapsed && <span>{group.title}</span>}
+              {showLabels && <span>{group.title}</span>}
               {group.items.map((item) => (
-                <button className={item.active ? "product-nav-item active" : "product-nav-item"} key={item.key} onClick={item.onClick} title={collapsed ? item.label : item.description || item.label}>
+                <button
+                  aria-current={item.active ? "page" : undefined}
+                  className={item.active ? "product-nav-item active" : "product-nav-item"}
+                  key={item.key}
+                  onClick={() => runNavItem(item)}
+                  title={item.description ? `${item.label}：${item.description}` : item.label}
+                  type="button"
+                >
                   {item.icon}
-                  {!collapsed && (
-                    <strong>
-                      {item.label}
-                      {item.description && <small>{item.description}</small>}
-                    </strong>
-                  )}
+                  {showLabels && <strong>{item.label}</strong>}
                 </button>
               ))}
             </section>
           ))}
         </nav>
 
-        <section className="product-status-dock">
-          <StatusBadge ok={databaseOk} text={databaseOk ? "SQLite 正常" : "数据库异常"} />
-          <StatusBadge ok={llmConfigured} text={llmConfigured ? "LLM 已配置" : "本地分析"} />
-          <StatusBadge ok text={displayVersion} />
+        <section className="product-runtime" title={`${statusText} · ${runtimeDetail}`}>
+          <span className={databaseOk ? "product-runtime-dot ok" : "product-runtime-dot warning"} />
+          {showLabels && (
+            <div>
+              <strong>{runtimeLabel}</strong>
+              <small>{runtimeDetail}</small>
+            </div>
+          )}
         </section>
       </aside>
+      <button className="product-sidebar-scrim" type="button" onClick={() => setMobileOpen(false)} aria-label="关闭导航" />
 
       <section className="product-main">
         <header className="product-topbar">
-          <div>
-            <span className="product-eyebrow">本地桌面工具</span>
+          <button className="product-mobile-menu" type="button" onClick={() => setMobileOpen(true)} title="打开导航">
+            <Menu size={18} />
+          </button>
+          <div className="product-page-heading">
             <h2>{activeTitle}</h2>
             <p>{activeSubtitle}</p>
           </div>
           <div className="product-command-search-next">
-            <Search size={17} />
+            <button
+              className="product-command-search-trigger-next"
+              type="button"
+              onClick={() => commandInputRef.current?.focus()}
+              title="搜索页面和内容"
+              aria-label="搜索页面和内容"
+            >
+              <Search size={17} />
+            </button>
             <input
               ref={commandInputRef}
               value={commandQuery}
@@ -245,60 +302,47 @@ export function ProductShell({
               </div>
             )}
           </div>
+          <div className="product-page-toolbar-next" ref={setToolbarTarget} />
           <div className="product-topbar-actions">
-            <div className="product-topbar-state">
-              <StatusBadge ok={databaseOk} text={databaseOk ? "SQLite 正常" : "数据库异常"} />
-              <StatusBadge ok={llmConfigured} text={llmConfigured ? "LLM 增强" : "本地规则"} />
-              <StatusBadge ok text={displayVersion} />
-            </div>
-            <button className="icon-button refresh-button" onClick={onRefresh} title="刷新当前数据">
+            <button
+              className="icon-button theme-toggle-button"
+              onClick={onToggleTheme}
+              title={theme === "dark" ? "切换到亮色主题" : "切换到暗色主题"}
+              aria-label={theme === "dark" ? "切换到亮色主题" : "切换到暗色主题"}
+              type="button"
+            >
+              {theme === "dark" ? <Sun size={17} /> : <Moon size={17} />}
+            </button>
+            <button className="icon-button refresh-button" onClick={onRefresh} title="刷新当前数据" type="button">
               <RefreshCw size={18} />
             </button>
           </div>
         </header>
 
-        <section className="product-command-strip-next">
-          <div className="product-stage-summary-next">
-            <span>当前阶段</span>
-            <strong>{activeGroup?.title || "工作主线"}</strong>
-            <small>{activeItem?.label || activeTitle}</small>
-          </div>
-          <div className="product-stage-list-next">
-            {navGroups.map((group, index) => (
-              <button
-                className={index === activeGroupIndex ? "active" : index < activeGroupIndex ? "done" : ""}
-                type="button"
-                key={group.title}
-                onClick={group.items[0]?.onClick}
-              >
-                <span>{index + 1}</span>
-                <strong>{group.title}</strong>
-                <small>{group.items.length} 个入口</small>
-              </button>
-            ))}
-          </div>
-          <div className="product-quick-entry-next">
-            <span>阶段入口</span>
-            <div>
-              {(activeGroup?.items || []).map((item) => (
-                <button className={item.active ? "active" : ""} key={item.key} type="button" onClick={item.onClick}>
-                  {item.icon}
-                  {item.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        </section>
+        {(message || error) && typeof document !== "undefined" && createPortal(
+          <div className="product-notices" aria-live="polite">
+            {message && (
+              <div className="notice success" role="status">
+                <CheckCircle2 size={18} />
+                <span>{message}</span>
+                {onDismissMessage && <button aria-label="关闭成功提示" onClick={onDismissMessage} title="关闭提示" type="button"><X size={15} /></button>}
+              </div>
+            )}
+            {error && (
+              <div className="notice error" role="alert">
+                <TriangleAlert size={18} />
+                <span>{error}</span>
+                {onDismissError && <button aria-label="关闭错误提示" onClick={onDismissError} title="关闭提示" type="button"><X size={15} /></button>}
+              </div>
+            )}
+          </div>,
+          document.body
+        )}
 
-        {message && <div className="notice success"><CheckCircle2 size={18} />{message}</div>}
-        {error && <div className="notice error"><TriangleAlert size={18} />{error}</div>}
-
-        <div className="product-page">{children}</div>
+        <ProductToolbarTargetContext.Provider value={toolbarTarget}>
+          <div className="product-page">{children}</div>
+        </ProductToolbarTargetContext.Provider>
       </section>
     </main>
   );
-}
-
-function StatusBadge({ ok, text }: { ok: boolean; text: string }) {
-  return <span className={ok ? "product-status ok" : "product-status muted"}>{text}</span>;
 }

@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ActivityEvent,
+  ActivityConstellationData,
   ActivityGalaxyData,
   ActivitySummary,
   AgentApplyRequest,
@@ -316,6 +317,10 @@ export async function getActivityGalaxyData(): Promise<ActivityGalaxyData> {
   return call("get_activity_galaxy_data");
 }
 
+export async function getActivityConstellation(limit = 300): Promise<ActivityConstellationData> {
+  return call("get_activity_constellation", { limit });
+}
+
 export async function getTraceabilitySnapshot(scopeKind?: string, scopeId?: string): Promise<TraceabilitySnapshot> {
   return call("get_traceability_snapshot", {
     scopeKind: scopeKind || null,
@@ -332,6 +337,10 @@ export async function listReports(query?: string, reportType?: string): Promise<
 
 export async function getReport(id: string): Promise<ReportDetail> {
   return call("get_report", { id });
+}
+
+export async function renameReport(id: string, title: string): Promise<ReportDetail> {
+  return call("rename_report", { id, title });
 }
 
 export async function deleteReport(id: string): Promise<void> {

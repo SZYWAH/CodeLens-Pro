@@ -9,14 +9,14 @@ use uuid::Uuid;
 
 use crate::workspace::{self, WorkspaceScan};
 use crate::models::{
-    ActivityDay, ActivityEvent, ActivityGalaxyData, ActivityLink, ActivityNode, ActivitySummary,
-    AgentFileOperation, AgentStep, AgentTask, CardMaterial, ChatMessageItem,
-    ChatSessionDetail, ChatSessionSummary, CodeMap, CodeSymbol, DailyLog, DailySummary,
-    FileDependency, Finding, LearningCalendarItem, LearningCard, LearningCardCandidate,
-    LearningCardCreate, ModelProfile, ModelProfileInput, ProjectGuide, ProjectGuideItem, ReportDetail,
-    ReportFile, ReportMetrics, ReportSummary, Settings, SettingsUpdate, TraceabilityCounts,
-    TraceabilityLink, TraceabilityNode, TraceabilitySnapshot, WorkspaceBridgeStatus,
-    WorkspaceDetail, WorkspaceFile, WorkspaceSummary,
+    ActivityConstellationData, ActivityDay, ActivityEvent, ActivityGalaxyData, ActivityLink,
+    ActivityNode, ActivityStarItem, ActivityStarRoute, ActivitySummary, AgentFileOperation,
+    AgentStep, AgentTask, CardMaterial, ChatMessageItem, ChatSessionDetail, ChatSessionSummary,
+    CodeMap, CodeSymbol, DailyLog, DailySummary, FileDependency, Finding, LearningCalendarItem,
+    LearningCard, LearningCardCandidate, LearningCardCreate, ModelProfile, ModelProfileInput,
+    ProjectGuide, ProjectGuideItem, ReportDetail, ReportFile, ReportMetrics, ReportSummary,
+    Settings, SettingsUpdate, TraceabilityCounts, TraceabilityLink, TraceabilityNode,
+    TraceabilitySnapshot, WorkspaceBridgeStatus, WorkspaceDetail, WorkspaceFile, WorkspaceSummary,
 };
 
 const SCHEMA_VERSION: i64 = 6;
@@ -544,7 +544,7 @@ pub fn list_reports_filtered(
     let mut sql = String::from(
         r#"
         SELECT id, title, language, summary, analysis_source, report_type, risk_level,
-               file_count, created_at, metrics_json
+               file_count, created_at, metrics_json, metadata_json
         FROM reports
         "#,
     );
@@ -602,9 +602,76 @@ pub fn get_report(path: &Path, id: &str) -> anyhow::Result<ReportDetail> {
     Ok(report)
 }
 
-pub fn delete_report(path: &Path, id: &str) -> anyhow::Result<()> {
+pub fn unique_report_title(path: &Path, requested: &str, current_id: Option<&str>) -> anyhow::Result<String> {
+    let base = requested.split_whitespace().collect::<Vec<_>>().join(" ");
+    if base.is_empty() {
+        return Err(anyhow!("报告标题不能为空。"));
+    }
+    let base = base.chars().take(60).collect::<String>();
     let connection = Connection::open(path)?;
-    connection.execute("DELETE FROM reports WHERE id = ?1", params![id])?;
+    let excluded_id = current_id.unwrap_or("");
+    let mut candidate = base.clone();
+    let mut counter = 2usize;
+    loop {
+        let exists = connection
+            .query_row(
+                "SELECT 1 FROM reports WHERE title = ?1 AND (?2 = '' OR id != ?2) LIMIT 1",
+                params![candidate, excluded_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !exists {
+            return Ok(candidate);
+        }
+        let suffix = format!("（{counter}）");
+        let max_len = 60usize.saturating_sub(suffix.chars().count());
+        candidate = format!("{}{}", base.chars().take(max_len).collect::<String>(), suffix);
+        counter += 1;
+    }
+}
+
+pub fn rename_report(path: &Path, id: &str, title: &str) -> anyhow::Result<ReportDetail> {
+    let next_title = unique_report_title(path, title, Some(id))?;
+    let connection = Connection::open(path)?;
+    let changed = connection.execute("UPDATE reports SET title = ?1 WHERE id = ?2", params![next_title, id])?;
+    if changed == 0 {
+        return Err(anyhow!("report not found: {id}"));
+    }
+    get_report(path, id)
+}
+
+pub fn delete_report(path: &Path, id: &str) -> anyhow::Result<()> {
+    let mut connection = Connection::open(path)?;
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
+    let tx = connection.transaction()?;
+    let exists = tx
+        .query_row("SELECT 1 FROM reports WHERE id = ?1", params![id], |_| Ok(()))
+        .optional()?
+        .is_some();
+    if !exists {
+        return Err(anyhow!("report not found: {id}"));
+    }
+
+    // Preserve user-authored follow-up data while removing report-owned artifacts and dead links.
+    tx.execute(
+        "DELETE FROM learning_card_candidates WHERE report_id = ?1 OR (source_kind = 'report' AND source_id = ?1)",
+        params![id],
+    )?;
+    tx.execute(
+        "UPDATE chat_sessions SET context_report_id = NULL WHERE context_report_id = ?1",
+        params![id],
+    )?;
+    tx.execute(
+        "UPDATE agent_tasks SET context_kind = 'deleted_report', updated_at = ?2 WHERE context_kind = 'report' AND context_id = ?1",
+        params![id, Utc::now().to_rfc3339()],
+    )?;
+    tx.execute(
+        "DELETE FROM activity_events WHERE entity_kind = 'report' AND entity_id = ?1",
+        params![id],
+    )?;
+    tx.execute("DELETE FROM reports WHERE id = ?1", params![id])?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -1505,7 +1572,7 @@ pub fn get_agent_task(path: &Path, id: &str) -> anyhow::Result<AgentTask> {
             row_to_agent_task_without_steps,
         )
         .optional()?
-        .ok_or_else(|| anyhow!("未找到 Agent 计划：{id}"))?;
+        .ok_or_else(|| anyhow!("未找到行动草稿：{id}"))?;
     task.steps = list_agent_steps_for_connection(&connection, id)?;
     task.operations = list_agent_operations_for_connection(&connection, id)?;
     Ok(task)
@@ -1856,7 +1923,7 @@ pub fn get_activity_galaxy_data(path: &Path) -> anyhow::Result<ActivityGalaxyDat
         ActivityNode { id: "findings".to_string(), label: "问题清单".to_string(), group: "review".to_string(), weight: summary.finding_count.max(1) },
         ActivityNode { id: "cards".to_string(), label: "知识卡片".to_string(), group: "learning".to_string(), weight: summary.card_count.max(1) },
         ActivityNode { id: "chats".to_string(), label: "AI 对话".to_string(), group: "ai".to_string(), weight: summary.chat_count.max(1) },
-        ActivityNode { id: "agent".to_string(), label: "Agent 计划".to_string(), group: "agent".to_string(), weight: summary.agent_task_count.max(1) },
+        ActivityNode { id: "agent".to_string(), label: "行动草稿".to_string(), group: "agent".to_string(), weight: summary.agent_task_count.max(1) },
     ];
     let connection = Connection::open(path)?;
     let daily_log_count = count_table(&connection, "daily_logs")?;
@@ -1896,6 +1963,102 @@ pub fn get_activity_galaxy_data(path: &Path) -> anyhow::Result<ActivityGalaxyDat
         });
     }
     Ok(ActivityGalaxyData { nodes, links })
+}
+
+pub fn get_activity_constellation(path: &Path, limit: Option<usize>) -> anyhow::Result<ActivityConstellationData> {
+    let connection = Connection::open(path)?;
+    let resolved_limit = limit.unwrap_or(300).clamp(1, 300);
+    let events = list_recent_events_for_connection(&connection, resolved_limit)?;
+    let code_line_count = total_workspace_lines(&connection)?;
+    let items = events
+        .into_iter()
+        .enumerate()
+        .map(|(index, event)| activity_star_from_event(event, index))
+        .collect();
+    Ok(ActivityConstellationData { items, code_line_count })
+}
+
+fn total_workspace_lines(connection: &Connection) -> anyhow::Result<usize> {
+    let total: i64 = connection.query_row(
+        "SELECT COALESCE(SUM(total_lines), 0) FROM workspaces",
+        [],
+        |row| row.get(0),
+    )?;
+    Ok(total.max(0) as usize)
+}
+
+fn activity_star_from_event(event: ActivityEvent, index: usize) -> ActivityStarItem {
+    let kind = activity_star_kind(&event);
+    let target_id = event.entity_id.clone().unwrap_or_else(|| event.id.clone());
+    let route = activity_star_route(&kind, &target_id);
+    ActivityStarItem {
+        id: galaxy_node_id_for_event(&event),
+        kind: kind.to_string(),
+        kind_label: activity_star_kind_label(kind).to_string(),
+        title: event.title,
+        subtitle: event.detail,
+        status: "active".to_string(),
+        target_id,
+        created_at: event.created_at,
+        route: Some(route),
+        weight: recent_activity_weight(index),
+    }
+}
+
+fn activity_star_kind(event: &ActivityEvent) -> &'static str {
+    let source = event.entity_kind.as_deref().unwrap_or(&event.event_type);
+    match source {
+        "workspace" => "workspace",
+        "report" | "product_archive" => "report",
+        "finding" => "finding",
+        "learning_card" | "card" | "card_candidate" | "card_material" => "card",
+        "daily_log" => "log",
+        "chat" | "chat_session" => "chat",
+        "agent" | "agent_task" => "agent",
+        _ => match event.event_type.as_str() {
+            "workspace" => "workspace",
+            "report" | "guide" | "export" | "import" => "report",
+            "finding" => "finding",
+            "card" | "card_candidate" => "card",
+            "daily_log" => "log",
+            "chat" => "chat",
+            "agent" => "agent",
+            _ => "activity",
+        },
+    }
+}
+
+fn activity_star_kind_label(kind: &str) -> &'static str {
+    match kind {
+        "workspace" => "工作区",
+        "report" => "报告",
+        "finding" => "问题",
+        "card" => "知识卡片",
+        "log" => "每日日志",
+        "chat" => "对话",
+        "agent" => "行动草稿",
+        _ => "活动",
+    }
+}
+
+fn activity_star_route(kind: &str, target_id: &str) -> ActivityStarRoute {
+    let page = match kind {
+        "workspace" => "projects",
+        "report" => "history",
+        "finding" => "findings",
+        "card" => "cards",
+        "log" => "logs",
+        "chat" => "chat",
+        "agent" => "agent",
+        _ => "galaxy",
+    };
+    ActivityStarRoute {
+        page: Some(page.to_string()),
+        target_id: Some(target_id.to_string()),
+        session_id: (kind == "chat").then(|| target_id.to_string()),
+        plan_id: (kind == "agent").then(|| target_id.to_string()),
+        context_type: Some(activity_star_kind_label(kind).to_string()),
+    }
 }
 
 fn galaxy_node_id_for_event(event: &ActivityEvent) -> String {
@@ -2130,15 +2293,15 @@ fn traceability_for_report(
         next_actions.push("点击“围绕报告对话”，让 AI 解释关键风险和修复顺序。".to_string());
     }
     if agents.is_empty() {
-        gaps.push("还没有为此报告生成可确认执行的 Agent 计划。".to_string());
-        next_actions.push("点击“生成 Agent 计划”，把报告转成可审核的行动草稿。".to_string());
+        gaps.push("还没有为此报告生成可确认的行动草稿。".to_string());
+        next_actions.push("点击“生成行动草稿”，把报告转成可审核的本地草稿。".to_string());
     }
     if daily_logs.is_empty() {
         gaps.push("报告尚未写入每日学习日志。".to_string());
         next_actions.push("点击“加入每日日志”，把审查结果沉淀到当天复盘。".to_string());
     }
     if gaps.is_empty() {
-        next_actions.push("这份报告已经串起主要闭环，下一步可复查未解决问题或应用 Agent 草稿。".to_string());
+        next_actions.push("这份报告已经串起主要闭环，下一步可复查未解决问题或写入行动草稿。".to_string());
     }
 
     Ok(TraceabilitySnapshot {
@@ -2289,8 +2452,8 @@ fn traceability_for_workspace(
         next_actions.push("从问题清单生成学习卡片，并标记掌握状态。".to_string());
     }
     if agents.is_empty() {
-        gaps.push("工作区还没有 Agent 改进计划。".to_string());
-        next_actions.push("选择高风险文件作为上下文，生成确认式 Agent 计划。".to_string());
+        gaps.push("工作区还没有行动草稿。".to_string());
+        next_actions.push("选择高风险文件作为上下文，生成确认式行动草稿。".to_string());
     }
     if daily_logs.is_empty() {
         gaps.push("工作区还没有进入每日学习日志。".to_string());
@@ -2341,7 +2504,7 @@ fn traceability_global(connection: &Connection) -> anyhow::Result<TraceabilitySn
     push_trace_node(&mut nodes, "card", "all", "知识卡片", &format!("{} 张", counts.cards), "summary", counts.cards.max(1));
     push_trace_node(&mut nodes, "chat", "all", "AI 对话", &format!("{} 个会话", counts.chats), "summary", counts.chats.max(1));
     push_trace_node(&mut nodes, "daily_log", "all", "每日日志", &format!("{} 篇", counts.daily_logs), "summary", counts.daily_logs.max(1));
-    push_trace_node(&mut nodes, "agent", "all", "Agent 计划", &format!("{} 个", counts.agent_tasks), "summary", counts.agent_tasks.max(1));
+    push_trace_node(&mut nodes, "agent", "all", "行动草稿", &format!("{} 个", counts.agent_tasks), "summary", counts.agent_tasks.max(1));
     push_trace_link(&mut links, "workspace:all", "report:all", "分析", counts.reports.max(1));
     push_trace_link(&mut links, "report:all", "finding:all", "拆解", counts.findings.max(1));
     push_trace_link(&mut links, "finding:all", "card:all", "沉淀", counts.cards.max(1));
@@ -2364,8 +2527,8 @@ fn traceability_global(connection: &Connection) -> anyhow::Result<TraceabilitySn
         next_actions.push("从高风险问题或报告建议生成知识卡片。".to_string());
     }
     if counts.agent_tasks == 0 {
-        gaps.push("还没有 Agent 改进计划。".to_string());
-        next_actions.push("围绕工作区、问题或报告生成确认式 Agent 计划。".to_string());
+        gaps.push("还没有行动草稿。".to_string());
+        next_actions.push("围绕工作区、问题或报告生成确认式行动草稿。".to_string());
     }
     if gaps.is_empty() {
         next_actions.push("全局闭环已经可用，下一步重点是验证真实项目长期使用体验。".to_string());
@@ -2642,7 +2805,7 @@ fn list_reports_for_workspace_connection(
     let mut statement = connection.prepare(
         r#"
         SELECT id, title, language, summary, analysis_source, report_type, risk_level,
-               file_count, created_at, metrics_json
+               file_count, created_at, metrics_json, metadata_json
         FROM reports
         WHERE metadata_json LIKE ?1
         ORDER BY created_at DESC
@@ -3253,6 +3416,7 @@ fn row_to_learning_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<LearningCar
 
 fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReportSummary> {
     let metrics_json: String = row.get(9)?;
+    let metadata_json: String = row.get(10)?;
     let risk_count = serde_json::from_str::<ReportMetrics>(&metrics_json)
         .map(|metrics| metrics.risk_count)
         .unwrap_or(0);
@@ -3261,6 +3425,7 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReportSummary> {
         id: row.get(0)?,
         title: row.get(1)?,
         language: row.get(2)?,
+        review_focus: review_focus_from_metadata(&metadata_json),
         summary: row.get(3)?,
         analysis_source: row.get(4)?,
         report_type: row.get(5)?,
@@ -3269,6 +3434,16 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReportSummary> {
         created_at: row.get(8)?,
         risk_count,
     })
+}
+
+fn review_focus_from_metadata(metadata_json: &str) -> Option<String> {
+    let metadata = serde_json::from_str::<serde_json::Value>(metadata_json).ok()?;
+    ["mode_label", "analysis_profile"]
+        .into_iter()
+        .filter_map(|key| metadata.get(key).and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 fn row_to_detail(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReportDetail> {

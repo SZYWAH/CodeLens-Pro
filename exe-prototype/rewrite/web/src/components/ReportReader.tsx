@@ -1,16 +1,19 @@
 import {
-  ArrowRight,
   BarChart3,
-  Bot,
+  ChevronDown,
   Clipboard,
   Download,
   FileCode2,
   FileText,
   GraduationCap,
+  ListTree,
   ListChecks,
+  Loader2,
   Maximize2,
   MessageSquare,
+  MoreHorizontal,
   Network,
+  Pencil,
   Route,
   ShieldAlert,
   Sparkles,
@@ -33,29 +36,67 @@ export function ReportReader({
   onCopy,
   onExport,
   onGenerateCandidates,
-  onCreateAgentPlan,
   onOpenFindings,
   onAddDailyLog,
-  onChatAboutReport
+  onChatAboutReport,
+  onRename,
+  variant = "full",
+  loading = false,
+  operationBusy = false
 }: {
   report: ReportDetail | null;
   traceability: TraceabilitySnapshot | null;
   onCopy: () => void;
   onExport: (kind: "md" | "html") => void;
   onGenerateCandidates?: () => void;
-  onCreateAgentPlan?: () => void;
   onOpenFindings?: () => void;
   onAddDailyLog?: () => void;
   onChatAboutReport?: () => void;
+  onRename?: (id: string, title: string) => Promise<void>;
+  variant?: "embedded" | "full";
+  loading?: boolean;
+  operationBusy?: boolean;
 }) {
   const [fullscreen, setFullscreen] = useState(false);
   const [activeHeadingId, setActiveHeadingId] = useState<string | null>(null);
   const [readingProgress, setReadingProgress] = useState(0);
+  const [exportOpen, setExportOpen] = useState(false);
+  const [outlineOpen, setOutlineOpen] = useState(false);
+  const [actionsOpen, setActionsOpen] = useState(false);
+  const [mobileToolsOpen, setMobileToolsOpen] = useState(false);
+  const [editingTitle, setEditingTitle] = useState(false);
+  const [titleDraft, setTitleDraft] = useState("");
+  const [titleSaving, setTitleSaving] = useState(false);
+  const [titleError, setTitleError] = useState<string | null>(null);
+  const [showLoadingNotice, setShowLoadingNotice] = useState(false);
   const readerScrollRef = useRef<HTMLElement | null>(null);
+  const exportMenuRef = useRef<HTMLDivElement | null>(null);
+  const mobileToolsRef = useRef<HTMLDivElement | null>(null);
+  const outlineMenuRef = useRef<HTMLDivElement | null>(null);
+  const outlineTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const fullscreenTriggerRef = useRef<HTMLButtonElement | null>(null);
   const headings = useMemo(() => extractHeadings(report?.full_report || ""), [report?.full_report]);
-  const risks = report?.risks.slice(0, 6) || [];
-  const suggestions = report?.suggestions.slice(0, 5) || [];
-  const files = report?.files.slice(0, 8) || [];
+  const traceCounts = traceability?.scope_kind === "report" && traceability.scope_id === report?.id ? traceability.counts : null;
+  const mainlineActionCount = (traceCounts?.findings || report?.metrics.risk_count || 0)
+    + (traceCounts?.cards || 0)
+    + (traceCounts?.daily_logs || 0)
+    + (traceCounts?.chats || 0);
+
+  useEffect(() => {
+    setEditingTitle(false);
+    setTitleDraft(report?.title || "");
+    setTitleSaving(false);
+    setTitleError(null);
+  }, [report?.id, report?.title]);
+
+  useEffect(() => {
+    if (!loading) {
+      setShowLoadingNotice(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setShowLoadingNotice(true), 180);
+    return () => window.clearTimeout(timer);
+  }, [loading]);
 
   useEffect(() => {
     const container = readerScrollRef.current;
@@ -89,6 +130,67 @@ export function ReportReader({
     };
   }, [headings, report?.id]);
 
+  useEffect(() => {
+    setExportOpen(false);
+    setOutlineOpen(false);
+    setActionsOpen(false);
+    setFullscreen(false);
+    setReadingProgress(0);
+    setActiveHeadingId(headings[0]?.id || null);
+    if (readerScrollRef.current) readerScrollRef.current.scrollTop = 0;
+  }, [report?.id]);
+
+  useEffect(() => {
+    if (!fullscreen) return;
+    const previousBodyOverflow = document.body.style.overflow;
+    const previousDocumentOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = "hidden";
+    document.documentElement.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      document.documentElement.style.overflow = previousDocumentOverflow;
+      window.setTimeout(() => fullscreenTriggerRef.current?.focus(), 0);
+    };
+  }, [fullscreen]);
+
+  useEffect(() => {
+    function handlePointerDown(event: PointerEvent) {
+      if (
+        exportMenuRef.current?.contains(event.target as Node)
+        || mobileToolsRef.current?.contains(event.target as Node)
+        || outlineMenuRef.current?.contains(event.target as Node)
+      ) return;
+      setExportOpen(false);
+      setMobileToolsOpen(false);
+      setOutlineOpen(false);
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    return () => document.removeEventListener("pointerdown", handlePointerDown);
+  }, []);
+
+  useEffect(() => {
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      if (mobileToolsOpen) {
+        setMobileToolsOpen(false);
+      } else if (exportOpen) {
+        setExportOpen(false);
+      } else if (outlineOpen) {
+        setOutlineOpen(false);
+        window.setTimeout(() => outlineTriggerRef.current?.focus(), 0);
+      } else if (actionsOpen) {
+        setActionsOpen(false);
+      } else if (fullscreen) {
+        setFullscreen(false);
+      } else {
+        return;
+      }
+      event.preventDefault();
+    }
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [actionsOpen, exportOpen, fullscreen, mobileToolsOpen, outlineOpen]);
+
   function jumpToHeading(id: string) {
     const container = readerScrollRef.current;
     const target = container?.querySelector<HTMLElement>(`#${cssEscape(id)}`);
@@ -99,174 +201,231 @@ export function ReportReader({
     container.scrollTo({ top: container.scrollTop + targetTop - containerTop - 18, behavior: "smooth" });
   }
 
+  function toggleFullscreen(trigger?: HTMLButtonElement) {
+    if (trigger) fullscreenTriggerRef.current = trigger;
+    setFullscreen((value) => !value);
+  }
+
+  function closeOutline(restoreFocus = false) {
+    setOutlineOpen(false);
+    if (restoreFocus) window.setTimeout(() => outlineTriggerRef.current?.focus(), 0);
+  }
+
+  function drawerAction(action?: () => void) {
+    if (!action) return undefined;
+    return () => {
+      setActionsOpen(false);
+      action();
+    };
+  }
+
+  async function saveTitle() {
+    if (!report || !onRename || titleSaving) return;
+    const nextTitle = titleDraft.trim();
+    if (!nextTitle) {
+      setTitleError("报告标题不能为空。");
+      return;
+    }
+    setTitleSaving(true);
+    setTitleError(null);
+    try {
+      await onRename(report.id, nextTitle);
+      setEditingTitle(false);
+    } catch (error) {
+      setTitleError(error instanceof Error ? error.message : "保存报告标题失败。");
+    } finally {
+      setTitleSaving(false);
+    }
+  }
+
   if (!report) {
     return (
-      <article className="report-reader empty">
-        <strong>还没有打开报告</strong>
-        <span>生成项目分析、代码对比，或从历史报告中打开一份报告后，会在这里进入结构化阅读。</span>
+      <article className={"report-reader report-reader-v13 empty is-" + variant} aria-busy={loading}>
+        {loading ? <Loader2 className="spin" size={20} /> : null}
+        <strong>{loading ? "正在恢复报告" : "还没有打开报告"}</strong>
+        <span>{loading ? "正在读取报告正文。" : variant === "embedded" ? "在左侧完成配置并生成单文件报告，结果会在这里进入结构化阅读。" : "生成项目分析、代码对比，或从历史报告中打开一份报告后，会在这里进入结构化阅读。"}</span>
       </article>
     );
   }
 
   return (
-    <article className={fullscreen ? "report-reader is-fullscreen" : "report-reader"}>
-      <header className="report-reader-header report-reader-hero-next">
-        <div>
+    <article className={"report-reader report-reader-v13 is-" + variant + (fullscreen ? " is-fullscreen" : "")} aria-busy={loading || operationBusy}>
+      {showLoadingNotice && <div className="report-loading-strip-v143" aria-live="polite"><Loader2 className="spin" size={15} /><span>正在打开报告</span></div>}
+      <header className="report-reader-header report-reader-header-v13">
+        <div className="report-reader-heading-v131">
           <span>{typeLabel(report.report_type)} / {languageLabel(report.language)} / {sourceLabel(report.analysis_source)}</span>
-          <h3>{report.title}</h3>
+          <div className="report-title-row-v147">
+            {editingTitle ? (
+              <div className="report-title-edit-v147">
+                <input
+                  aria-label="报告标题"
+                  autoFocus
+                  disabled={titleSaving}
+                  maxLength={60}
+                  onChange={(event) => setTitleDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.preventDefault();
+                      void saveTitle();
+                    }
+                    if (event.key === "Escape") {
+                      event.preventDefault();
+                      setEditingTitle(false);
+                      setTitleDraft(report.title);
+                      setTitleError(null);
+                    }
+                  }}
+                  value={titleDraft}
+                />
+                <button className="secondary-button" disabled={titleSaving} onClick={() => void saveTitle()} type="button">{titleSaving ? "保存中" : "保存"}</button>
+                <button className="icon-button" disabled={titleSaving} onClick={() => { setEditingTitle(false); setTitleDraft(report.title); setTitleError(null); }} title="取消重命名" type="button"><X size={15} /></button>
+              </div>
+            ) : (
+              <>
+                <h3>{report.title}</h3>
+                {onRename && <button className="report-title-rename-v147" disabled={loading || operationBusy} onClick={() => { setTitleDraft(report.title); setTitleError(null); setEditingTitle(true); }} title="重命名报告" type="button"><Pencil size={14} /></button>}
+              </>
+            )}
+          </div>
+          {titleError && <small className="report-title-error-v147" role="alert">{titleError}</small>}
           <p>{formatTime(report.created_at)} · {report.summary}</p>
+          <div className="report-meta-strip-v131" aria-label="报告概况">
+            <span className={`risk-${report.risk_level}`}><ShieldAlert size={13} /><em>风险</em><strong>{severityLabel(report.risk_level)}</strong></span>
+            <span><FileCode2 size={13} /><em>文件</em><strong>{report.file_count}</strong></span>
+            <span><BarChart3 size={13} /><em>代码行</em><strong>{report.metrics.total_lines}</strong></span>
+            <span><ListChecks size={13} /><em>建议</em><strong>{report.metrics.suggestion_count}</strong></span>
+          </div>
           <div className="report-reader-progress-next" aria-label="报告阅读进度">
             <i style={{ width: `${readingProgress}%` }} />
             <strong>{readingProgress}%</strong>
           </div>
         </div>
         <div className="report-reader-actions">
-          <button className="icon-button" onClick={onCopy} title="复制报告"><Clipboard size={18} /></button>
-          <button className="icon-button" onClick={() => onExport("md")} title="导出 Markdown"><Download size={18} /></button>
-          <button className="icon-button" onClick={() => onExport("html")} title="导出 HTML"><FileText size={18} /></button>
-          <button className="icon-button" onClick={() => setFullscreen((value) => !value)} title={fullscreen ? "退出全屏阅读" : "全屏阅读"}>
+          {headings.length > 1 && (
+            <div className="report-outline-menu-v149" ref={outlineMenuRef}>
+              <button
+                aria-expanded={outlineOpen}
+                aria-haspopup="dialog"
+                className="report-outline-trigger-v131"
+                onClick={() => {
+                  setExportOpen(false);
+                  setMobileToolsOpen(false);
+                  setActionsOpen(false);
+                  setOutlineOpen((value) => !value);
+                }}
+                ref={outlineTriggerRef}
+                title="打开报告目录"
+                type="button"
+              >
+                <ListTree size={16} /><span>目录</span>
+              </button>
+              {outlineOpen && <ReportOutlinePopover headings={headings} activeHeadingId={activeHeadingId} readingProgress={readingProgress} onClose={() => closeOutline(true)} onSelect={jumpToHeading} />}
+            </div>
+          )}
+          <button className="icon-button report-desktop-tool-v143" disabled={loading || operationBusy} onClick={onCopy} title="复制报告"><Clipboard size={18} /></button>
+          <div className="report-export-menu-v131" ref={exportMenuRef}>
+            <button className="report-toolbar-button-v131 report-desktop-tool-v143" aria-expanded={exportOpen} aria-haspopup="menu" disabled={loading || operationBusy} onClick={() => setExportOpen((value) => !value)} type="button">
+              <Download size={16} /><span>导出</span><ChevronDown size={13} />
+            </button>
+            {exportOpen && (
+              <div className="report-export-options-v131" role="menu">
+                <button onClick={() => { setExportOpen(false); onExport("md"); }} role="menuitem" type="button"><Download size={14} />Markdown</button>
+                <button onClick={() => { setExportOpen(false); onExport("html"); }} role="menuitem" type="button"><FileText size={14} />HTML</button>
+              </div>
+            )}
+          </div>
+          <button aria-label={fullscreen ? "退出全屏阅读" : "全屏阅读"} className="icon-button report-desktop-tool-v143" disabled={loading || operationBusy} onClick={(event) => toggleFullscreen(event.currentTarget)} title={fullscreen ? "退出全屏阅读" : "全屏阅读"}>
             {fullscreen ? <X size={18} /> : <Maximize2 size={18} />}
+          </button>
+          <div className="report-mobile-tools-v143" ref={mobileToolsRef}>
+            <button className="icon-button" aria-expanded={mobileToolsOpen} aria-haspopup="menu" disabled={loading || operationBusy} onClick={() => setMobileToolsOpen((value) => !value)} title="更多报告操作" type="button"><MoreHorizontal size={18} /></button>
+            {mobileToolsOpen && (
+              <div className="report-mobile-tools-menu-v143" role="menu">
+                <button onClick={() => { setMobileToolsOpen(false); onCopy(); }} role="menuitem" type="button"><Clipboard size={15} />复制报告</button>
+                <button onClick={() => { setMobileToolsOpen(false); onExport("md"); }} role="menuitem" type="button"><Download size={15} />导出 Markdown</button>
+                <button onClick={() => { setMobileToolsOpen(false); onExport("html"); }} role="menuitem" type="button"><FileText size={15} />导出 HTML</button>
+                <button onClick={(event) => { setMobileToolsOpen(false); toggleFullscreen(event.currentTarget); }} role="menuitem" type="button">{fullscreen ? <X size={15} /> : <Maximize2 size={15} />}{fullscreen ? "退出全屏" : "全屏阅读"}</button>
+              </div>
+            )}
+          </div>
+          <button
+            className={actionsOpen ? "report-actions-trigger-v131 active" : "report-actions-trigger-v131"}
+            aria-expanded={actionsOpen}
+            disabled={loading || operationBusy}
+            onClick={() => { setExportOpen(false); setOutlineOpen(false); setActionsOpen((value) => !value); }}
+            type="button"
+          >
+            <Route size={16} /><span>后续动作</span>{mainlineActionCount > 0 && <em>{mainlineActionCount}</em>}
           </button>
         </div>
       </header>
 
-      <section className="report-reader-toolbar">
-        {onGenerateCandidates && <button className="mini-button" onClick={onGenerateCandidates}><GraduationCap size={16} />生成知识卡片</button>}
-        {onOpenFindings && <button className="mini-button" onClick={onOpenFindings}><ShieldAlert size={16} />关联问题清单</button>}
-        {onCreateAgentPlan && <button className="mini-button" onClick={onCreateAgentPlan}><Bot size={16} />生成 Agent 计划</button>}
-        {onAddDailyLog && <button className="mini-button" onClick={onAddDailyLog}><FileText size={16} />加入每日日志</button>}
-        {onChatAboutReport && <button className="mini-button" onClick={onChatAboutReport}><MessageSquare size={16} />围绕报告对话</button>}
-      </section>
-
-      <section className="report-reader-meta">
-        <Metric icon={<ShieldAlert size={17} />} label="风险等级" value={severityLabel(report.risk_level)} tone={report.risk_level} />
-        <Metric icon={<FileCode2 size={17} />} label="文件数量" value={`${report.file_count}`} />
-        <Metric icon={<BarChart3 size={17} />} label="总代码行" value={`${report.metrics.total_lines}`} />
-        <Metric icon={<ListChecks size={17} />} label="建议数量" value={`${report.metrics.suggestion_count}`} />
-      </section>
-
-      <ReportActionBoard
-        report={report}
-        traceability={traceability}
-        onGenerateCandidates={onGenerateCandidates}
-        onCreateAgentPlan={onCreateAgentPlan}
-        onOpenFindings={onOpenFindings}
-        onAddDailyLog={onAddDailyLog}
-        onChatAboutReport={onChatAboutReport}
-      />
-
-      <ReportInsightDeck report={report} traceability={traceability} headingCount={headings.length} />
-
-      <ReportEvidenceMatrix
-        report={report}
-        traceability={traceability}
-        headingCount={headings.length}
-        onGenerateCandidates={onGenerateCandidates}
-        onCreateAgentPlan={onCreateAgentPlan}
-        onOpenFindings={onOpenFindings}
-        onAddDailyLog={onAddDailyLog}
-        onChatAboutReport={onChatAboutReport}
-      />
-
-      <ReportRiskMap report={report} />
-
-      <section className="report-reader-body report-reader-grid-next">
-        <aside className="report-outline report-reader-side-next">
-          <section className="report-side-block-next">
-            <strong>阅读路线</strong>
-            {buildReaderSteps(report, headings.length).map((step) => <p key={step}>{step}</p>)}
-          </section>
-
-          <section className="report-side-block-next">
-            <strong>报告目录</strong>
-            {headings.length === 0 && <span>暂无标题结构</span>}
-            {headings.map((heading) => (
-              <button
-                className={activeHeadingId === heading.id ? "active" : ""}
-                key={heading.id}
-                onClick={() => jumpToHeading(heading.id)}
-                style={{ paddingLeft: `${6 + (heading.level - 1) * 10}px` }}
-                type="button"
-              >
-                {heading.title}
-              </button>
-            ))}
-          </section>
-
-          <section className="report-side-block-next">
-            <strong>风险摘录</strong>
-            {risks.length ? risks.map((risk) => <p key={risk}>{risk}</p>) : <span>当前报告没有显式风险项。</span>}
-          </section>
-
-          <section className="report-side-block-next">
-            <strong>文件概览</strong>
-            {files.length ? files.map((file) => (
-              <button type="button" className="report-file-chip-next" key={file.id} title={file.path}>
-                <FileCode2 size={14} />
-                <span>{file.path}</span>
-                <small>{file.metrics.total_lines} 行 / {file.metrics.risk_count} 风险</small>
-              </button>
-            )) : <span>此报告没有保存文件明细。</span>}
-          </section>
-        </aside>
-
-        <main className="report-document-rich report-document-next" ref={readerScrollRef}>
-          <ReportSectionRail headings={headings} activeHeadingId={activeHeadingId} onSelect={jumpToHeading} />
-          <section className="report-summary-card report-reader-brief-next">
-            <div>
-              <span><Sparkles size={15} />报告摘要</span>
-              <p>{report.summary}</p>
-            </div>
-            <div className="report-brief-suggestions-next">
-              <strong>优先建议</strong>
-              {suggestions.length ? suggestions.map((suggestion) => <p key={suggestion}>{suggestion}</p>) : <p>暂无单独建议，可继续查看完整报告正文。</p>}
-            </div>
-          </section>
-
-          <TraceabilityPanel snapshot={traceability} reportId={report.id} />
-
+      <section className="report-reader-body report-reader-grid-v13">
+        <main className="report-document-rich report-document-v13" ref={readerScrollRef}>
           <ReportMarkdownDocument content={report.full_report} />
         </main>
+
+        {actionsOpen && <button className="report-action-scrim-v131" aria-label="关闭后续动作" onClick={() => setActionsOpen(false)} type="button" />}
+        <aside className={actionsOpen ? "report-actions-drawer-v131 is-open" : "report-actions-drawer-v131"} aria-hidden={!actionsOpen}>
+          <header>
+            <div><span><Route size={15} />报告闭环</span><strong>后续动作</strong></div>
+            <button className="icon-button" onClick={() => setActionsOpen(false)} title="关闭后续动作" type="button"><X size={16} /></button>
+          </header>
+          <section className="report-facts-v13">
+            <Metric icon={<ShieldAlert size={15} />} label="风险" value={severityLabel(report.risk_level)} tone={report.risk_level} />
+            <Metric icon={<FileCode2 size={15} />} label="文件" value={`${report.file_count}`} />
+            <Metric icon={<BarChart3 size={15} />} label="代码行" value={`${report.metrics.total_lines}`} />
+            <Metric icon={<ListChecks size={15} />} label="建议" value={`${report.metrics.suggestion_count}`} />
+          </section>
+          <ReportActionBoard
+            report={report}
+            traceability={traceability}
+            onGenerateCandidates={drawerAction(onGenerateCandidates)}
+            onOpenFindings={drawerAction(onOpenFindings)}
+            onAddDailyLog={drawerAction(onAddDailyLog)}
+            onChatAboutReport={drawerAction(onChatAboutReport)}
+          />
+        </aside>
       </section>
     </article>
   );
 }
 
-function ReportSectionRail({ headings, activeHeadingId, onSelect }: { headings: ReportHeading[]; activeHeadingId: string | null; onSelect: (id: string) => void }) {
-  const [open, setOpen] = useState(false);
-  if (headings.length < 2) return null;
-
+function ReportOutlinePopover({
+  headings,
+  activeHeadingId,
+  readingProgress,
+  onClose,
+  onSelect
+}: {
+  headings: ReportHeading[];
+  activeHeadingId: string | null;
+  readingProgress: number;
+  onClose: () => void;
+  onSelect: (id: string) => void;
+}) {
+  const activeIndex = Math.max(0, headings.findIndex((heading) => heading.id === activeHeadingId));
   return (
-    <div className="report-section-rail-next" onMouseEnter={() => setOpen(true)} onMouseLeave={() => setOpen(false)}>
-      <div className="report-section-bars-next" aria-label="报告章节定位">
-        {headings.map((heading, index) => (
-          <button
-            aria-label={`定位到章节：${heading.title}`}
-            className={activeHeadingId === heading.id || (!activeHeadingId && index === 0) ? "active" : ""}
-            key={heading.id}
-            onClick={() => onSelect(heading.id)}
-            style={{ height: `${Math.max(18, 30 - heading.level * 3)}px` }}
-            type="button"
-          />
-        ))}
-      </div>
-      {open && (
-        <div className="report-section-popover-next">
-          <strong>章节定位</strong>
-          {headings.map((heading, index) => (
-            <button
-              className={activeHeadingId === heading.id || (!activeHeadingId && index === 0) ? "active" : ""}
-              key={`${heading.id}-option`}
-              onClick={() => onSelect(heading.id)}
-              style={{ paddingLeft: `${8 + (heading.level - 1) * 12}px` }}
-              type="button"
-            >
-              <span>{sectionNumberLabel(index + 1, heading.level)}</span>
-              <em>{heading.title}</em>
-            </button>
-          ))}
-        </div>
-      )}
+    <div className="report-outline-popover-v149" role="dialog" aria-label="报告目录">
+      <header>
+        <div><strong>报告目录</strong><span>第 {activeIndex + 1} 节 · {readingProgress}%</span></div>
+        <button onClick={onClose} title="关闭报告目录" type="button"><X size={14} /></button>
+      </header>
+      {headings.map((heading, index) => (
+        <button
+          className={activeHeadingId === heading.id || (!activeHeadingId && index === 0) ? "active" : ""}
+          key={heading.id}
+          onClick={() => {
+            onSelect(heading.id);
+            onClose();
+          }}
+          style={{ paddingLeft: 8 + (heading.level - 1) * 12 }}
+          type="button"
+        >
+          <span>{sectionNumberLabel(index + 1, heading.level)}</span>
+          <em>{heading.title}</em>
+        </button>
+      ))}
     </div>
   );
 }
@@ -305,22 +464,23 @@ function ReportRiskMap({ report }: { report: ReportDetail }) {
 
 function ReportInsightDeck({ report, traceability, headingCount }: { report: ReportDetail; traceability: TraceabilitySnapshot | null; headingCount: number }) {
   const counts = traceability?.scope_kind === "report" && traceability.scope_id === report.id ? traceability.counts : null;
-  const closedLoopCount = (counts?.findings || 0) + (counts?.cards || 0) + (counts?.chats || 0) + (counts?.agent_tasks || 0) + (counts?.daily_logs || 0);
+  const mainlineCount = (counts?.findings || 0) + (counts?.cards || 0) + (counts?.daily_logs || 0);
+  const optionalCount = (counts?.chats || 0) + (counts?.agent_tasks || 0);
   const riskHint = report.metrics.risk_count > 0
     ? `发现 ${report.metrics.risk_count} 个风险点，建议先处理高影响文件。`
     : "暂未发现显式风险，可以重点检查架构一致性和测试覆盖。";
   const fileHint = report.file_count > 1
     ? `覆盖 ${report.file_count} 个文件，适合按文件热区分段阅读。`
     : "单文件报告，适合先读摘要再进入建议和代码片段。";
-  const loopHint = closedLoopCount > 0
-    ? `已关联 ${closedLoopCount} 个闭环资产，可继续追踪问题、卡片、日志、对话和 Agent 计划。`
+  const loopHint = mainlineCount > 0
+    ? `已关联 ${mainlineCount} 个主线资产，可继续追踪问题、卡片和日志。${optionalCount ? `另有 ${optionalCount} 个辅助资产。` : ""}`
     : "还没有形成闭环资产，建议从问题清单或知识卡片开始沉淀。";
 
   const items = [
     { label: "阅读重点", value: severityLabel(report.risk_level), detail: riskHint, icon: <ShieldAlert size={16} /> },
     { label: "覆盖范围", value: `${report.file_count} 文件`, detail: fileHint, icon: <FileCode2 size={16} /> },
     { label: "文档结构", value: `${headingCount} 节`, detail: headingCount > 0 ? "目录可跳转，适合按章节审查。" : "报告没有 Markdown 标题，建议后续生成结构化报告。", icon: <ListChecks size={16} /> },
-    { label: "闭环资产", value: `${closedLoopCount} 项`, detail: loopHint, icon: <Network size={16} /> }
+    { label: "闭环资产", value: `${mainlineCount} 项`, detail: loopHint, icon: <Network size={16} /> }
   ];
 
   return (
@@ -341,7 +501,6 @@ function ReportEvidenceMatrix({
   traceability,
   headingCount,
   onGenerateCandidates,
-  onCreateAgentPlan,
   onOpenFindings,
   onAddDailyLog,
   onChatAboutReport
@@ -350,13 +509,12 @@ function ReportEvidenceMatrix({
   traceability: TraceabilitySnapshot | null;
   headingCount: number;
   onGenerateCandidates?: () => void;
-  onCreateAgentPlan?: () => void;
   onOpenFindings?: () => void;
   onAddDailyLog?: () => void;
   onChatAboutReport?: () => void;
 }) {
   const counts = traceability?.scope_kind === "report" && traceability.scope_id === report.id ? traceability.counts : null;
-  const closedLoopCount = (counts?.findings || 0) + (counts?.cards || 0) + (counts?.chats || 0) + (counts?.agent_tasks || 0) + (counts?.daily_logs || 0);
+  const mainlineCount = (counts?.findings || 0) + (counts?.cards || 0) + (counts?.daily_logs || 0);
   const topFile = [...report.files].sort((left, right) => right.metrics.risk_count - left.metrics.risk_count || right.metrics.complexity_score - left.metrics.complexity_score)[0];
   const evidenceItems = [
     {
@@ -383,9 +541,9 @@ function ReportEvidenceMatrix({
     {
       key: "loop",
       label: "闭环资产",
-      value: `${closedLoopCount} 项`,
-      complete: closedLoopCount > 0,
-      detail: closedLoopCount > 0 ? `已关联问题、卡片、对话、日志或 Agent 计划共 ${closedLoopCount} 项。` : "还没有把阅读结果沉淀到问题、卡片、日志、对话或 Agent。"
+      value: `${mainlineCount} 项`,
+      complete: mainlineCount > 0,
+      detail: mainlineCount > 0 ? `已关联问题、卡片或日志共 ${mainlineCount} 项。` : "还没有把阅读结果沉淀到问题、卡片或日志。"
     }
   ];
   const completeCount = evidenceItems.filter((item) => item.complete).length;
@@ -398,9 +556,8 @@ function ReportEvidenceMatrix({
   const nextActions = [
     { label: "复查问题清单", detail: report.metrics.risk_count > 0 ? "把风险点转成可跟踪状态" : "检查是否需要补充手动问题", icon: <ShieldAlert size={15} />, onClick: onOpenFindings, ready: report.metrics.risk_count > 0 || Boolean(counts?.findings) },
     { label: "生成知识卡片", detail: "把建议和风险沉淀为复习材料", icon: <GraduationCap size={15} />, onClick: onGenerateCandidates, ready: Boolean(counts?.cards) },
-    { label: "围绕报告对话", detail: "追问设计取舍、替代方案和边界条件", icon: <MessageSquare size={15} />, onClick: onChatAboutReport, ready: Boolean(counts?.chats) },
-    { label: "生成 Agent 计划", detail: "拆成可确认执行的改进步骤", icon: <Bot size={15} />, onClick: onCreateAgentPlan, ready: Boolean(counts?.agent_tasks) },
-    { label: "加入每日日志", detail: "把这次审查写入学习复盘", icon: <FileText size={15} />, onClick: onAddDailyLog, ready: Boolean(counts?.daily_logs) }
+    { label: "加入每日日志", detail: "把这次审查写入学习复盘", icon: <FileText size={15} />, onClick: onAddDailyLog, ready: Boolean(counts?.daily_logs) },
+    { label: "围绕报告对话", detail: "辅助追问设计取舍和边界条件", icon: <MessageSquare size={15} />, onClick: onChatAboutReport, ready: Boolean(counts?.chats) }
   ];
 
   return (
@@ -444,7 +601,6 @@ function ReportActionBoard({
   report,
   traceability,
   onGenerateCandidates,
-  onCreateAgentPlan,
   onOpenFindings,
   onAddDailyLog,
   onChatAboutReport
@@ -452,45 +608,38 @@ function ReportActionBoard({
   report: ReportDetail;
   traceability: TraceabilitySnapshot | null;
   onGenerateCandidates?: () => void;
-  onCreateAgentPlan?: () => void;
   onOpenFindings?: () => void;
   onAddDailyLog?: () => void;
   onChatAboutReport?: () => void;
 }) {
   const counts = traceability?.scope_kind === "report" && traceability.scope_id === report.id ? traceability.counts : null;
-  const closedLoopCount = (counts?.findings || 0) + (counts?.cards || 0) + (counts?.chats || 0) + (counts?.agent_tasks || 0) + (counts?.daily_logs || 0);
+  const mainlineCount = (counts?.findings || 0) + (counts?.cards || 0) + (counts?.daily_logs || 0);
   const actionItems = [
     { key: "findings", label: "问题清单", value: counts?.findings || report.metrics.risk_count, hint: "把风险拆成可跟踪事项", icon: <ShieldAlert size={16} />, onClick: onOpenFindings },
     { key: "cards", label: "知识卡片", value: counts?.cards || 0, hint: "沉淀可复习知识点", icon: <GraduationCap size={16} />, onClick: onGenerateCandidates },
-    { key: "chat", label: "围绕报告对话", value: counts?.chats || 0, hint: "继续追问设计与风险", icon: <MessageSquare size={16} />, onClick: onChatAboutReport },
-    { key: "agent", label: "Agent 计划", value: counts?.agent_tasks || 0, hint: "生成确认式改进方案", icon: <Bot size={16} />, onClick: onCreateAgentPlan },
-    { key: "log", label: "每日日志", value: counts?.daily_logs || 0, hint: "写入学习复盘链路", icon: <FileText size={16} />, onClick: onAddDailyLog }
+    { key: "log", label: "每日日志", value: counts?.daily_logs || 0, hint: "写入学习复盘链路", icon: <FileText size={16} />, onClick: onAddDailyLog },
+    { key: "chat", label: "报告对话", value: counts?.chats || 0, hint: "辅助追问设计与风险", icon: <MessageSquare size={16} />, onClick: onChatAboutReport }
   ];
 
   return (
     <section className="report-action-board-next">
       <div className="report-action-board-head-next">
-        <div>
-          <span><Route size={15} />报告闭环行动台</span>
-          <h4>{closedLoopCount > 0 ? "这份报告已经进入本地审查闭环" : "从这份报告启动审查闭环"}</h4>
-          <p>围绕当前报告继续推进问题、卡片、对话、Agent 和每日复盘，让阅读结果沉淀成可跟踪资产。</p>
-        </div>
-        <strong>{closedLoopCount}</strong>
+        <span><Route size={15} />后续动作</span>
+        <strong>{mainlineCount}</strong>
       </div>
       <div className="report-action-lane-next">
-        {actionItems.map((item, index) => (
+        {actionItems.map((item) => (
           <button
             className={item.value > 0 ? "has-data" : ""}
             disabled={!item.onClick}
             key={item.key}
             onClick={item.onClick}
+            title={item.hint}
             type="button"
           >
             <span>{item.icon}</span>
             <strong>{item.label}</strong>
-            <small>{item.hint}</small>
             <em>{item.value}</em>
-            {index < actionItems.length - 1 && <ArrowRight className="report-action-arrow-next" size={15} />}
           </button>
         ))}
       </div>
@@ -508,8 +657,8 @@ function buildReaderSteps(report: ReportDetail, headingCount: number) {
       ? `再按文件概览定位 ${report.file_count} 个相关文件。`
       : "再进入正文，核对单文件中的关键代码段。",
     headingCount > 0
-      ? `最后按 ${headingCount} 个目录章节沉淀问题、卡片或 Agent 计划。`
-      : "最后把可执行事项加入问题、卡片或 Agent 计划。"
+      ? `最后按 ${headingCount} 个目录章节沉淀问题、卡片或每日日志。`
+      : "最后把可执行事项加入问题、卡片或每日日志。"
   ];
   return steps;
 }
@@ -533,13 +682,14 @@ function TraceabilityPanel({ snapshot, reportId }: { snapshot: TraceabilitySnaps
         <div>
           <span><Network size={15} />关联洞察</span>
           <h4>{snapshot.title}</h4>
-          <p>把报告、问题、卡片、日志、对话和 Agent 计划放在同一条本地闭环里查看。</p>
+          <p>把报告、问题、卡片、日志、对话和行动草稿放在同一条本地闭环里查看。</p>
         </div>
         <div className="traceability-counts">
           <small>问题 <strong>{snapshot.counts.findings}</strong></small>
           <small>卡片 <strong>{snapshot.counts.cards}</strong></small>
+          <small>日志 <strong>{snapshot.counts.daily_logs}</strong></small>
           <small>对话 <strong>{snapshot.counts.chats}</strong></small>
-          <small>Agent <strong>{snapshot.counts.agent_tasks}</strong></small>
+          <small>草稿 <strong>{snapshot.counts.agent_tasks}</strong></small>
         </div>
       </div>
       <div className="traceability-flow">
@@ -789,7 +939,7 @@ function traceKindLabel(value: string) {
     card: "卡片",
     chat: "对话",
     daily_log: "日志",
-    agent: "Agent",
+    agent: "行动草稿",
     activity: "活动"
   };
   return labels[value] || value;

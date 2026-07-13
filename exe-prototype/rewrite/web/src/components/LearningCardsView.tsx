@@ -1,28 +1,41 @@
-import {
-  BookOpen,
-  CalendarDays,
-  CheckCircle2,
-  Clock3,
-  Download,
-  Filter,
-  GraduationCap,
-  Layers3,
-  Link2,
-  Loader2,
-  RotateCcw,
-  Save,
-  Search,
-  Sparkles,
-  Tag,
-  Target,
-  Trash2
-} from "lucide-react";
+import { ArrowUpRight, BookOpen, Check, ChevronLeft, Download, FileText, GraduationCap, Loader2, Plus, RefreshCw, Search, ShieldAlert, Tag, Trash2, X } from "lucide-react";
 import type { FormEvent } from "react";
-import { useMemo, useState } from "react";
-import type { CardMaterial, LearningCard, LearningCardCandidate, LearningCenterData } from "../types";
+import { useEffect, useMemo, useRef, useState } from "react";
+import type { CardMaterial, Finding, LearningCard, LearningCardCandidate, LearningCenterData } from "../types";
+import { useOverlayFocus } from "../hooks/useOverlayFocus";
+import { AccessibleListbox, type ListboxOption } from "./AccessibleListbox";
+import { ProductToolbar } from "./ProductShell";
 
-type LearningCardDifficulty = "easy" | "medium" | "hard";
-type CardSource = "manual" | "finding" | "workspace";
+type Difficulty = "easy" | "medium" | "hard";
+type Source = "manual" | "finding" | "workspace";
+type DrawerTab = "candidates" | "manual";
+
+const statusOptions: ListboxOption[] = [
+  { value: "all", label: "全部状态" },
+  { value: "new", label: "未掌握" },
+  { value: "reviewing", label: "复习中" },
+  { value: "mastered", label: "已掌握" }
+];
+
+const difficultyOptions: ListboxOption[] = [
+  { value: "all", label: "全部难度" },
+  { value: "hard", label: "高强度" },
+  { value: "medium", label: "中强度" },
+  { value: "easy", label: "入门" }
+];
+
+const sourceOptions: ListboxOption[] = [
+  { value: "all", label: "全部来源" },
+  { value: "finding", label: "问题来源" },
+  { value: "workspace", label: "项目来源" },
+  { value: "manual", label: "手动创建" }
+];
+
+const sortOptions: ListboxOption[] = [
+  { value: "review", label: "复习优先" },
+  { value: "newest", label: "最近更新" },
+  { value: "oldest", label: "最早创建" }
+];
 
 export function LearningCardsView(props: {
   cards: LearningCard[];
@@ -30,432 +43,285 @@ export function LearningCardsView(props: {
   candidates: LearningCardCandidate[];
   selectedCandidateIds: string[];
   activeCardId: string | null;
+  sourceFinding: Finding | null;
+  sourceReportTitle: string | null;
   center?: LearningCenterData | null;
   status: string;
-  tag: string;
+  query: string;
   manualTitle: string;
   manualContent: string;
   manualTags: string;
-  onStatusFilter: (value: string) => void;
-  onTagChange: (value: string) => void;
+  busy: boolean;
+  onStatusFilter: (value: string) => Promise<void>;
+  onQueryChange: (value: string) => void;
   onManualTitleChange: (value: string) => void;
   onManualContentChange: (value: string) => void;
   onManualTagsChange: (value: string) => void;
   onToggleCandidate: (id: string, selected: boolean) => void;
-  onApproveCandidates: () => void;
-  onRejectCandidate: (id: string) => void;
-  onGenerateCandidates: () => void;
-  onCreateManual: (event: FormEvent) => void;
-  onSearch: () => void;
-  onUpdate: (id: string, status: string) => void;
-  onDelete: (id: string) => void;
-  onGenerateMaterial: (id: string) => void;
-  onSelectCard: (id: string) => void;
+  onApproveCandidates: () => Promise<void>;
+  onRejectCandidate: (id: string) => Promise<void>;
+  onGenerateCandidates: () => Promise<void>;
+  onCreateManual: (event: FormEvent) => Promise<void>;
+  onUpdate: (id: string, status: string) => Promise<unknown>;
+  onDelete: (id: string) => Promise<void>;
+  onGenerateMaterial: (id: string) => Promise<void>;
+  onSelectCard: (id: string | null) => Promise<void>;
+  onOpenSourceFinding?: () => void;
+  onOpenSourceReport?: () => void;
   onExportCards?: () => void;
-  busy: boolean;
 }) {
-  const [difficultyFilter, setDifficultyFilter] = useState<"all" | LearningCardDifficulty>("all");
-  const [sourceFilter, setSourceFilter] = useState<"all" | CardSource>("all");
-  const [sortMode, setSortMode] = useState<"review" | "newest" | "oldest">("review");
+  const [difficulty, setDifficulty] = useState<"all" | Difficulty>("all");
+  const [source, setSource] = useState<"all" | Source>("all");
+  const [sort, setSort] = useState<"review" | "newest" | "oldest">("review");
+  const [drawer, setDrawer] = useState<DrawerTab | null>(null);
+  const [mobileIndexOpen, setMobileIndexOpen] = useState(false);
+  const [filterBusy, setFilterBusy] = useState(false);
+  const [pendingCardId, setPendingCardId] = useState<string | null>(null);
+  const [statusOverrides, setStatusOverrides] = useState<Record<string, string>>({});
+  const [deleteTarget, setDeleteTarget] = useState<LearningCard | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const deleteTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const deleteDialogRef = useRef<HTMLElement | null>(null);
+  const deleteCancelRef = useRef<HTMLButtonElement | null>(null);
+  const mobileIndexTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const mobileIndexRef = useRef<HTMLElement | null>(null);
+  const mobileIndexCloseRef = useRef<HTMLButtonElement | null>(null);
+  const drawerTriggerRef = useRef<HTMLElement | null>(null);
+  const drawerRef = useRef<HTMLElement | null>(null);
+  const drawerCloseRef = useRef<HTMLButtonElement | null>(null);
 
-  const stats = learningCardStats(props.cards);
-  const tags = learningTagCloud(props.cards);
-  const selectedCandidateCount = props.selectedCandidateIds.length;
-  const masteredPercent = stats.total ? Math.round((stats.mastered / stats.total) * 100) : 0;
-  const activeCard = props.cards.find((card) => card.id === props.activeCardId) || null;
-  const activeMaterials = props.activeCardId ? props.materials.filter((material) => material.card_id === props.activeCardId) : props.materials;
-  const latestMaterial = activeMaterials[0] || props.materials[0] || null;
-
-  const visibleCards = useMemo(() => {
+  const effectiveStatus = (card: LearningCard) => statusOverrides[card.id] || card.status;
+  const visible = useMemo(() => {
+    const normalizedQuery = props.query.trim().toLowerCase();
     return props.cards
-      .filter((card) => difficultyFilter === "all" || cardDifficulty(card) === difficultyFilter)
-      .filter((card) => sourceFilter === "all" || cardSource(card) === sourceFilter)
-      .sort((left, right) => compareCards(left, right, sortMode));
-  }, [props.cards, difficultyFilter, sourceFilter, sortMode]);
+      .filter((card) => !normalizedQuery || `${card.title} ${card.content} ${card.tags.join(" ")}`.toLowerCase().includes(normalizedQuery))
+      .filter((card) => difficulty === "all" || cardDifficulty(card) === difficulty)
+      .filter((card) => source === "all" || cardSource(card) === source)
+      .sort((left, right) => compareCards(left, right, sort, effectiveStatus));
+  }, [props.cards, props.query, difficulty, source, sort, statusOverrides]);
+  const active = visible.find((card) => card.id === props.activeCardId) || visible[0] || null;
+  const materials = active ? props.materials.filter((item) => item.card_id === active.id) : [];
+  const latestMaterial = materials[0] || null;
+  const reviewQueue = visible.filter((card) => effectiveStatus(card) !== "mastered" && card.id !== active?.id);
+  const mastered = props.cards.filter((card) => effectiveStatus(card) === "mastered").length;
+  const masteredPercent = props.cards.length ? Math.round(mastered / props.cards.length * 100) : 0;
+  const activeStatus = active ? effectiveStatus(active) : "new";
 
-  const reviewQueue = useMemo(
-    () => visibleCards.filter((card) => card.status !== "mastered").slice(0, 8),
-    [visibleCards]
-  );
-  const difficultyStats = useMemo(() => learningDifficultyStats(props.cards), [props.cards]);
-  const dailyReviewTarget = props.center?.review_cards.length || reviewQueue.length;
+  useEffect(() => {
+    const nextId = active?.id || null;
+    if (nextId !== props.activeCardId) void props.onSelectCard(nextId);
+  }, [active?.id, props.activeCardId, props.onSelectCard]);
 
-  return (
-    <section className="cards-page-next">
-      <div className="cards-library-next">
-        <div className="cards-hero-next">
-          <div>
-            <span>知识卡片</span>
-            <h3>知识卡片体系</h3>
-            <p>围绕报告、问题、项目和手动记录沉淀长期知识，形成“候选审核、卡片入库、材料生成、复习追踪、导出归档”的闭环。</p>
-          </div>
-          <div className="cards-stats-next">
-            <small>总数 <strong>{stats.total}</strong></small>
-            <small>未掌握 <strong>{stats.newCount}</strong></small>
-            <small>复习中 <strong>{stats.reviewing}</strong></small>
-            <small>已掌握 <strong>{stats.mastered}</strong></small>
-          </div>
-        </div>
+  useEffect(() => {
+    setStatusOverrides((current) => {
+      let changed = false;
+      const next = { ...current };
+      for (const card of props.cards) {
+        if (next[card.id] === card.status) {
+          delete next[card.id];
+          changed = true;
+        }
+      }
+      return changed ? next : current;
+    });
+  }, [props.cards]);
 
-        <section className="learning-progress-next">
-          <ProgressItem icon={<Sparkles size={16} />} title="捕获候选" value={props.candidates.length} detail="从报告和问题提取知识点" />
-          <ProgressItem icon={<CheckCircle2 size={16} />} title="审核入库" value={selectedCandidateCount} detail="人工确认后写入卡片" />
-          <ProgressItem icon={<Clock3 size={16} />} title="复习队列" value={dailyReviewTarget} detail="今日优先复习的卡片" />
-          <ProgressItem icon={<BookOpen size={16} />} title="掌握进度" value={`${masteredPercent}%`} detail="已掌握卡片占比" />
-        </section>
+  useOverlayFocus({
+    active: mobileIndexOpen,
+    containerRef: mobileIndexRef,
+    initialFocusRef: mobileIndexCloseRef,
+    returnFocusRef: mobileIndexTriggerRef,
+    onRequestClose: () => setMobileIndexOpen(false)
+  });
+  useOverlayFocus({
+    active: Boolean(drawer),
+    containerRef: drawerRef,
+    initialFocusRef: drawerCloseRef,
+    returnFocusRef: drawerTriggerRef,
+    onRequestClose: () => setDrawer(null)
+  });
+  useOverlayFocus({
+    active: Boolean(deleteTarget),
+    containerRef: deleteDialogRef,
+    initialFocusRef: deleteCancelRef,
+    returnFocusRef: deleteTriggerRef,
+    onRequestClose: () => setDeleteTarget(null)
+  });
 
-        <section className="card-review-dashboard-next">
-          <article>
-            <span><Target size={15} />今日复习</span>
-            <strong>{reviewQueue[0]?.title || "暂无待复习卡片"}</strong>
-            <p>{reviewQueue.length ? `还有 ${reviewQueue.length} 张卡片需要巩固，建议先处理高强度和复习中的条目。` : "当前筛选范围内没有待复习内容，可以生成候选或创建新卡片。"}</p>
-          </article>
-          <article>
-            <span><CalendarDays size={15} />沉淀节奏</span>
-            <strong>{props.center?.today.card_count ?? stats.total}</strong>
-            <p>今日新增或关联的知识卡片数量，用来观察学习沉淀是否跟上项目审查节奏。</p>
-          </article>
-          <article>
-            <span><Layers3 size={15} />强度分布</span>
-            <strong>{difficultyStats.hard} / {difficultyStats.medium} / {difficultyStats.easy}</strong>
-            <p>高强度 / 中强度 / 入门卡片，优先把高风险问题转成可复习知识。</p>
-          </article>
-        </section>
-
-        <form className="searchbar card-filter-row-next" onSubmit={(event) => { event.preventDefault(); props.onSearch(); }}>
-          <Search size={18} />
-          <input value={props.tag} onChange={(event) => props.onTagChange(event.target.value)} placeholder="按标签筛选，例如 安全、测试、重构" />
-          <select value={props.status} onChange={(event) => props.onStatusFilter(event.target.value)}>
-            <option value="all">全部状态</option>
-            <option value="new">未掌握</option>
-            <option value="reviewing">复习中</option>
-            <option value="mastered">已掌握</option>
-          </select>
-          <select value={difficultyFilter} onChange={(event) => setDifficultyFilter(event.target.value as "all" | LearningCardDifficulty)}>
-            <option value="all">全部强度</option>
-            <option value="hard">高强度</option>
-            <option value="medium">中强度</option>
-            <option value="easy">入门</option>
-          </select>
-          <select value={sourceFilter} onChange={(event) => setSourceFilter(event.target.value as "all" | CardSource)}>
-            <option value="all">全部来源</option>
-            <option value="finding">问题来源</option>
-            <option value="workspace">项目来源</option>
-            <option value="manual">手动创建</option>
-          </select>
-          <select value={sortMode} onChange={(event) => setSortMode(event.target.value as "review" | "newest" | "oldest")}>
-            <option value="review">复习优先</option>
-            <option value="newest">最新更新</option>
-            <option value="oldest">最早创建</option>
-          </select>
-          <button type="submit">
-            <Filter size={16} />
-            筛选
-          </button>
-        </form>
-
-        <div className="card-toolbar-next">
-          <div className="tag-cloud-next">
-            {tags.map((tag) => <button type="button" key={tag.name} onClick={() => props.onTagChange(tag.name)}><Tag size={13} />{tagLabel(tag.name)}<span>{tag.count}</span></button>)}
-            {tags.length === 0 && <span>暂无标签，创建或生成卡片后会自动出现。</span>}
-          </div>
-          {props.onExportCards && (
-            <button className="secondary-button" type="button" onClick={props.onExportCards} disabled={props.busy || props.cards.length === 0}>
-              <Download size={16} />
-              导出卡组
-            </button>
-          )}
-        </div>
-
-        <section className="card-candidate-review-next">
-          <div className="report-head">
-            <div>
-              <h3>卡片候选审核</h3>
-              <p>从报告和问题中提取候选知识点，人工确认后才写入知识卡片，避免把噪声直接放进复习库。</p>
-            </div>
-            <div className="button-row wrap">
-              <button className="secondary-button" type="button" onClick={props.onGenerateCandidates}>
-                <GraduationCap size={16} />
-                从当前报告生成
-              </button>
-              <button className="primary-button" type="button" disabled={props.busy || selectedCandidateCount === 0} onClick={props.onApproveCandidates}>
-                {props.busy ? <Loader2 className="spin" size={16} /> : <CheckCircle2 size={16} />}
-                通过选中 {selectedCandidateCount ? `(${selectedCandidateCount})` : ""}
-              </button>
-            </div>
-          </div>
-          <div className="simple-list">
-            {props.candidates.map((candidate) => (
-              <label className="candidate-card" key={candidate.id}>
-                <input type="checkbox" checked={props.selectedCandidateIds.includes(candidate.id)} onChange={(event) => props.onToggleCandidate(candidate.id, event.target.checked)} />
-                <span>
-                  <strong>{candidate.title}</strong>
-                  <small>{candidateSourceLabel(candidate.source_kind)} · {difficultyLabel(candidate.difficulty)} · {candidate.tags.map(tagLabel).join("、") || "暂无标签"}</small>
-                  <p>{candidate.content}</p>
-                </span>
-                <button className="mini-button" type="button" onClick={(event) => { event.preventDefault(); props.onRejectCandidate(candidate.id); }}>拒绝</button>
-              </label>
-            ))}
-            {props.candidates.length === 0 && <p className="muted">暂无待审核候选。打开报告后可一键生成。</p>}
-          </div>
-        </section>
-
-        <form className="control-panel" onSubmit={props.onCreateManual}>
-          <div className="section-title-next">
-            <span>手动沉淀</span>
-            <h3>手动创建卡片</h3>
-          </div>
-          <div className="two-fields">
-            <label>卡片标题<input value={props.manualTitle} onChange={(event) => props.onManualTitleChange(event.target.value)} placeholder="例如：为什么要参数化查询" /></label>
-            <label>标签<input value={props.manualTags} onChange={(event) => props.onManualTagsChange(event.target.value)} placeholder="逗号分隔，如 安全,SQL" /></label>
-          </div>
-          <label>卡片内容<textarea value={props.manualContent} onChange={(event) => props.onManualContentChange(event.target.value)} placeholder="记录知识点、来源、复习提示..." /></label>
-          <div className="button-row end">
-            <button className="primary-button" disabled={props.busy} type="submit">
-              {props.busy ? <Loader2 className="spin" size={18} /> : <Save size={18} />}
-              创建卡片
-            </button>
-          </div>
-        </form>
-
-        <div className="card-grid">
-          {visibleCards.map((card) => {
-            const difficulty = cardDifficulty(card);
-            return (
-              <article className={props.activeCardId === card.id ? "learning-card active" : "learning-card"} key={card.id}>
-                <button className="plain-card-button" onClick={() => props.onSelectCard(card.id)} type="button">
-                  <div className="tag-row">
-                    <span className={`card-difficulty-pill-next ${difficulty}`}>{difficultyLabel(difficulty)}</span>
-                    <span>{cardSourceLabel(cardSource(card))}</span>
-                    <span>{cardStatusLabel(card.status)}</span>
-                  </div>
-                  <h3>{card.title}</h3>
-                  <p>{card.content}</p>
-                  <small className="card-time-next">更新：{formatShortDate(card.updated_at)} · 创建：{formatShortDate(card.created_at)}</small>
-                </button>
-                <div className="button-row wrap">
-                  <button className="mini-button" type="button" onClick={() => props.onUpdate(card.id, "new")}>未掌握</button>
-                  <button className="mini-button" type="button" onClick={() => props.onUpdate(card.id, "reviewing")}>复习中</button>
-                  <button className="mini-button" type="button" onClick={() => props.onUpdate(card.id, "mastered")}>已掌握</button>
-                  <button className="mini-button" type="button" onClick={() => props.onGenerateMaterial(card.id)}>生成材料</button>
-                  <button className="icon-button danger" type="button" onClick={() => props.onDelete(card.id)} aria-label="删除知识卡片"><Trash2 size={16} /></button>
-                </div>
-              </article>
-            );
-          })}
-          {visibleCards.length === 0 && <div className="empty">当前筛选条件下暂无知识卡片。可以清空筛选、从问题清单生成，或手动创建。</div>}
-        </div>
-      </div>
-
-      <article className="card-material-next">
-        <div className="report-head">
-          <div>
-            <h3>{activeCard ? activeCard.title : "复习会话"}</h3>
-            <p>{activeCard ? `状态：${cardStatusLabel(activeCard.status)} · 强度：${difficultyLabel(cardDifficulty(activeCard))} · 来源：${cardSourceLabel(cardSource(activeCard))}` : "选择卡片后查看来源、学习材料和复习自检步骤。"}</p>
-          </div>
-          {activeCard && (
-            <div className="button-row wrap">
-              <button className="secondary-button" type="button" onClick={() => props.onUpdate(activeCard.id, "new")}>
-                <RotateCcw size={16} />
-                仍未掌握
-              </button>
-              <button className="primary-button" type="button" onClick={() => props.onGenerateMaterial(activeCard.id)} disabled={props.busy}>
-                {props.busy ? <Loader2 className="spin" size={16} /> : <GraduationCap size={16} />}
-                生成材料
-              </button>
-            </div>
-          )}
-        </div>
-
-        {activeCard ? (
-          <>
-            <section className="card-focus-next">
-              <span>卡片内容</span>
-              <p>{activeCard.content}</p>
-              <div className="card-meta-grid-next">
-                <small><Link2 size={14} />{activeCard.finding_id ? "关联问题" : activeCard.workspace_id ? "关联项目" : "手动记录"}</small>
-                <small><Tag size={14} />{activeCard.tags.map(tagLabel).join("、") || "暂无标签"}</small>
-                <small><Clock3 size={14} />{formatShortDate(activeCard.updated_at)}</small>
-              </div>
-              <div className="card-active-actions-next">
-                <button className="mini-button" type="button" onClick={() => props.onUpdate(activeCard.id, "reviewing")}>标记复习中</button>
-                <button className="mini-button" type="button" onClick={() => props.onUpdate(activeCard.id, "mastered")}>标记已掌握</button>
-              </div>
-            </section>
-
-            <section className="card-review-session-next">
-              <div className="section-title-next">
-                <span><Target size={15} />复习自检</span>
-                <h3>掌握这张卡片前需要回答的问题</h3>
-              </div>
-              <ol>
-                <li>我能不能用一句话解释它对应的代码问题或设计经验？</li>
-                <li>我能不能指出项目中可能出现同类问题的位置？</li>
-                <li>我能不能写出一个检查步骤、测试用例或修复动作？</li>
-              </ol>
-            </section>
-
-            <section className="card-material-summary-next">
-              <article><span>学习材料</span><strong>{activeMaterials.length}</strong></article>
-              <article><span>当前状态</span><strong>{cardStatusLabel(activeCard.status)}</strong></article>
-              <article><span>卡片强度</span><strong>{difficultyLabel(cardDifficulty(activeCard))}</strong></article>
-            </section>
-          </>
-        ) : (
-          <div className="empty">从左侧选择一张卡片开始复习。</div>
-        )}
-
-        <section className="card-review-queue-next">
-          <div className="section-title-next">
-            <span><Layers3 size={15} />复习队列</span>
-            <h3>下一批需要巩固的卡片</h3>
-          </div>
-          <div className="simple-list">
-            {reviewQueue.map((card) => (
-              <button className="review-card-row-next" key={card.id} onClick={() => props.onSelectCard(card.id)} type="button">
-                <strong>{card.title}</strong>
-                <span>{cardStatusLabel(card.status)} · {difficultyLabel(cardDifficulty(card))} · {card.tags.map(tagLabel).slice(0, 3).join("、") || "暂无标签"}</span>
-              </button>
-            ))}
-            {reviewQueue.length === 0 && <p className="muted">暂无待复习卡片。</p>}
-          </div>
-        </section>
-
-        {latestMaterial ? (
-          <div className="report-document-rich">{latestMaterial.content.split("\n").map((line, index) => renderMarkdownLine(line, index))}</div>
-        ) : (
-          <div className="empty">选择卡片后点击“生成材料”，这里会显示可复习内容。</div>
-        )}
-      </article>
-    </section>
-  );
-}
-
-function ProgressItem({ icon, title, value, detail }: { icon: JSX.Element; title: string; value: number | string; detail: string }) {
-  return (
-    <article>
-      <span>{icon}{title}</span>
-      <strong>{value}</strong>
-      <p>{detail}</p>
-    </article>
-  );
-}
-
-function learningCardStats(cards: LearningCard[]) {
-  return {
-    total: cards.length,
-    newCount: cards.filter((card) => card.status === "new").length,
-    reviewing: cards.filter((card) => card.status === "reviewing").length,
-    mastered: cards.filter((card) => card.status === "mastered").length
-  };
-}
-
-function learningDifficultyStats(cards: LearningCard[]) {
-  return cards.reduce(
-    (stats, card) => {
-      stats[cardDifficulty(card)] += 1;
-      return stats;
-    },
-    { easy: 0, medium: 0, hard: 0 } as Record<LearningCardDifficulty, number>
-  );
-}
-
-function learningTagCloud(cards: LearningCard[]) {
-  const map = new Map<string, number>();
-  for (const card of cards) {
-    for (const tag of card.tags) map.set(tag, (map.get(tag) || 0) + 1);
+  async function runFilter(action: () => Promise<void>) {
+    if (filterBusy) return;
+    setFilterBusy(true);
+    setActionError(null);
+    try {
+      await action();
+    } catch (error) {
+      setActionError(friendlyActionError(error, "筛选卡片失败，请稍后重试。"));
+    } finally {
+      setFilterBusy(false);
+    }
   }
-  return Array.from(map.entries()).map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 18);
+
+  async function choose(id: string) {
+    if (!id || id === props.activeCardId) return;
+    setActionError(null);
+    setMobileIndexOpen(false);
+    await props.onSelectCard(id);
+  }
+
+  async function updateStatus(card: LearningCard, nextStatus: string) {
+    if (pendingCardId || effectiveStatus(card) === nextStatus) return;
+    const previousStatus = effectiveStatus(card);
+    setPendingCardId(card.id);
+    setActionError(null);
+    setStatusOverrides((current) => ({ ...current, [card.id]: nextStatus }));
+    try {
+      await props.onUpdate(card.id, nextStatus);
+    } catch (error) {
+      setStatusOverrides((current) => ({ ...current, [card.id]: previousStatus }));
+      setActionError(friendlyActionError(error, "更新掌握状态失败，请稍后重试。"));
+    } finally {
+      setPendingCardId(null);
+    }
+  }
+
+  async function deleteCard() {
+    if (!deleteTarget || pendingCardId) return;
+    const target = deleteTarget;
+    setPendingCardId(target.id);
+    setActionError(null);
+    try {
+      await props.onDelete(target.id);
+      setDeleteTarget(null);
+    } catch (error) {
+      setActionError(friendlyActionError(error, "删除卡片失败，请稍后重试。"));
+    } finally {
+      setPendingCardId(null);
+    }
+  }
+
+  async function generateMaterial() {
+    if (!active || props.busy) return;
+    setActionError(null);
+    try {
+      await props.onGenerateMaterial(active.id);
+    } catch (error) {
+      setActionError(friendlyActionError(error, "生成学习材料失败，请稍后重试。"));
+    }
+  }
+
+  async function approveCandidates() {
+    setActionError(null);
+    try {
+      await props.onApproveCandidates();
+      setDrawer(null);
+    } catch (error) {
+      setActionError(friendlyActionError(error, "审核候选失败，请稍后重试。"));
+    }
+  }
+
+  async function rejectCandidate(id: string) {
+    setActionError(null);
+    try {
+      await props.onRejectCandidate(id);
+    } catch (error) {
+      setActionError(friendlyActionError(error, "拒绝候选失败，请稍后重试。"));
+    }
+  }
+
+  async function submitManual(event: FormEvent) {
+    event.preventDefault();
+    setActionError(null);
+    try {
+      await props.onCreateManual(event);
+      setDrawer(null);
+    } catch (error) {
+      setActionError(friendlyActionError(error, "创建卡片失败，请稍后重试。"));
+    }
+  }
+
+  return <section className="cards-workspace-v135" aria-busy={props.busy || filterBusy || Boolean(pendingCardId)}>
+    <ProductToolbar>
+      <div className="cards-toolbar-context-v141"><span>知识卡片</span><strong>{props.cards.length} 张</strong><em>待复习 {props.cards.length - mastered} · 掌握 {masteredPercent}%</em></div>
+      <div className="cards-toolbar-actions-v141">
+        {filterBusy && <span className="cards-toolbar-loading-v141"><Loader2 className="spin" size={14}/>正在更新</span>}
+        {props.onExportCards && <button disabled={props.busy || !props.cards.length} onClick={props.onExportCards} type="button"><Download size={15}/>导出</button>}
+        <button disabled={props.busy} onClick={(event) => { drawerTriggerRef.current = event.currentTarget; setDrawer("candidates"); }} type="button"><GraduationCap size={15}/>候选 {props.candidates.length || ""}</button>
+        <button className="primary-button" disabled={props.busy} onClick={(event) => { drawerTriggerRef.current = event.currentTarget; setDrawer("manual"); }} type="button"><Plus size={15}/>新增</button>
+      </div>
+    </ProductToolbar>
+
+    <button className="cards-mobile-index-v135" onClick={() => setMobileIndexOpen(true)} ref={mobileIndexTriggerRef} type="button"><BookOpen size={15}/>卡片索引 · {visible.length}</button>
+    <div className="cards-layout-v135">
+      {mobileIndexOpen && <button className="cards-scrim-v135" aria-label="关闭卡片索引" onClick={() => setMobileIndexOpen(false)} type="button"/>}
+      <aside aria-label="卡片索引" className={`cards-index-v135 ${mobileIndexOpen ? "is-open" : ""}`} ref={mobileIndexRef}>
+        <header><div><strong>卡片索引</strong><span>{visible.length} 张</span></div><button aria-label="关闭卡片索引" onClick={() => setMobileIndexOpen(false)} ref={mobileIndexCloseRef} type="button"><ChevronLeft size={16}/></button></header>
+        <label className="cards-search-v135"><Search size={14}/><input aria-label="搜索知识卡片" onChange={(event) => props.onQueryChange(event.target.value)} placeholder="搜索标题、标签或内容" value={props.query}/></label>
+        <div className="cards-filters-v135">
+          <AccessibleListbox compact disabled={filterBusy} label="状态" onChange={(value) => void runFilter(() => props.onStatusFilter(value))} options={statusOptions} value={props.status}/>
+          <AccessibleListbox compact label="难度" onChange={(value) => setDifficulty(value as "all" | Difficulty)} options={difficultyOptions} value={difficulty}/>
+          <AccessibleListbox compact label="来源" onChange={(value) => setSource(value as "all" | Source)} options={sourceOptions} value={source}/>
+          <AccessibleListbox compact label="排序" onChange={(value) => setSort(value as "review" | "newest" | "oldest")} options={sortOptions} value={sort}/>
+        </div>
+        <div className="cards-list-v135">
+          {visible.map((card) => <button aria-current={active?.id === card.id ? "page" : undefined} className={active?.id === card.id ? "active" : ""} key={card.id} onClick={() => void choose(card.id)} type="button"><span className={`card-status-dot-v141 ${effectiveStatus(card)}`}/><strong>{card.title}</strong><small>{statusLabel(effectiveStatus(card))} · {difficultyLabel(cardDifficulty(card))} · {sourceLabel(cardSource(card))}</small><span className="cards-list-tags-v141">{card.tags.slice(0, 2).map((tag) => <i key={tag}>{tag}</i>)}</span></button>)}
+          {!visible.length && <div className="cards-empty-v141"><strong>没有匹配的知识卡片</strong><span>可清除搜索内容或调整筛选条件。</span><button onClick={() => { props.onQueryChange(""); setDifficulty("all"); setSource("all"); setSort("review"); void runFilter(() => props.onStatusFilter("all")); }} type="button">重置筛选</button></div>}
+        </div>
+      </aside>
+
+      <main className="card-detail-v135">
+        {active ? <>
+          <header className="card-detail-header-v141">
+            <div className="card-detail-labels-v141"><span>{statusLabel(activeStatus)}</span><span>{difficultyLabel(cardDifficulty(active))}</span><span>{sourceLabel(cardSource(active))}</span></div>
+            <h3>{active.title}</h3>
+            <dl className="card-source-grid-v141">
+              <div><dt>来源</dt><dd>{props.sourceFinding ? "问题沉淀" : sourceLabel(cardSource(active))}</dd></div>
+              <div><dt>更新时间</dt><dd>{formatDate(active.updated_at)}</dd></div>
+              {props.sourceFinding && <div className="card-source-reference-v141"><dt>关联问题</dt><dd title={props.sourceFinding.title}>{props.sourceFinding.title}</dd></div>}
+              {props.sourceReportTitle && <div className="card-source-reference-v141"><dt>关联报告</dt><dd title={props.sourceReportTitle}>{props.sourceReportTitle}</dd></div>}
+            </dl>
+            {props.sourceFinding && <div className="card-source-actions-v141"><button onClick={props.onOpenSourceFinding} type="button"><ShieldAlert size={14}/>查看问题</button>{props.sourceReportTitle && <button onClick={props.onOpenSourceReport} type="button"><FileText size={14}/>打开报告</button>}</div>}
+            <button aria-label="删除卡片" className="card-delete-trigger-v141" onClick={() => setDeleteTarget(active)} ref={deleteTriggerRef} title="删除卡片" type="button"><Trash2 size={16}/></button>
+          </header>
+
+          <section className="card-content-v135"><span>知识内容</span><p>{active.content}</p><div>{active.tags.map((tag) => <span key={tag}><Tag size={12}/>{tag}</span>)}</div></section>
+          <section className="card-status-v135" aria-label="掌握状态"><div><span>掌握状态</span><p>状态会保留在本地学习记录中。</p></div><div className="card-status-actions-v141" role="group" aria-label="更新掌握状态"><button aria-pressed={activeStatus === "new"} disabled={Boolean(pendingCardId)} onClick={() => void updateStatus(active, "new")} type="button">未掌握</button><button aria-pressed={activeStatus === "reviewing"} disabled={Boolean(pendingCardId)} onClick={() => void updateStatus(active, "reviewing")} type="button">复习中</button><button aria-pressed={activeStatus === "mastered"} disabled={Boolean(pendingCardId)} onClick={() => void updateStatus(active, "mastered")} type="button"><Check size={14}/>已掌握</button></div></section>
+          <section className="card-self-check-v135"><span>复习提示</span><ul><li>用自己的话解释这张卡片对应的知识点。</li><li>回想它在原问题中的影响与检查方式。</li><li>确认是否能写出验证或修复步骤。</li></ul>{reviewQueue[0] && <button onClick={() => void choose(reviewQueue[0].id)} type="button">下一张：{reviewQueue[0].title}<ArrowUpRight size={14}/></button>}</section>
+          <section className="card-material-v135"><header><div><span>学习材料</span><strong>{materials.length ? `${materials.length} 份材料` : "尚未生成"}</strong></div><button disabled={props.busy || Boolean(pendingCardId)} onClick={() => void generateMaterial()} type="button">{props.busy ? <Loader2 className="spin" size={14}/> : <RefreshCw size={14}/>} {latestMaterial ? "重新生成" : "生成材料"}</button></header>{latestMaterial ? <article className="report-document-rich">{latestMaterial.content.split("\n").map(renderLine)}</article> : <div className="card-material-empty-v135">生成一份围绕当前知识点的复习材料。</div>}</section>
+          {actionError && <p className="card-action-error-v141" role="alert">{actionError}</p>}
+        </> : <div className="cards-empty-v141 card-detail-empty-v141"><BookOpen size={22}/><strong>从一张知识卡片开始复习</strong><span>可从问题清单生成，或手动沉淀一个知识点。</span><button onClick={(event) => { drawerTriggerRef.current = event.currentTarget; setDrawer("manual"); }} type="button">创建知识卡片</button></div>}
+      </main>
+    </div>
+
+    {drawer && <><button className="cards-drawer-scrim-v135" aria-label="关闭新增卡片抽屉" onClick={() => setDrawer(null)} type="button"/><aside aria-labelledby="cards-drawer-title-v144" aria-modal="true" className="cards-drawer-v135" ref={drawerRef} role="dialog"><header><strong id="cards-drawer-title-v144">新增与候选</strong><button aria-label="关闭抽屉" onClick={() => setDrawer(null)} ref={drawerCloseRef} type="button"><X size={17}/></button></header><div aria-label="卡片创建方式" className="cards-drawer-tabs-v135" role="tablist"><button aria-controls="cards-candidates-panel-v144" aria-selected={drawer === "candidates"} className={drawer === "candidates" ? "active" : ""} onClick={() => setDrawer("candidates")} role="tab" type="button">候选审核</button><button aria-controls="cards-manual-panel-v144" aria-selected={drawer === "manual"} className={drawer === "manual" ? "active" : ""} onClick={() => setDrawer("manual")} role="tab" type="button">手动创建</button></div>
+      {drawer === "candidates" ? <section aria-labelledby="cards-drawer-title-v144" className="card-candidates-v135" id="cards-candidates-panel-v144" role="tabpanel"><div className="cards-drawer-actions-v135"><button disabled={props.busy} onClick={() => void props.onGenerateCandidates()} type="button"><GraduationCap size={14}/>从当前报告生成</button><button className="primary-button" disabled={props.busy || !props.selectedCandidateIds.length} onClick={() => void approveCandidates()} type="button">通过选中 {props.selectedCandidateIds.length || ""}</button></div>{props.candidates.map((candidate) => <article className="card-candidate-row-v144" key={candidate.id}><label htmlFor={`card-candidate-${candidate.id}`}><input checked={props.selectedCandidateIds.includes(candidate.id)} id={`card-candidate-${candidate.id}`} onChange={(event) => props.onToggleCandidate(candidate.id, event.target.checked)} type="checkbox"/><span><strong>{candidate.title}</strong><small>{difficultyLabel(candidate.difficulty)} · {candidate.tags.join("、") || "暂无标签"}</small><p>{candidate.content}</p></span></label><button disabled={props.busy} onClick={() => void rejectCandidate(candidate.id)} type="button">拒绝</button></article>)}{!props.candidates.length && <p className="cards-drawer-empty-v135">暂无待审核候选。打开一份报告后，可在这里生成和审核候选。</p>}</section> : <form aria-labelledby="cards-drawer-title-v144" className="card-manual-v135" id="cards-manual-panel-v144" onSubmit={(event) => void submitManual(event)} role="tabpanel"><label>标题<input onChange={(event) => props.onManualTitleChange(event.target.value)} placeholder="输入知识点标题" value={props.manualTitle}/></label><label>标签<input onChange={(event) => props.onManualTagsChange(event.target.value)} placeholder="使用逗号分隔" value={props.manualTags}/></label><label>内容<textarea onChange={(event) => props.onManualContentChange(event.target.value)} placeholder="记录知识点、来源和复习提示" value={props.manualContent}/></label><button className="primary-button" disabled={props.busy} type="submit">{props.busy ? <Loader2 className="spin" size={15}/> : <Plus size={15}/>}创建卡片</button></form>}
+      {actionError && <p className="card-drawer-error-v141" role="alert">{actionError}</p>}
+    </aside></>}
+
+    {deleteTarget && <div className="card-delete-layer-v141" role="presentation"><button aria-label="取消删除卡片" className="card-delete-scrim-v141" onClick={() => setDeleteTarget(null)} type="button"/><section aria-labelledby="card-delete-title-v141" aria-modal="true" className="card-delete-dialog-v141" ref={deleteDialogRef} role="dialog"><header><Trash2 size={18}/><div><strong id="card-delete-title-v141">删除这张卡片？</strong><span>{deleteTarget.title}</span></div></header><p>将删除本地卡片及其学习材料，不会修改原项目文件、问题或报告。</p><footer><button className="secondary-button" disabled={Boolean(pendingCardId)} onClick={() => setDeleteTarget(null)} ref={deleteCancelRef} type="button">取消</button><button className="danger-button" disabled={Boolean(pendingCardId)} onClick={() => void deleteCard()} type="button">确认删除</button></footer></section></div>}
+  </section>;
 }
 
-function compareCards(left: LearningCard, right: LearningCard, sortMode: "review" | "newest" | "oldest") {
-  if (sortMode === "newest") return right.updated_at.localeCompare(left.updated_at);
-  if (sortMode === "oldest") return left.created_at.localeCompare(right.created_at);
-  const statusPriority: Record<string, number> = { reviewing: 0, new: 1, mastered: 2 };
-  const leftPriority = statusPriority[left.status] ?? 3;
-  const rightPriority = statusPriority[right.status] ?? 3;
-  if (leftPriority !== rightPriority) return leftPriority - rightPriority;
-  const difficultyPriority: Record<LearningCardDifficulty, number> = { hard: 0, medium: 1, easy: 2 };
-  return difficultyPriority[cardDifficulty(left)] - difficultyPriority[cardDifficulty(right)] || right.updated_at.localeCompare(left.updated_at);
-}
-
-function cardDifficulty(card: LearningCard): LearningCardDifficulty {
+function cardDifficulty(card: LearningCard): Difficulty {
   const text = `${card.title} ${card.content} ${card.tags.join(" ")}`.toLowerCase();
-  if (text.includes("high") || text.includes("高风险") || text.includes("安全") || text.includes("security") || card.content.length > 520) return "hard";
-  if (text.includes("medium") || text.includes("重构") || text.includes("测试") || text.includes("可靠") || card.content.length > 240) return "medium";
+  if (text.includes("high") || text.includes("安全") || text.includes("security") || card.content.length > 520) return "hard";
+  if (text.includes("medium") || text.includes("重构") || text.includes("测试") || card.content.length > 240) return "medium";
   return "easy";
 }
 
-function cardSource(card: LearningCard): CardSource {
-  if (card.finding_id) return "finding";
-  if (card.workspace_id) return "workspace";
-  return "manual";
+function cardSource(card: LearningCard): Source {
+  return card.finding_id ? "finding" : card.workspace_id ? "workspace" : "manual";
 }
 
-function renderMarkdownLine(line: string, index: number) {
-  const trimmed = line.trim();
-  if (trimmed.startsWith("# ")) return <h3 key={index}>{trimmed.slice(2)}</h3>;
-  if (trimmed.startsWith("## ")) return <h4 key={index}>{trimmed.slice(3)}</h4>;
-  if (trimmed.startsWith("- ")) return <p className="doc-list" key={index}>{trimmed}</p>;
-  if (!trimmed) return <div className="doc-gap" key={index} />;
-  return <p key={index}>{line}</p>;
+function compareCards(left: LearningCard, right: LearningCard, sort: "review" | "newest" | "oldest", getStatus: (card: LearningCard) => string) {
+  if (sort === "newest") return right.updated_at.localeCompare(left.updated_at);
+  if (sort === "oldest") return left.created_at.localeCompare(right.created_at);
+  const priority: Record<string, number> = { reviewing: 0, new: 1, mastered: 2 };
+  return (priority[getStatus(left)] ?? 3) - (priority[getStatus(right)] ?? 3) || right.updated_at.localeCompare(left.updated_at);
 }
 
-function severityLabel(value: string) {
-  const labels: Record<string, string> = { high: "高风险", medium: "中风险", low: "低风险", info: "提示" };
-  return labels[value] || value;
-}
-
-function categoryLabel(value: string) {
-  const labels: Record<string, string> = {
-    security: "安全",
-    quality: "质量",
-    reliability: "可靠性",
-    maintainability: "可维护性",
-    test: "测试",
-    refactor: "重构"
-  };
-  return labels[value] || value;
-}
-
-function cardStatusLabel(value: string) {
-  const labels: Record<string, string> = {
-    new: "未掌握",
-    reviewing: "复习中",
-    mastered: "已掌握"
-  };
-  return labels[value] || value;
-}
-
-function difficultyLabel(value: string) {
-  const labels: Record<string, string> = { easy: "入门", medium: "中强度", hard: "高强度" };
-  return labels[value] || value;
-}
-
-function candidateSourceLabel(value: string) {
-  const labels: Record<string, string> = {
-    report: "报告",
-    finding: "问题",
-    manual: "手动",
-    card: "卡片"
-  };
-  return labels[value] || "本地分析";
-}
-
-function cardSourceLabel(value: CardSource) {
-  const labels: Record<CardSource, string> = {
-    finding: "问题来源",
-    workspace: "项目来源",
-    manual: "手动创建"
-  };
-  return labels[value];
-}
-
-function tagLabel(value: string) {
-  return severityLabel(categoryLabel(value));
-}
-
-function formatShortDate(value: string) {
-  if (!value) return "未知";
-  return value.slice(0, 10);
-}
+function statusLabel(value: string) { return ({ new: "未掌握", reviewing: "复习中", mastered: "已掌握" } as Record<string, string>)[value] || value; }
+function difficultyLabel(value: string) { return ({ easy: "入门", medium: "中强度", hard: "高强度" } as Record<string, string>)[value] || value; }
+function sourceLabel(value: Source) { return ({ finding: "问题来源", workspace: "项目来源", manual: "手动创建" } as Record<Source, string>)[value]; }
+function formatDate(value: string) { return value ? value.slice(0, 10) : "未知"; }
+function friendlyActionError(error: unknown, fallback: string) { return error instanceof Error && error.message ? error.message : fallback; }
+function renderLine(line: string, index: number) { const text = line.trim(); if (text.startsWith("# ")) return <h3 key={index}>{text.slice(2)}</h3>; if (text.startsWith("## ")) return <h4 key={index}>{text.slice(3)}</h4>; if (text.startsWith("- ")) return <p className="doc-list" key={index}>{text}</p>; if (!text) return <div className="doc-gap" key={index}/>; return <p key={index}>{line}</p>; }

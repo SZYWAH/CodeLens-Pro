@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   ActivityEvent,
+  ActivityConstellationData,
   ActivityGalaxyData,
   ActivitySummary,
   AgentApplyRequest,
@@ -749,6 +750,34 @@ export async function getActivityGalaxyData(): Promise<ActivityGalaxyData> {
   }));
 }
 
+export async function getActivityConstellation(limit = 300): Promise<ActivityConstellationData> {
+  return call("get_activity_constellation", { limit }, () => ({
+    items: mockActivityEvents.slice(0, Math.max(1, Math.min(limit, 300))).map((event, index) => {
+      const kind = mockActivityStarKind(event.entity_kind || event.event_type);
+      const targetId = event.entity_id || event.id;
+      return {
+        id: `${event.entity_kind || event.event_type}:${targetId}`,
+        kind,
+        kind_label: mockActivityKindLabel(kind),
+        title: event.title,
+        subtitle: event.detail,
+        status: "active",
+        target_id: targetId,
+        created_at: event.created_at,
+        route: {
+          page: mockActivityRoutePage(kind),
+          target_id: targetId,
+          session_id: kind === "chat" ? targetId : null,
+          plan_id: kind === "agent" ? targetId : null,
+          context_type: mockActivityKindLabel(kind)
+        },
+        weight: Math.max(1, 6 - Math.floor(index / 10))
+      };
+    }),
+    code_line_count: mockWorkspaces.reduce((sum, item) => sum + item.summary.total_lines, 0)
+  }));
+}
+
 export async function getTraceabilitySnapshot(scopeKind?: string, scopeId?: string): Promise<TraceabilitySnapshot> {
   return call(
     "get_traceability_snapshot",
@@ -771,6 +800,23 @@ export async function getReport(id: string): Promise<ReportDetail> {
   return call("get_report", { id }, () => {
     const report = mockReports.find((item) => item.id === id);
     if (!report) throw new Error("report not found");
+    return report;
+  });
+}
+
+export async function renameReport(id: string, title: string): Promise<ReportDetail> {
+  return call("rename_report", { id, title }, () => {
+    const report = mockReports.find((item) => item.id === id);
+    if (!report) throw new Error("report not found");
+    const base = title.trim().slice(0, 60);
+    if (!base) throw new Error("报告标题不能为空。");
+    let candidate = base;
+    let counter = 2;
+    while (mockReports.some((item) => item.id !== id && item.title === candidate)) {
+      candidate = `${base.slice(0, Math.max(0, 60 - String(counter).length - 2))}（${counter}）`;
+      counter += 1;
+    }
+    report.title = candidate;
     return report;
   });
 }
@@ -1142,13 +1188,20 @@ function mockCodeAnalysis(request: AnalysisRequest): AnalysisResponse {
   const lineCount = request.code.split("\n").length;
   const modeLabel = request.mode_label || "综合代码审查";
   const full = `# 单文件代码分析报告\n\n## 摘要\n已分析 ${lineCount} 行 ${language} 代码。当前为浏览器预览模式，桌面端会调用 Rust 本地分析并保存到 SQLite。\n\n## 分析模式\n- 当前模式：${modeLabel}\n- 后续动作：可继续生成知识卡片、加入每日日志，或围绕本报告创建 Agent 计划。\n\n## 主要风险\n- 请关注输入校验、异常处理、敏感信息和复杂分支。\n\n## 优先建议\n- 把核心行为补充成测试用例，再把报告中的高价值结论沉淀为知识卡片或 Agent 计划。`;
-  const report = makeReport(request.title || `${language} 单文件代码分析`, "single", full, [
+  const report = makeReport(request.title || previewSingleReportTitle(request, language), "single", full, [
     { path: "pasted-code", content: request.code, language }
   ]);
   report.metadata_json = JSON.stringify({ analysis_profile: modeLabel, mode_group: request.mode_group, mode: request.mode });
   mockReports.unshift(report);
   mockActivity("report", "生成单文件代码分析报告", report.title, "report", report.id);
   return { report, warnings: [] };
+}
+
+function previewSingleReportTitle(request: AnalysisRequest, language: string): string {
+  const source = request.source_label?.split(/[\\/]/).pop()?.replace(/\.[^.]+$/, "").trim();
+  const symbol = request.code.match(/(?:async\s+function|function|async\s+fn|fn|def|class|struct|interface)\s+([A-Za-z_$][\w$]*)/)?.[1];
+  const subject = source || symbol || language;
+  return `${subject} ${request.mode_label || "代码审查"}`.slice(0, 60);
 }
 
 async function mockProjectAnalysis(request: ProjectAnalyzeRequest, onChunk: (chunk: string) => void): Promise<AnalysisResponse> {
@@ -1376,6 +1429,44 @@ function mockActivity(
   return event;
 }
 
+function mockActivityStarKind(source?: string | null) {
+  if (source === "workspace") return "workspace";
+  if (source === "report" || source === "product_archive") return "report";
+  if (source === "finding") return "finding";
+  if (source === "learning_card" || source === "card" || source === "card_candidate" || source === "card_material") return "card";
+  if (source === "daily_log") return "log";
+  if (source === "chat" || source === "chat_session") return "chat";
+  if (source === "agent" || source === "agent_task") return "agent";
+  return "activity";
+}
+
+function mockActivityKindLabel(kind: string) {
+  const labels: Record<string, string> = {
+    workspace: "工作区",
+    report: "报告",
+    finding: "问题",
+    card: "知识卡片",
+    log: "每日日志",
+    chat: "对话",
+    agent: "行动草稿",
+    activity: "活动"
+  };
+  return labels[kind] || "活动";
+}
+
+function mockActivityRoutePage(kind: string) {
+  const routes: Record<string, string> = {
+    workspace: "projects",
+    report: "history",
+    finding: "findings",
+    card: "cards",
+    log: "logs",
+    chat: "chat",
+    agent: "agent"
+  };
+  return routes[kind] || "galaxy";
+}
+
 function mockActivitySummary(): ActivitySummary {
   const counts = new Map<string, number>();
   for (const event of mockActivityEvents) {
@@ -1464,6 +1555,71 @@ function mockTraceabilitySnapshot(scopeKind = "global", scopeId?: string): Trace
     generated_at: now
   };
 }
+
+function seedPreviewFixtures() {
+  if (mockWorkspaces.length) return;
+
+  const workspace = mockWorkspace();
+  const report = makeReport(
+    "预览项目审查报告",
+    "project",
+    "# 预览项目审查报告\n\n## 摘要\n用于验证问题索引、知识卡片、候选审核与来源回溯。\n\n## 风险\n- 外部输入进入业务分支前缺少校验。\n- 超长模块增加人工审查成本。\n\n## 建议\n- 提取边界校验并补充回归测试。\n- 将复杂逻辑拆分成职责清晰的函数。",
+    workspace.files
+  );
+  report.risk_level = "high";
+  report.risks = ["外部输入缺少边界校验", "复杂模块需要重点复查"];
+  report.suggestions = ["为异常路径补充回归测试", "拆分高复杂度函数并补充命名"];
+  report.metadata_json = JSON.stringify({ workspace_id: workspace.summary.id, mode_label: "风险审查" });
+  mockReports.unshift(report);
+
+  const baseFinding = mockFindings[0];
+  if (!baseFinding) return;
+  baseFinding.report_id = report.id;
+  const fixtures: Array<Pick<Finding, "title" | "file_path" | "severity" | "category" | "status">> = [
+    { title: "复杂文件需要重点审查：输入校验与异常分支耦合", file_path: "src/features/authentication/validateExternalIdentity.ts", severity: "high", category: "security", status: "open" },
+    { title: "检测到疑似凭据相关字符串，建议确认是否应移出源码", file_path: "src/config/runtime/environment.defaults.ts", severity: "high", category: "security", status: "reviewing" },
+    { title: "响应解析逻辑缺少失败路径，可能导致页面状态不同步", file_path: "src/services/profile/parseRemoteProfileResponse.ts", severity: "medium", category: "reliability", status: "open" },
+    { title: "状态更新函数承担过多职责，建议拆分为命名清晰的 helper", file_path: "src/workbench/state/synchronizeReviewLifecycle.ts", severity: "medium", category: "maintainability", status: "resolved" },
+    { title: "缺少输入边界测试，建议覆盖空值与超长文本", file_path: "tests/review/input-boundaries.spec.ts", severity: "low", category: "quality", status: "open" }
+  ];
+  const now = new Date().toISOString();
+  for (const fixture of fixtures) {
+    mockFindings.unshift({
+      ...baseFinding,
+      ...fixture,
+      id: crypto.randomUUID(),
+      workspace_id: workspace.summary.id,
+      report_id: report.id,
+      detail: `预览夹具：${fixture.title}`,
+      suggestion: "确认影响范围后，补充边界校验与最小回归测试。",
+      created_at: now,
+      updated_at: now
+    });
+  }
+
+  const statusCycle = ["new", "reviewing", "mastered"] as const;
+  const cards = mockFindings.slice(0, 4).map((finding, index) => ({
+    ...makeCard(finding),
+    status: statusCycle[index % statusCycle.length],
+    tags: [finding.severity, finding.category, index % 2 ? "边界校验" : "复盘"]
+  }));
+  mockCards.unshift(...cards);
+  if (cards[0]) {
+    mockMaterials.unshift({
+      id: crypto.randomUUID(),
+      card_id: cards[0].id,
+      title: `${cards[0].title}：学习材料`,
+      content: `# ${cards[0].title}\n\n## 学习目标\n解释风险来源，并写出最小验证路径。\n\n## 复习提示\n- 用自己的话说明问题。\n- 找到类似代码片段。\n- 写出回归测试。`,
+      source: "mock",
+      created_at: now
+    });
+  }
+  mockCardCandidates.unshift(...report.risks.map((item, index) => makeCardCandidate(report, item, index)));
+  mockActivity("report", "生成预览审查报告", report.title, "report", report.id);
+  mockActivity("card", "沉淀预览知识卡片", `${cards.length} 张卡片`, "learning_card", cards[0]?.id);
+}
+
+seedPreviewFixtures();
 
 function activityTypeLabel(value: string) {
   const labels: Record<string, string> = {

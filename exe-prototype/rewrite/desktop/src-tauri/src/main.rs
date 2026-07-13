@@ -6,10 +6,11 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use codelens_next_core::{
-    ActivityEvent, ActivityGalaxyData, ActivitySummary, AgentApplyRequest, AgentApplyResult,
-    AgentPlanRequest, AgentTask, AnalysisRequest, AnalysisResponse, AppHealth, CardMaterial,
-    ChatSessionDetail, ChatSessionSummary, ChatStreamRequest, CodeMap, CoreApp, DailyLog,
-    DailySummary, DiffAnalyzeRequest, Finding, LearningCalendarItem, LearningCard,
+    ActivityConstellationData, ActivityEvent, ActivityGalaxyData, ActivitySummary,
+    AgentApplyRequest, AgentApplyResult, AgentPlanRequest, AgentTask, AnalysisRequest,
+    AnalysisResponse, AppHealth, CardMaterial, ChatSessionDetail, ChatSessionSummary,
+    ChatStreamRequest, CodeMap, CoreApp, DailyLog, DailySummary, DiffAnalyzeRequest, Finding,
+    LearningCalendarItem, LearningCard,
     LearningCardCandidate, LearningCardCreate, LearningCenterData, LlmTestResult,
     ModelProfile, ModelProfileInput, ProductArchiveImportResult, ProductArchiveResult, ProjectAnalyzeRequest, ProjectGuide,
     ProjectImportResult, ReportDetail, ReportSummary, Settings, SettingsUpdate,
@@ -149,6 +150,11 @@ fn list_reports(
 #[tauri::command]
 fn get_report(core: State<'_, CoreApp>, id: String) -> CommandResult<ReportDetail> {
     core.get_report(id).map_err(format_error)
+}
+
+#[tauri::command]
+fn rename_report(core: State<'_, CoreApp>, id: String, title: String) -> CommandResult<ReportDetail> {
+    core.rename_report(id, title).map_err(format_error)
 }
 
 #[tauri::command]
@@ -540,6 +546,11 @@ fn get_activity_galaxy_data(core: State<'_, CoreApp>) -> CommandResult<ActivityG
 }
 
 #[tauri::command]
+fn get_activity_constellation(core: State<'_, CoreApp>, limit: Option<usize>) -> CommandResult<ActivityConstellationData> {
+    core.get_activity_constellation(limit).map_err(format_error)
+}
+
+#[tauri::command]
 fn get_traceability_snapshot(
     core: State<'_, CoreApp>,
     scope_kind: Option<String>,
@@ -639,6 +650,7 @@ fn main() {
             send_chat_message_stream,
             list_reports,
             get_report,
+            rename_report,
             delete_report,
             list_chat_sessions,
             get_chat_session,
@@ -689,6 +701,7 @@ fn main() {
             record_activity_event,
             get_activity_summary,
             get_activity_galaxy_data,
+            get_activity_constellation,
             get_traceability_snapshot,
             test_llm_connection,
             open_storage_dir,

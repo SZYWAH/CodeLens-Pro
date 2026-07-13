@@ -66,6 +66,6 @@ export function describeContext(context: string, workspaces: WorkspaceSummary[],
   }
   if (kind === "finding") return `问题：${findings.find((item) => item.id === rawId)?.title || "当前问题"}`;
   if (kind === "report") return `报告：${reports.find((item) => item.id === rawId)?.title || "当前报告"}`;
-  if (kind === "agent_task") return "Agent 计划：当前选中任务";
+  if (kind === "agent_task") return "行动草稿：当前选中任务";
   return context;
 }

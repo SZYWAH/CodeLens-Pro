@@ -87,6 +87,7 @@ export type ReportSummary = {
   id: string;
   title: string;
   language: string;
+  review_focus?: string;
   summary: string;
   analysis_source: string;
   report_type: string;
@@ -118,6 +119,7 @@ export type ProjectAnalyzeRequest = {
 
 export type AnalysisRequest = {
   title?: string;
+  source_label?: string;
   code: string;
   language?: string;
   mode_group?: string;
@@ -522,6 +524,32 @@ export type ActivityLink = {
 export type ActivityGalaxyData = {
   nodes: ActivityNode[];
   links: ActivityLink[];
+};
+
+export type ActivityStarRoute = {
+  page?: string | null;
+  target_id?: string | null;
+  session_id?: string | null;
+  plan_id?: string | null;
+  context_type?: string | null;
+};
+
+export type ActivityStarItem = {
+  id: string;
+  kind: string;
+  kind_label: string;
+  title: string;
+  subtitle: string;
+  status: string;
+  target_id: string;
+  created_at: string;
+  route?: ActivityStarRoute | null;
+  weight: number;
+};
+
+export type ActivityConstellationData = {
+  items: ActivityStarItem[];
+  code_line_count: number;
 };
 
 export type TraceabilityCounts = {

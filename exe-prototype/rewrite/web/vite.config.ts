@@ -1,9 +1,15 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+import { fileURLToPath, URL } from "node:url";
 
-export default defineConfig({
+export default defineConfig(({ mode }) => ({
   plugins: [react()],
   clearScreen: false,
+  resolve: mode === "preview" ? {
+    alias: {
+      "./api": fileURLToPath(new URL("./src/dev-preview/client.ts", import.meta.url))
+    }
+  } : undefined,
   build: {
     chunkSizeWarningLimit: 650,
     rollupOptions: {
@@ -19,4 +25,4 @@ export default defineConfig({
     port: 1420,
     strictPort: true
   }
-});
+}));

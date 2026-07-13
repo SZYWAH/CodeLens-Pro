@@ -4,6 +4,7 @@ param(
     [double]$MinFreeMemoryGB = 2,
     [switch]$SkipReleaseBuild,
     [switch]$SkipVisualSmoke,
+    [switch]$SkipInteractionSmoke,
     [switch]$SkipLaunchSmoke
 )
 
@@ -121,6 +122,18 @@ try {
     Invoke-CheckedCommand -FilePath npm -Arguments @("run", "build")
 } finally {
     Pop-Location
+}
+
+Write-Host "Running frontend scale audit..." -ForegroundColor Cyan
+Invoke-CheckedCommand -FilePath powershell -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "Test-FrontendScaleAudit.ps1"))
+
+if (-not $SkipInteractionSmoke) {
+    Write-Host "Running frontend interaction smoke test..." -ForegroundColor Cyan
+    $interactionSmokeScript = Join-Path $ScriptDir "Test-FrontendInteractionSmoke.ps1"
+    if (-not (Test-Path $interactionSmokeScript)) {
+        throw "Frontend interaction smoke script was not found: $interactionSmokeScript"
+    }
+    Invoke-CheckedCommand -FilePath powershell -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $interactionSmokeScript, "-OutputDir", (Join-Path $OutputRoot "v14.15-route-audit"))
 }
 
 if (-not $SkipVisualSmoke) {
