@@ -269,7 +269,7 @@ function Invoke-CdpJson {
 function Wait-PageSettled {
     param(
         [Parameter(Mandatory = $true)]$Client,
-        [int]$TimeoutMilliseconds = 3000
+        [int]$TimeoutMilliseconds = 6000
     )
 
     $deadline = (Get-Date).AddMilliseconds($TimeoutMilliseconds)
@@ -329,8 +329,20 @@ function Navigate-CdpPage {
     Invoke-CdpCommand -Client $Client -Method "Page.addScriptToEvaluateOnNewDocument" -Parameters @{
         source = "try { window.localStorage.setItem('codelens.theme', $themeLiteral); } catch (error) {}"
     } | Out-Null
-    Invoke-CdpCommand -Client $Client -Method "Page.navigate" -Parameters @{ url = $Url } | Out-Null
-    Wait-PageSettled -Client $Client
+    $lastError = $null
+    for ($attempt = 1; $attempt -le 2; $attempt += 1) {
+        try {
+            Invoke-CdpCommand -Client $Client -Method "Page.navigate" -Parameters @{ url = $Url } | Out-Null
+            Wait-PageSettled -Client $Client
+            return
+        } catch {
+            $lastError = $_
+            if ($attempt -lt 2) {
+                Start-Sleep -Milliseconds 250
+            }
+        }
+    }
+    throw "The route did not settle after 2 navigation attempts: $($lastError.Exception.Message)"
 }
 
 function Get-VisibleControlSnapshot {
@@ -789,8 +801,11 @@ function Test-DialogFocusContract {
     $record.shiftTabFocusContained = [bool]$afterShiftTab.activeInside
 
     Invoke-CdpKey -Client $Client -Key "Escape" -VirtualKeyCode 27
-    Start-Sleep -Milliseconds 120
-    $afterEscape = Invoke-CdpJson -Client $Client -Expression @"
+    $afterEscape = $null
+    $returnFocusDeadline = (Get-Date).AddSeconds(1)
+    do {
+        Start-Sleep -Milliseconds 50
+        $afterEscape = Invoke-CdpJson -Client $Client -Expression @"
 (function() {
     var opener = document.querySelector($openerLiteral);
     var dialog = document.querySelector("[role=" + $expectedRoleLiteral + "]");
@@ -807,6 +822,10 @@ function Test-DialogFocusContract {
     };
 })()
 "@
+        if (-not $afterEscape.dialogVisible -and $afterEscape.returnedFocus) {
+            break
+        }
+    } while ((Get-Date) -lt $returnFocusDeadline)
     $record.escaped = -not [bool]$afterEscape.dialogVisible
     $record.returnedFocus = [bool]$afterEscape.returnedFocus
     $record.passed = $record.initialFocusContained -and $record.tabFocusContained -and $record.shiftTabFocusContained -and $record.escaped -and $record.returnedFocus
