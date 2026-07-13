@@ -62,7 +62,7 @@ CodeLens Pro Next 是 CodeLens Pro 的本地独立重写版，面向真实个人
 桌面源码使用两层 Windows 质量门禁：
 
 - `.github/workflows/desktop-ci.yml`：PR 与 `master` 推送触发。使用 Node.js 22、Rust stable 和锁文件依赖，执行正式/预览构建、生产入口隔离、字号审计、Rust 测试、Tauri 检查，以及深浅主题下 16 组快速交互烟测。该工作流不构建 EXE。
-- `.github/workflows/desktop-release-audit.yml`：仅手动触发。执行完整路由矩阵、视觉烟测、真实项目闭环验收和 Release 构建，并上传候选 EXE 与最小审计证据 14 天。工作流不会创建标签或 GitHub Release。
+- `.github/workflows/desktop-release-audit.yml`：仅手动触发。执行完整路由矩阵、视觉烟测、真实项目闭环验收和 Release 构建，并上传候选 EXE、全路由截图与最小审计证据 14 天。工作流不会创建标签或 GitHub Release。
 
 本机复现快速门禁前，分别在 `web` 与 `desktop` 目录执行 `npm ci`，再运行：
 

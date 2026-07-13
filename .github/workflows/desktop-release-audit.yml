@@ -58,6 +58,7 @@ jobs:
         run: >-
           ./exe-prototype/rewrite/scripts/Audit-CodelensNext.ps1
           -SkipLaunchSmoke
+          -CaptureInteractionScreenshots
           -MaxCpuPercent 100
           -MinFreeMemoryGB 0.5
 
@@ -96,6 +97,7 @@ jobs:
             exe-prototype/outputs/codelens-next/SHA256SUMS.txt
             exe-prototype/outputs/codelens-next/v14.15-route-audit/interaction-smoke.json
             exe-prototype/outputs/codelens-next/v14.15-route-audit/interaction-smoke.md
+            exe-prototype/outputs/codelens-next/v14.15-route-audit/screenshots
             exe-prototype/outputs/codelens-next/frontend-visual-smoke.png
             exe-prototype/outputs/codelens-next/v14.16-acceptance/real-workspace-acceptance.json
             exe-prototype/outputs/codelens-next/v14.16-acceptance/real-workspace-acceptance.md

@@ -5,6 +5,7 @@ param(
     [switch]$SkipReleaseBuild,
     [switch]$SkipVisualSmoke,
     [switch]$SkipInteractionSmoke,
+    [switch]$CaptureInteractionScreenshots,
     [switch]$SkipLaunchSmoke
 )
 
@@ -157,7 +158,11 @@ if (-not $SkipInteractionSmoke) {
     if (-not (Test-Path $interactionSmokeScript)) {
         throw "Frontend interaction smoke script was not found: $interactionSmokeScript"
     }
-    Invoke-CheckedCommand -FilePath powershell -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $interactionSmokeScript, "-OutputDir", (Join-Path $OutputRoot "v14.15-route-audit"))
+    $interactionArguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $interactionSmokeScript, "-OutputDir", (Join-Path $OutputRoot "v14.15-route-audit"))
+    if ($CaptureInteractionScreenshots) {
+        $interactionArguments += "-CaptureScreenshots"
+    }
+    Invoke-CheckedCommand -FilePath powershell -Arguments $interactionArguments
 }
 
 if (-not $SkipVisualSmoke) {
