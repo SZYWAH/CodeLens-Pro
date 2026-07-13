@@ -69,7 +69,7 @@ if (-not $SkipTests) {
 
 Write-Host "Installing web dependencies..." -ForegroundColor Cyan
 Push-Location $WebRoot
-Invoke-CheckedCommand npm install
+Invoke-CheckedCommand npm ci
 if (-not $SkipWebBuild) {
     Invoke-CheckedCommand npm run build
 }
@@ -77,7 +77,7 @@ Pop-Location
 
 Write-Host "Installing desktop dependencies..." -ForegroundColor Cyan
 Push-Location $DesktopRoot
-Invoke-CheckedCommand npm install
+Invoke-CheckedCommand npm ci
 Invoke-CheckedCommand npm run tauri:build
 Pop-Location
 
