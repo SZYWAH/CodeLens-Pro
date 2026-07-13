@@ -71,18 +71,42 @@ function Assert-NoPattern {
 
     Push-Location $ProjectRoot
     try {
-        $rgArgs = @("-n", $Pattern)
-        foreach ($glob in $ExcludeGlobs) {
-            $rgArgs += @("-g", "!$glob")
+        $ripgrep = Get-Command rg -ErrorAction SilentlyContinue
+        if ($ripgrep) {
+            $rgArgs = @("-n", $Pattern)
+            foreach ($glob in $ExcludeGlobs) {
+                $rgArgs += @("-g", "!$glob")
+            }
+            $rgArgs += $Paths
+            $matches = & $ripgrep.Source @rgArgs
+            if ($LASTEXITCODE -eq 0) {
+                $matches | Write-Host
+                throw "Unexpected text found during audit: $Description"
+            }
+            if ($LASTEXITCODE -gt 1) {
+                throw "rg failed while checking: $Description"
+            }
+            return
         }
-        $rgArgs += $Paths
-        $matches = & rg @rgArgs
-        if ($LASTEXITCODE -eq 0) {
-            $matches | Write-Host
+
+        $candidateFiles = New-Object System.Collections.Generic.List[System.IO.FileInfo]
+        foreach ($path in $Paths) {
+            if (Test-Path -LiteralPath $path -PathType Container) {
+                foreach ($file in Get-ChildItem -LiteralPath $path -Recurse -File) {
+                    $candidateFiles.Add($file)
+                }
+            } elseif (Test-Path -LiteralPath $path -PathType Leaf) {
+                $candidateFiles.Add((Get-Item -LiteralPath $path))
+            }
+        }
+        $filteredFiles = @($candidateFiles | Where-Object {
+            $relativePath = $_.FullName.Substring($ProjectRoot.Path.Length).TrimStart('\').Replace('\', '/')
+            -not @($ExcludeGlobs | Where-Object { $relativePath -like $_ }).Count
+        })
+        $matches = @($filteredFiles | Select-String -Pattern $Pattern -CaseSensitive -ErrorAction SilentlyContinue)
+        if ($matches.Count -gt 0) {
+            $matches | ForEach-Object { "{0}:{1}:{2}" -f $_.Path, $_.LineNumber, $_.Line } | Write-Host
             throw "Unexpected text found during audit: $Description"
-        }
-        if ($LASTEXITCODE -gt 1) {
-            throw "rg failed while checking: $Description"
         }
     } finally {
         Pop-Location
