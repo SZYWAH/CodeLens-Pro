@@ -14,6 +14,7 @@ $WebRoot = Join-Path $RewriteRoot "web"
 if (-not $OutputDir) {
     $OutputDir = Join-Path $PrototypeRoot "outputs\codelens-next\v14.15-route-audit"
 }
+$OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 
 $JsonPath = Join-Path $OutputDir "interaction-smoke.json"
 $MarkdownPath = Join-Path $OutputDir "interaction-smoke.md"

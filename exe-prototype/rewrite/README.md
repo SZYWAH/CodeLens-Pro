@@ -56,3 +56,37 @@ CodeLens Pro Next 是 CodeLens Pro 的本地独立重写版，面向真实个人
 ```
 
 验收脚本会检查版本一致性、原项目隔离、前端构建、前端视觉冒烟、Rust 测试、Tauri 检查、release 输出和启动/关闭烟测。
+
+## 持续集成
+
+桌面源码使用两层 Windows 质量门禁：
+
+- `.github/workflows/desktop-ci.yml`：PR 与 `master` 推送触发。使用 Node.js 22、Rust stable 和锁文件依赖，执行正式/预览构建、生产入口隔离、字号审计、Rust 测试、Tauri 检查，以及深浅主题下 16 组快速交互烟测。该工作流不构建 EXE。
+- `.github/workflows/desktop-release-audit.yml`：仅手动触发。执行完整路由矩阵、视觉烟测、真实项目闭环验收和 Release 构建，并上传候选 EXE 与最小审计证据 14 天。工作流不会创建标签或 GitHub Release。
+
+本机复现快速门禁前，分别在 `web` 与 `desktop` 目录执行 `npm ci`，再运行：
+
+```powershell
+.\exe-prototype\rewrite\scripts\Audit-CodelensNext.ps1 `
+  -SkipReleaseBuild -SkipVisualSmoke -SkipInteractionSmoke -SkipLaunchSmoke `
+  -MaxCpuPercent 100 -MinFreeMemoryGB 0.5
+
+.\exe-prototype\rewrite\scripts\Test-FrontendInteractionSmoke.ps1 `
+  -Quick -OutputDir .\exe-prototype\outputs\codelens-next\quick-interaction
+```
+
+## 真实项目闭环验收
+
+真实验收固定扫描 `exe-prototype/rewrite` 自身源码，并强制使用本地规则模式。它覆盖工作区导入、代码地图、项目导览、项目报告、问题、卡片、学习材料、每日日志、关闭重开持久化，以及产品档案导出/导入。
+
+```powershell
+.\exe-prototype\rewrite\scripts\Test-RealWorkspaceAcceptance.ps1
+```
+
+测试通过后，Markdown、JSON 与日志写入 `exe-prototype/outputs/codelens-next/v14.16-acceptance`。SQLite 数据库位于独立临时目录，不读取或修改用户现有数据；成功后默认清理，失败时保留诊断目录。需要保留成功产物时使用 `-KeepArtifacts`。
+
+测试专用环境变量：
+
+- `CODELENS_ACCEPTANCE_WORKSPACE`：待扫描的真实项目目录。
+- `CODELENS_ACCEPTANCE_OUTPUT`：集成测试 JSON 输出路径。
+- `CODELENS_TEST_ROOT`：隔离的应用根目录和 SQLite 数据目录。

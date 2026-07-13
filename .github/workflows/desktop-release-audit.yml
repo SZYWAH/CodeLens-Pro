@@ -1,0 +1,100 @@
+name: Desktop release audit
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-release-audit-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  full-audit:
+    name: Windows full audit and candidate build
+    runs-on: windows-latest
+    timeout-minutes: 120
+    env:
+      CARGO_HOME: ${{ github.workspace }}\exe-prototype\.cache\cargo-home-next
+      CARGO_TARGET_DIR: ${{ github.workspace }}\exe-prototype\.cache\cargo-target-next
+      npm_config_cache: ${{ github.workspace }}\exe-prototype\.cache\npm-next
+      CODELENS_TEST_ROOT: ${{ runner.temp }}\codelens-core-tests
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            exe-prototype/rewrite/web/package-lock.json
+            exe-prototype/rewrite/desktop/package-lock.json
+
+      - name: Use Rust stable
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Install locked frontend dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix exe-prototype/rewrite/web
+          npm ci --prefix exe-prototype/rewrite/desktop
+
+      - name: Build preview fixture bundle
+        shell: pwsh
+        run: npm run build:preview --prefix exe-prototype/rewrite/web
+
+      - name: Run full route, visual, Rust and release audit
+        shell: pwsh
+        run: >-
+          ./exe-prototype/rewrite/scripts/Audit-CodelensNext.ps1
+          -SkipLaunchSmoke
+          -MaxCpuPercent 100
+          -MinFreeMemoryGB 0.5
+
+      - name: Run isolated real-workspace acceptance
+        shell: pwsh
+        run: >-
+          ./exe-prototype/rewrite/scripts/Test-RealWorkspaceAcceptance.ps1
+          -WorkspacePath "${{ github.workspace }}\exe-prototype\rewrite"
+          -OutputDir "${{ github.workspace }}\exe-prototype\outputs\codelens-next\v14.16-acceptance"
+
+      - name: Record candidate SHA-256
+        shell: pwsh
+        run: |
+          $exe = "${{ github.workspace }}\exe-prototype\outputs\codelens-next\CodeLens Pro Next.exe"
+          $output = "${{ github.workspace }}\exe-prototype\outputs\codelens-next\SHA256SUMS.txt"
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          [System.IO.File]::WriteAllText($output, "$hash *CodeLens Pro Next.exe`n", (New-Object System.Text.UTF8Encoding -ArgumentList $false))
+
+      - name: Confirm tracked desktop sources stayed clean
+        shell: pwsh
+        run: |
+          git diff --exit-code -- exe-prototype/rewrite
+          if (git status --porcelain --untracked-files=no -- exe-prototype/rewrite) {
+            throw "Tracked desktop sources changed during the release audit."
+          }
+
+      - name: Upload candidate and audit evidence
+        uses: actions/upload-artifact@v7
+        with:
+          name: codelens-next-${{ github.sha }}-windows-x64
+          retention-days: 14
+          compression-level: 0
+          if-no-files-found: error
+          path: |
+            exe-prototype/outputs/codelens-next/CodeLens Pro Next.exe
+            exe-prototype/outputs/codelens-next/SHA256SUMS.txt
+            exe-prototype/outputs/codelens-next/v14.15-route-audit/interaction-smoke.json
+            exe-prototype/outputs/codelens-next/v14.15-route-audit/interaction-smoke.md
+            exe-prototype/outputs/codelens-next/frontend-visual-smoke.png
+            exe-prototype/outputs/codelens-next/v14.16-acceptance/real-workspace-acceptance.json
+            exe-prototype/outputs/codelens-next/v14.16-acceptance/real-workspace-acceptance.md

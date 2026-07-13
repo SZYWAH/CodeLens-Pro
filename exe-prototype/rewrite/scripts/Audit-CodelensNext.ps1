@@ -142,26 +142,31 @@ if (-not $SkipVisualSmoke) {
 }
 
 Write-Host "Running Rust core tests..." -ForegroundColor Cyan
-Invoke-CheckedCommand -FilePath cargo -Arguments @("test", "--manifest-path", $CoreManifest, "-j", "1")
+Invoke-CheckedCommand -FilePath cargo -Arguments @("test", "--manifest-path", $CoreManifest, "--locked", "-j", "1")
 
 Write-Host "Running Tauri cargo check..." -ForegroundColor Cyan
-Invoke-CheckedCommand -FilePath cargo -Arguments @("check", "--manifest-path", $DesktopManifest, "-j", "1")
+Invoke-CheckedCommand -FilePath cargo -Arguments @("check", "--manifest-path", $DesktopManifest, "--locked", "-j", "1")
 
 if (-not $SkipReleaseBuild) {
     Write-Host "Running release build..." -ForegroundColor Cyan
     Invoke-CheckedCommand -FilePath powershell -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "Build-CodelensNext.ps1"), "-MaxCpuPercent", "$MaxCpuPercent", "-MinFreeMemoryGB", "$MinFreeMemoryGB")
 }
 
-if (-not (Test-Path $OutputExe)) {
-    throw "Expected output exe was not found: $OutputExe"
-}
-
-$exeItem = Get-Item $OutputExe
-if ($exeItem.Length -lt 5MB) {
-    throw "Output exe is unexpectedly small: $([math]::Round($exeItem.Length / 1MB, 2)) MB"
+$exeItem = $null
+if (-not $SkipReleaseBuild) {
+    if (-not (Test-Path $OutputExe)) {
+        throw "Expected output exe was not found: $OutputExe"
+    }
+    $exeItem = Get-Item $OutputExe
+    if ($exeItem.Length -lt 5MB) {
+        throw "Output exe is unexpectedly small: $([math]::Round($exeItem.Length / 1MB, 2)) MB"
+    }
 }
 
 if (-not $SkipLaunchSmoke) {
+    if ($SkipReleaseBuild) {
+        throw "Launch smoke requires a release build. Remove -SkipReleaseBuild or add -SkipLaunchSmoke."
+    }
     Write-Host "Running launch/close smoke test..." -ForegroundColor Cyan
     $existing = Get-Process | Where-Object { $_.Path -eq $exeItem.FullName }
     if ($existing) {
@@ -191,8 +196,8 @@ if (-not $SkipLaunchSmoke) {
 [pscustomobject]@{
     Passed = $true
     Version = $ExpectedVersion
-    Exe = $OutputExe
-    ExeSizeMB = [math]::Round($exeItem.Length / 1MB, 2)
-    ExeLastWriteTime = $exeItem.LastWriteTime
+    Exe = if ($exeItem) { $OutputExe } else { $null }
+    ExeSizeMB = if ($exeItem) { [math]::Round($exeItem.Length / 1MB, 2) } else { 0 }
+    ExeLastWriteTime = if ($exeItem) { $exeItem.LastWriteTime } else { $null }
     CacheRoot = $CacheRoot
 } | Format-List

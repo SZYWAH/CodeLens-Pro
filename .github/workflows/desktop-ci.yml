@@ -1,0 +1,90 @@
+name: Desktop CI
+
+on:
+  pull_request:
+    paths:
+      - "exe-prototype/rewrite/**"
+      - ".github/workflows/desktop-ci.yml"
+      - ".github/workflows/desktop-release-audit.yml"
+  push:
+    branches:
+      - master
+    paths:
+      - "exe-prototype/rewrite/**"
+      - ".github/workflows/desktop-ci.yml"
+      - ".github/workflows/desktop-release-audit.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quick-validation:
+    name: Windows quick validation
+    runs-on: windows-latest
+    timeout-minutes: 45
+    env:
+      CARGO_HOME: ${{ github.workspace }}\exe-prototype\.cache\cargo-home-next
+      CARGO_TARGET_DIR: ${{ github.workspace }}\exe-prototype\.cache\cargo-target-next
+      npm_config_cache: ${{ github.workspace }}\exe-prototype\.cache\npm-next
+      CODELENS_TEST_ROOT: ${{ runner.temp }}\codelens-core-tests
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Use Node.js 22
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            exe-prototype/rewrite/web/package-lock.json
+            exe-prototype/rewrite/desktop/package-lock.json
+
+      - name: Use Rust stable
+        shell: pwsh
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: Install locked frontend dependencies
+        shell: pwsh
+        run: |
+          npm ci --prefix exe-prototype/rewrite/web
+          npm ci --prefix exe-prototype/rewrite/desktop
+
+      - name: Build preview fixture bundle
+        shell: pwsh
+        run: npm run build:preview --prefix exe-prototype/rewrite/web
+
+      - name: Run static, build, scale and Rust quick gates
+        shell: pwsh
+        run: >-
+          ./exe-prototype/rewrite/scripts/Audit-CodelensNext.ps1
+          -SkipReleaseBuild
+          -SkipVisualSmoke
+          -SkipInteractionSmoke
+          -SkipLaunchSmoke
+          -MaxCpuPercent 100
+          -MinFreeMemoryGB 0.5
+
+      - name: Run 16-case interaction smoke
+        shell: pwsh
+        run: >-
+          ./exe-prototype/rewrite/scripts/Test-FrontendInteractionSmoke.ps1
+          -Quick
+          -OutputDir "${{ runner.temp }}\codelens-interaction-quick"
+
+      - name: Confirm tracked desktop sources stayed clean
+        shell: pwsh
+        run: |
+          git diff --exit-code -- exe-prototype/rewrite
+          if (git status --porcelain --untracked-files=no -- exe-prototype/rewrite) {
+            throw "Tracked desktop sources changed during CI."
+          }
