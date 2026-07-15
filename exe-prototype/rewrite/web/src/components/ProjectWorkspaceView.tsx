@@ -33,7 +33,9 @@ export function ProjectWorkspaceView(props: {
   traceability: TraceabilitySnapshot | null;
   query: string;
   stream: string;
-  busy: boolean;
+  opening: boolean;
+  rescanning: boolean;
+  reportBusy: boolean;
   onQueryChange: (value: string) => void;
   onSearch: (query: string) => void;
   onImport: () => void;
@@ -81,6 +83,7 @@ export function ProjectWorkspaceView(props: {
   const nextAction = buildProjectNextAction(Boolean(workspace), scopedTraceability, workspaceReports.length > 0);
   const showIndexContent = !collapsed || mobileOpen;
   const showWorkspaceIndex = props.workspaces.length > 0 || Boolean(workspace) || Boolean(props.query.trim());
+  const operationBusy = props.opening || props.rescanning || props.reportBusy;
 
   useEffect(() => {
     window.localStorage.setItem(workspaceCollapsedKey, String(collapsed));
@@ -212,8 +215,8 @@ export function ProjectWorkspaceView(props: {
               <button aria-label="搜索工作区" title="搜索工作区" type="submit"><Search size={14} /></button>
             </form>
 
-            <button className="workspace-index-import-v132" onClick={props.onImport} disabled={props.busy} type="button">
-              {props.busy ? <Loader2 className="spin" size={15} /> : <FolderOpen size={15} />}导入工作区
+            <button className="workspace-index-import-v132" onClick={props.onImport} disabled={operationBusy} type="button">
+              {props.opening ? <Loader2 className="spin" size={15} /> : <FolderOpen size={15} />}导入工作区
             </button>
 
             <div className="workspace-index-list-v132">
@@ -275,8 +278,8 @@ export function ProjectWorkspaceView(props: {
                 </div>
               </div>
               <div className="workspace-stage-actions-v132">
-                <button className="workspace-secondary-action-v142" onClick={props.onGuide} disabled={props.busy} type="button"><ListTree size={15} />项目导览</button>
-                <button className="workspace-secondary-action-v142" onClick={props.onMap} disabled={props.busy} type="button"><Map size={15} />代码地图</button>
+                <button className="workspace-secondary-action-v142" onClick={props.onGuide} disabled={operationBusy} type="button"><ListTree size={15} />项目导览</button>
+                <button className="workspace-secondary-action-v142" onClick={props.onMap} disabled={operationBusy} type="button"><Map size={15} />代码地图</button>
                 <div
                   className="workspace-actions-menu-v142"
                   onBlur={(event) => {
@@ -285,7 +288,7 @@ export function ProjectWorkspaceView(props: {
                 >
                   <button className="icon-button" aria-expanded={workspaceActionsOpen} aria-label="更多工作区操作" onClick={() => setWorkspaceActionsOpen((value) => !value)} title="更多操作" type="button"><MoreHorizontal size={16} /></button>
                   {workspaceActionsOpen && <div role="menu">
-                    <button disabled={props.busy} onClick={() => { setWorkspaceActionsOpen(false); props.onRescan(); }} role="menuitem" type="button"><RefreshCw size={15} />重新扫描</button>
+                    <button disabled={operationBusy} onClick={() => { setWorkspaceActionsOpen(false); props.onRescan(); }} role="menuitem" type="button">{props.rescanning ? <Loader2 className="spin" size={15} /> : <RefreshCw size={15} />}{props.rescanning ? "正在扫描" : "重新扫描"}</button>
                     <button
                       ref={scanDetailsTriggerRef}
                       aria-controls="workspace-scan-dialog-v145"
@@ -298,8 +301,8 @@ export function ProjectWorkspaceView(props: {
                     </button>
                   </div>}
                 </div>
-                <button className="primary-button" onClick={props.onAnalyze} disabled={props.busy} type="button">
-                  {props.busy ? <Loader2 className="spin" size={16} /> : <Play size={16} />}{props.busy ? "正在生成" : "生成项目报告"}
+                <button className="primary-button" onClick={props.onAnalyze} disabled={operationBusy} type="button">
+                  {props.reportBusy ? <Loader2 className="spin" size={16} /> : <Play size={16} />}{props.reportBusy ? "正在生成" : "生成项目报告"}
                 </button>
               </div>
             </header>
@@ -311,7 +314,19 @@ export function ProjectWorkspaceView(props: {
               <div><dt>最近更新</dt><dd>{formatTime(workspace.summary.updated_at)}</dd></div>
             </dl>
 
-            {props.busy && (
+            {props.opening && (
+              <section className="workspace-context-loading-v1420b" aria-live="polite">
+                <Loader2 className="spin" size={15} />正在打开工作区并同步关联状态…
+              </section>
+            )}
+
+            {props.rescanning && (
+              <section className="workspace-context-loading-v1420b" aria-live="polite">
+                <Loader2 className="spin" size={15} />正在重新扫描项目文件…
+              </section>
+            )}
+
+            {props.reportBusy && (
               <section className="workspace-generation-v132" aria-live="polite">
                 <Loader2 className="spin" size={17} />
                 <div><strong>正在生成项目审查报告</strong><span>{latestStreamMessage(props.stream)}</span></div>
@@ -319,7 +334,7 @@ export function ProjectWorkspaceView(props: {
             )}
 
             <section className="workspace-progress-v132">
-              <header><span><Route size={15} />审查闭环</span><button disabled={!nextAction.kind || props.busy} onClick={runNextAction} type="button">{nextAction.label}</button></header>
+              <header><span><Route size={15} />审查闭环</span><button disabled={!nextAction.kind || operationBusy} onClick={runNextAction} type="button">{nextAction.label}</button></header>
               <ol>
                 {projectSteps.map((step, index) => (
                   <li className={step.done ? "done" : step.active ? "active" : ""} key={step.title}>
@@ -373,8 +388,8 @@ export function ProjectWorkspaceView(props: {
             <span>本地项目审查</span>
             <h2>导入一个工作区开始审查</h2>
             <p>项目文件只在本机读取和索引，随后可以生成报告、整理问题并沉淀知识卡片。</p>
-            <button className="primary-button" onClick={props.onImport} disabled={props.busy} type="button">
-              {props.busy ? <Loader2 className="spin" size={16} /> : <FolderOpen size={16} />}导入工作区
+            <button className="primary-button" onClick={props.onImport} disabled={operationBusy} type="button">
+              {props.opening ? <Loader2 className="spin" size={16} /> : <FolderOpen size={16} />}{props.opening ? "正在打开工作区" : "导入工作区"}
             </button>
           </div>
         )}
@@ -420,7 +435,7 @@ export function ProjectWorkspaceView(props: {
         <section aria-describedby="workspace-delete-detail-v146" aria-labelledby="workspace-delete-title-v146" aria-modal="true" className="workspace-delete-dialog-v146" role="dialog">
           <header><Trash2 size={18} /><div><span>删除本地索引</span><strong id="workspace-delete-title-v146">{confirmDeleteWorkspace.name}</strong></div></header>
           <p id="workspace-delete-detail-v146">只会删除 CodeLens 中保存的工作区索引和关联记录，不会删除原项目目录或任何源代码文件。</p>
-          <footer><button ref={deleteCancelRef} onClick={() => setConfirmDeleteWorkspace(null)} type="button">取消</button><button className="danger" disabled={props.busy} onClick={confirmWorkspaceDeletion} type="button"><Trash2 size={14} />确认删除</button></footer>
+          <footer><button ref={deleteCancelRef} onClick={() => setConfirmDeleteWorkspace(null)} type="button">取消</button><button className="danger" disabled={operationBusy} onClick={confirmWorkspaceDeletion} type="button"><Trash2 size={14} />确认删除</button></footer>
         </section>
       </>}
     </section>

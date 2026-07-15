@@ -51,6 +51,7 @@ import type {
 declare global {
   interface Window {
     __TAURI_INTERNALS__?: unknown;
+    __CODELENS_PREVIEW_COMMAND_COUNTS__?: Record<string, number>;
   }
 }
 
@@ -236,9 +237,16 @@ export async function analyzeWorkspaceStream(
 export async function getCodeMap(workspaceId: string): Promise<CodeMap> {
   return call("get_code_map", { workspaceId }, async () => {
     const workspace = await getWorkspace(workspaceId);
+    const languageTotals = new Map<string, { file_count: number; total_lines: number }>();
+    for (const file of workspace.files) {
+      const current = languageTotals.get(file.language) || { file_count: 0, total_lines: 0 };
+      current.file_count += 1;
+      current.total_lines += file.metrics.total_lines;
+      languageTotals.set(file.language, current);
+    }
     return {
       workspace_id: workspaceId,
-      languages: [{ language: "TypeScript", file_count: workspace.files.length, total_lines: workspace.summary.total_lines }],
+      languages: [...languageTotals.entries()].map(([language, totals]) => ({ language, ...totals })),
       hotspot_files: workspace.files.map((file) => ({
         path: file.path,
         language: file.language,
@@ -255,7 +263,7 @@ export async function getCodeMap(workspaceId: string): Promise<CodeMap> {
         line: 1,
         signature: "export function score(items: number[])"
       })),
-      dependencies: []
+      dependencies: mockCodeMapDependencies(workspaceId)
     };
   });
 }
@@ -491,10 +499,10 @@ export async function generateProjectGuide(workspaceId: string): Promise<Project
 }
 
 export async function getProjectGuide(workspaceId: string): Promise<ProjectGuide> {
-  return call("get_project_guide", { workspaceId }, async () => {
+  return call("get_project_guide", { workspaceId }, () => {
     const existing = mockGuides.get(workspaceId);
     if (existing) return existing;
-    return generateProjectGuide(workspaceId);
+    throw new Error("当前工作区还没有项目导览，请先生成导览。");
   });
 }
 
@@ -935,6 +943,7 @@ async function runStream<T>(
   mock: () => Promise<T>,
   chunkEvent = "chunk"
 ): Promise<T> {
+  recordPreviewCommand(command);
   if (!window.__TAURI_INTERNALS__) {
     return mock();
   }
@@ -985,10 +994,18 @@ async function call<T>(
   args: Record<string, unknown> | undefined,
   mock: () => T | Promise<T>
 ): Promise<T> {
+  recordPreviewCommand(command);
   if (window.__TAURI_INTERNALS__) {
     return invoke<T>(command, args);
   }
   return mock();
+}
+
+function recordPreviewCommand(command: string) {
+  const counts = window.__CODELENS_PREVIEW_COMMAND_COUNTS__ || {};
+  counts[command] = (counts[command] || 0) + 1;
+  window.__CODELENS_PREVIEW_COMMAND_COUNTS__ = counts;
+  document.documentElement.dataset.previewCommandCounts = JSON.stringify(counts);
 }
 
 let mockSettingsValue: Settings = {
@@ -1068,6 +1085,31 @@ function mockWorkspace(): WorkspaceDetail {
     },
     updated_at: now
   }));
+  if (denseProjectFixtureEnabled()) {
+    for (let index = 1; index <= 72; index += 1) {
+      const name = `module-${String(index).padStart(2, "0")}`;
+      const content = index < 72
+        ? `import { value as nextValue } from "./module-${String(index + 1).padStart(2, "0")}";\n\nexport const value = nextValue + ${index};`
+        : `export const value = ${index};`;
+      files.push({
+        id: crypto.randomUUID(),
+        workspace_id: id,
+        path: `src/dense/${name}.ts`,
+        language: "TypeScript",
+        content_hash: `dense-${index}`,
+        content,
+        metrics: {
+          total_lines: content.split("\n").length,
+          non_empty_lines: content.split("\n").filter(Boolean).length,
+          comment_lines: 0,
+          complexity_score: 1,
+          risk_count: index % 11 === 0 ? 1 : 0,
+          suggestion_count: 0
+        },
+        updated_at: now
+      });
+    }
+  }
   const workspace: WorkspaceDetail = {
     summary: {
       id,
@@ -1075,7 +1117,9 @@ function mockWorkspace(): WorkspaceDetail {
       root_path: "local-preview/workspace",
       file_count: files.length,
       total_lines: files.reduce((sum, file) => sum + file.metrics.total_lines, 0),
-      language_summary: "TypeScript: 1",
+      language_summary: denseProjectFixtureEnabled()
+        ? "TypeScript: 81, Rust: 2, Markdown: 1"
+        : "TypeScript: 9, Rust: 2, Markdown: 1",
       created_at: now,
       updated_at: now
     },
@@ -1170,17 +1214,108 @@ function ensureMockBridgeInbox() {
 
 function mockImport(): ProjectImportResult {
   return {
-    project_name: "预览项目",
+    project_name: "CodeLens Preview",
     root_path: null,
     skipped: [],
     files: [
       {
         path: "src/main.ts",
         language: "TypeScript",
-        content: "export function score(items: number[]) { return items.reduce((a, b) => a + b, 0); }"
+        content: "import { createApp } from './app/createApp';\n\ncreateApp().start();"
+      },
+      {
+        path: "src/app/createApp.ts",
+        language: "TypeScript",
+        content: "import { reviewWorkspace } from '../services/reviewService';\nimport { renderSummary } from '../ui/renderSummary';\n\nexport function createApp() {\n  return { start: () => renderSummary(reviewWorkspace()) };\n}"
+      },
+      {
+        path: "src/services/reviewService.ts",
+        language: "TypeScript",
+        content: "import { loadReports } from '../data/reportRepository';\nimport { scoreRisk } from '../domain/riskScorer';\nimport { formatDate } from '../utils/formatDate';\n\nexport function reviewWorkspace() {\n  return loadReports().map((report) => ({ ...report, risk: scoreRisk(report), date: formatDate(new Date()) }));\n}"
+      },
+      {
+        path: "src/data/reportRepository.ts",
+        language: "TypeScript",
+        content: "export function loadReports() { return [{ id: 'report-1', findings: 3 }]; }"
+      },
+      {
+        path: "src/domain/riskScorer.ts",
+        language: "TypeScript",
+        content: "export function scoreRisk(report: { findings: number }) { return report.findings > 2 ? 'high' : 'low'; }"
+      },
+      {
+        path: "src/ui/renderSummary.ts",
+        language: "TypeScript",
+        content: "export function renderSummary(value: unknown) { document.body.textContent = JSON.stringify(value); }"
+      },
+      {
+        path: "src/utils/formatDate.ts",
+        language: "TypeScript",
+        content: "export function formatDate(value: Date) { return value.toISOString().slice(0, 10); }"
+      },
+      {
+        path: "tests/reviewService.spec.ts",
+        language: "TypeScript",
+        content: "import { reviewWorkspace } from '../src/services/reviewService';\n\ntest('reviews workspace', () => expect(reviewWorkspace()).toHaveLength(1));"
+      },
+      {
+        path: "scripts/build.ts",
+        language: "TypeScript",
+        content: "import { build } from 'vite';\n\nvoid build();"
+      },
+      {
+        path: "desktop/src/main.rs",
+        language: "Rust",
+        content: "mod commands;\n\nfn main() { commands::start(); }"
+      },
+      {
+        path: "desktop/src/commands.rs",
+        language: "Rust",
+        content: "pub fn start() { println!(\"desktop ready\"); }"
+      },
+      {
+        path: "README.md",
+        language: "Markdown",
+        content: "# CodeLens Preview\n\nA stable fixture for project navigation and dependency graph testing."
       }
     ]
   };
+}
+
+function mockCodeMapDependencies(workspaceId: string) {
+  const rows: Array<[string, string, string, number]> = [
+    ["src/main.ts", "./app/createApp", "import", 1],
+    ["src/app/createApp.ts", "../services/reviewService", "import", 1],
+    ["src/app/createApp.ts", "../ui/renderSummary", "import", 2],
+    ["src/services/reviewService.ts", "../data/reportRepository", "import", 1],
+    ["src/services/reviewService.ts", "../domain/riskScorer", "import", 2],
+    ["src/services/reviewService.ts", "../utils/formatDate", "import", 3],
+    ["tests/reviewService.spec.ts", "../src/services/reviewService", "import", 1],
+    ["scripts/build.ts", "vite", "import", 1],
+    ["desktop/src/main.rs", "crate::commands", "mod", 1]
+  ];
+  if (denseProjectFixtureEnabled()) {
+    for (let index = 1; index <= 38; index += 1) {
+      rows.push([
+        `src/dense/module-${String(index).padStart(2, "0")}.ts`,
+        `./module-${String(index + 1).padStart(2, "0")}`,
+        "import",
+        1
+      ]);
+    }
+  }
+  return rows.map(([source_path, target, kind, line]) => ({
+    id: crypto.randomUUID(),
+    workspace_id: workspaceId,
+    source_path,
+    target,
+    kind,
+    line
+  }));
+}
+
+function denseProjectFixtureEnabled() {
+  return new URL(window.location.href).searchParams.get("fixture") === "dense";
 }
 
 function mockCodeAnalysis(request: AnalysisRequest): AnalysisResponse {
@@ -1577,7 +1712,7 @@ function seedPreviewFixtures() {
   baseFinding.report_id = report.id;
   const fixtures: Array<Pick<Finding, "title" | "file_path" | "severity" | "category" | "status">> = [
     { title: "复杂文件需要重点审查：输入校验与异常分支耦合", file_path: "src/features/authentication/validateExternalIdentity.ts", severity: "high", category: "security", status: "open" },
-    { title: "检测到疑似凭据相关字符串，建议确认是否应移出源码", file_path: "src/config/runtime/environment.defaults.ts", severity: "high", category: "security", status: "reviewing" },
+    { title: "检测到疑似凭据相关字符串，避免提交密钥或在日志中输出敏感信息。", file_path: "src/config/runtime/environment.defaults.ts", severity: "high", category: "security", status: "reviewing" },
     { title: "响应解析逻辑缺少失败路径，可能导致页面状态不同步", file_path: "src/services/profile/parseRemoteProfileResponse.ts", severity: "medium", category: "reliability", status: "open" },
     { title: "状态更新函数承担过多职责，建议拆分为命名清晰的 helper", file_path: "src/workbench/state/synchronizeReviewLifecycle.ts", severity: "medium", category: "maintainability", status: "resolved" },
     { title: "缺少输入边界测试，建议覆盖空值与超长文本", file_path: "tests/review/input-boundaries.spec.ts", severity: "low", category: "quality", status: "open" }

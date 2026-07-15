@@ -4,6 +4,7 @@ import type { ReportDetail, ReportMetrics, TraceabilitySnapshot } from "../types
 import { AccessibleListbox } from "./AccessibleListbox";
 import { ReportPanel } from "./ReportPanel";
 import { ProductToolbar } from "./ProductShell";
+import { WorkbenchCommandBar, WorkbenchEditorSurface, WorkbenchGenerationStrip, WorkbenchMetricStrip } from "./WorkbenchPrimitives";
 
 const languages = ["auto", "Python", "TypeScript", "JavaScript", "Rust", "Java", "C/C++", "Plain Text"];
 const modeGroups = [
@@ -72,7 +73,6 @@ export function CodeWorkbenchView(props: {
   }, [codeCopyState]);
 
   function changeWorkbenchMode(value: "single" | "diff") {
-    if (value === "single") setSingleMobilePane("code");
     props.onWorkbenchModeChange(value);
   }
 
@@ -133,21 +133,18 @@ export function CodeWorkbenchView(props: {
         id="workbench-panel-single"
         role="tabpanel"
       >
-      {props.report && <div className="single-mobile-tabs-v142" role="tablist" aria-label="单文件工作区">
-        <button aria-controls="single-pane-code" className={singleMobilePane === "code" ? "active" : ""} data-tab-value="code" id="single-tab-code" onClick={() => setSingleMobilePane("code")} onKeyDown={(event) => handleTabsKeyDown(event, ["code", "report"] as const, singleMobilePane, setSingleMobilePane)} role="tab" aria-selected={singleMobilePane === "code"} tabIndex={singleMobilePane === "code" ? 0 : -1} type="button"><FileCode2 size={15} />代码</button>
-        <button aria-controls="single-pane-report" className={singleMobilePane === "report" ? "active" : ""} data-tab-value="report" id="single-tab-report" onClick={() => setSingleMobilePane("report")} onKeyDown={(event) => handleTabsKeyDown(event, ["code", "report"] as const, singleMobilePane, setSingleMobilePane)} role="tab" aria-selected={singleMobilePane === "report"} tabIndex={singleMobilePane === "report" ? 0 : -1} type="button"><Play size={15} />报告</button>
-      </div>}
-      <aside aria-label="待分析代码" className="single-workbench-editor-next single-workbench-editor-v12 single-code-pane-v142" id="single-pane-code" role="tabpanel">
-        <header className="single-editor-head-v12">
-          <div><span>单文件审查</span><strong>{activeMode.label}</strong><small>{activeMode.detail}</small></div>
-          <button className="primary-button" onClick={analyzeSingleFile} disabled={props.singleBusy || !props.code.trim()} type="button">
-            {props.singleBusy ? <Loader2 className="spin" size={17} /> : <Play size={17} />}生成报告
-          </button>
-        </header>
-
-        {props.singleBusy && <div className="single-generation-v142" aria-live="polite"><Loader2 className="spin" size={16} /><span><strong>正在生成单文件报告</strong><small>完成后将在右侧打开，不会清空当前代码。</small></span></div>}
-
-        <div className="single-control-grid-next single-controls-v12">
+        <WorkbenchCommandBar
+          action={(
+            <button className="primary-button" onClick={analyzeSingleFile} disabled={props.singleBusy || !props.code.trim()} type="button">
+              {props.singleBusy ? <Loader2 className="spin" size={17} /> : <Play size={17} />}{props.singleBusy ? "正在生成" : "生成报告"}
+            </button>
+          )}
+          ariaLabel="单文件分析配置"
+          className="single-commandbar-v1419"
+          description={`${activeMode.label} · ${activeMode.detail}`}
+          icon={<FileCode2 size={16} />}
+          title="单文件分析"
+        >
           <AccessibleListbox label="语言" value={props.language} onChange={props.onLanguageChange} options={languages.map((item) => ({ value: item, label: item === "auto" ? "自动识别" : item }))} disabled={props.singleBusy} />
           <AccessibleListbox label="分析类型" value={props.modeGroup} onChange={props.onModeGroupChange} options={modeGroups} disabled={props.singleBusy} />
           <AccessibleListbox label="审查重点" value={props.mode} onChange={props.onModeChange} options={modes.map(({ value, label }) => ({ value, label }))} disabled={props.singleBusy} />
@@ -155,51 +152,65 @@ export function CodeWorkbenchView(props: {
             <input checked={props.generateCards} disabled={props.singleBusy} onChange={(event) => props.onGenerateCardsChange(event.target.checked)} type="checkbox" />
             <span>生成后提取知识卡片候选</span>
           </label>
+        </WorkbenchCommandBar>
+
+        {props.singleBusy && <WorkbenchGenerationStrip title="正在生成单文件报告" detail="完成后将在右侧打开，不会清空当前代码。" />}
+
+        <WorkbenchMetricStrip items={[
+          { label: "总行数", value: metrics.total_lines },
+          { label: "有效行", value: metrics.non_empty_lines },
+          { label: "注释行", value: metrics.comment_lines },
+          { label: "复杂度", value: metrics.complexity_score }
+        ]} />
+
+        {props.report && <div className="single-mobile-tabs-v142" role="tablist" aria-label="单文件工作区">
+          <button aria-controls="single-pane-code" className={singleMobilePane === "code" ? "active" : ""} data-tab-value="code" id="single-tab-code" onClick={() => setSingleMobilePane("code")} onKeyDown={(event) => handleTabsKeyDown(event, ["code", "report"] as const, singleMobilePane, setSingleMobilePane)} role="tab" aria-selected={singleMobilePane === "code"} tabIndex={singleMobilePane === "code" ? 0 : -1} type="button"><FileCode2 size={15} />代码</button>
+          <button aria-controls="single-pane-report" className={singleMobilePane === "report" ? "active" : ""} data-tab-value="report" id="single-tab-report" onClick={() => setSingleMobilePane("report")} onKeyDown={(event) => handleTabsKeyDown(event, ["code", "report"] as const, singleMobilePane, setSingleMobilePane)} role="tab" aria-selected={singleMobilePane === "report"} tabIndex={singleMobilePane === "report" ? 0 : -1} type="button"><Play size={15} />报告</button>
+        </div>}
+
+        <div className="single-workbench-stage-v1419">
+          <aside aria-label="待分析代码" className="single-workbench-editor-next single-workbench-editor-v12 single-code-pane-v142" id="single-pane-code" role="tabpanel">
+            <WorkbenchEditorSurface
+              actions={(
+                <nav className="single-editor-toolbar-next single-toolbar-v12" aria-label="代码编辑操作">
+                  <button aria-label="导入代码文件" className="secondary-button" disabled={props.singleBusy} onClick={props.onImportFile} title="导入代码文件" type="button"><FolderOpen size={15} /><span>导入</span></button>
+                  <button aria-label="载入示例代码" className="secondary-button" disabled={props.singleBusy} onClick={props.onLoadSample} title="载入示例代码" type="button"><RotateCcw size={15} /><span>示例</span></button>
+                  <button aria-label={codeCopyState === "error" ? "复制代码失败，请重试" : "复制代码"} className="secondary-button" onClick={copyCode} disabled={props.singleBusy || !props.code.trim()} title={codeCopyState === "error" ? "复制失败，请重试" : "复制代码"} type="button">{codeCopyState === "copied" ? <Check size={15} /> : <Clipboard size={15} />}<span>{codeCopyState === "copied" ? "已复制" : codeCopyState === "error" ? "复制失败" : "复制"}</span></button>
+                  <button aria-label="清空代码" className="secondary-button danger" onClick={props.onClear} disabled={props.singleBusy || !props.code.trim()} title="清空代码" type="button"><Eraser size={15} /><span>清空</span></button>
+                </nav>
+              )}
+              ariaLabel="单文件代码编辑器"
+              className="single-code-frame-next single-code-frame-v12"
+              title={<><FileCode2 size={16} /><span>待分析代码</span></>}
+            >
+              <textarea
+                aria-label="待分析代码"
+                className="workbench-editor-textarea-v1419"
+                spellCheck={false}
+                disabled={props.singleBusy}
+                value={props.code}
+                onChange={(event) => props.onCodeChange(event.target.value)}
+                placeholder="在这里粘贴需要分析的代码..."
+              />
+            </WorkbenchEditorSurface>
+          </aside>
+
+          {props.report && <main aria-label="单文件审查报告" className="single-workbench-report-next single-workbench-report-v12 single-report-pane-v142" id="single-pane-report" role="tabpanel">
+            <ReportPanel
+              report={props.report}
+              traceability={props.traceability}
+              variant="embedded"
+              operationBusy={props.reportOperationBusy}
+              onCopy={props.onCopyReport}
+              onExport={props.onExportReport}
+              onGenerateCandidates={props.onGenerateCandidates}
+              onOpenFindings={props.onOpenFindings}
+              onAddDailyLog={props.onAddDailyLog}
+              onChatAboutReport={props.onChatAboutReport}
+              onRename={props.onRenameReport}
+            />
+          </main>}
         </div>
-
-        <div className="single-code-frame-next single-code-frame-v12">
-          <div className="single-code-head-v142">
-            <div className="pane-title"><FileCode2 size={16} />待分析代码</div>
-            <nav className="single-editor-toolbar-next single-toolbar-v12" aria-label="代码编辑操作">
-              <button className="secondary-button" disabled={props.singleBusy} onClick={props.onImportFile} type="button"><FolderOpen size={15} />导入</button>
-              <button className="secondary-button" disabled={props.singleBusy} onClick={props.onLoadSample} type="button"><RotateCcw size={15} />示例</button>
-              <button className="secondary-button" onClick={copyCode} disabled={props.singleBusy || !props.code.trim()} type="button">{codeCopyState === "copied" ? <Check size={15} /> : <Clipboard size={15} />}{codeCopyState === "copied" ? "已复制" : codeCopyState === "error" ? "复制失败" : "复制"}</button>
-              <button className="secondary-button danger" onClick={props.onClear} disabled={props.singleBusy || !props.code.trim()} type="button"><Eraser size={15} />清空</button>
-            </nav>
-          </div>
-          <textarea
-            spellCheck={false}
-            disabled={props.singleBusy}
-            value={props.code}
-            onChange={(event) => props.onCodeChange(event.target.value)}
-            placeholder="在这里粘贴需要分析的代码..."
-          />
-        </div>
-
-        <div className="single-metric-strip-next single-metrics-v12">
-          <Metric label="总行数" value={metrics.total_lines} />
-          <Metric label="有效行" value={metrics.non_empty_lines} />
-          <Metric label="注释行" value={metrics.comment_lines} />
-          <Metric label="复杂度" value={metrics.complexity_score} />
-        </div>
-
-      </aside>
-
-      {props.report && <main aria-label="单文件审查报告" className="single-workbench-report-next single-workbench-report-v12 single-report-pane-v142" id="single-pane-report" role="tabpanel">
-        <ReportPanel
-          report={props.report}
-          traceability={props.traceability}
-          variant="embedded"
-          operationBusy={props.reportOperationBusy}
-          onCopy={props.onCopyReport}
-          onExport={props.onExportReport}
-          onGenerateCandidates={props.onGenerateCandidates}
-          onOpenFindings={props.onOpenFindings}
-          onAddDailyLog={props.onAddDailyLog}
-          onChatAboutReport={props.onChatAboutReport}
-          onRename={props.onRenameReport}
-        />
-      </main>}
       </section>
 
       <div
@@ -212,15 +223,6 @@ export function CodeWorkbenchView(props: {
         {props.diffContent}
       </div>
     </section>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: number }) {
-  return (
-    <article>
-      <span>{label}</span>
-      <strong>{value}</strong>
-    </article>
   );
 }
 

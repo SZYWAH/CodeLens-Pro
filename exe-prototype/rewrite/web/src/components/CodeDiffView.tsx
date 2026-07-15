@@ -13,9 +13,10 @@ import {
   Plus,
   Upload
 } from "lucide-react";
-import { useEffect, useId, useMemo, useRef, useState, type CSSProperties } from "react";
+import { useEffect, useId, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
 import { countLines, languageLabel, languageOptions } from "../utils/display";
-import { ProductToolbar } from "./ProductShell";
+import { AccessibleListbox } from "./AccessibleListbox";
+import { WorkbenchCommandBar, WorkbenchEditorSurface, WorkbenchGenerationStrip, WorkbenchMetricStrip } from "./WorkbenchPrimitives";
 
 const diffSplitStorageKey = "codelens.diff.editorSplit";
 
@@ -107,64 +108,62 @@ export function CodeDiffView(props: {
     setSplitPercent((current) => clampSplit(current + delta));
   }
 
+  function handleMobileTabsKeyDown(event: KeyboardEvent<HTMLButtonElement>) {
+    let next: "before" | "after" | null = null;
+    if (event.key === "ArrowRight" || event.key === "End") next = "after";
+    else if (event.key === "ArrowLeft" || event.key === "Home") next = "before";
+    if (!next) return;
+    event.preventDefault();
+    setMobilePane(next);
+    event.currentTarget.closest('[role="tablist"]')?.querySelector<HTMLButtonElement>(`[data-tab-value="${next}"]`)?.focus();
+  }
+
   const splitStyle = { "--diff-editor-split": `${splitPercent}%` } as CSSProperties;
 
   return (
-    <section className={`diff-workspace-v133 ${props.embedded ? "is-embedded" : ""} ${summaryOpen ? "is-summary-open" : ""}`}>
-      {props.active !== false && <ProductToolbar>
-        <div className="diff-toolbar-title-v133 product-toolbar-field-next">
-          <GitCompare size={16} />
-          <label>
-            <span>报告标题</span>
-            <input value={props.title} onChange={(event) => props.onTitleChange(event.target.value)} disabled={props.busy} />
-          </label>
-        </div>
-        <div className="diff-toolbar-actions-v133 product-toolbar-actions-next">
-          <label>
-            <span>语言</span>
-            <select value={props.language} onChange={(event) => props.onLanguageChange(event.target.value)} disabled={props.busy}>
-              {languageOptions.map((item) => <option key={item} value={item}>{languageLabel(item)}</option>)}
-            </select>
-          </label>
-          <button className="icon-button" onClick={swapVersions} disabled={props.busy} aria-label="交换旧版和新版" title="交换版本" type="button"><ArrowLeftRight size={16} /></button>
+    <section className={`diff-workspace-v133 ${props.embedded ? "is-embedded" : ""} ${summaryOpen ? "is-summary-open" : ""}`} data-active={props.active !== false}>
+      <WorkbenchCommandBar
+        action={(
           <button className="primary-button" disabled={props.busy || !canAnalyze} onClick={props.onAnalyze} type="button">
             {props.busy ? <Loader2 className="spin" size={16} /> : <Play size={16} />}{props.busy ? "正在生成" : "生成对比报告"}
           </button>
-        </div>
-      </ProductToolbar>}
-
-      <div className="diff-mobile-config-v151" aria-label="代码对比配置">
-        <label>
+        )}
+        ariaLabel="代码对比配置"
+        className="diff-commandbar-v1419"
+        description="比较两个版本的行为变化、风险和维护影响。"
+        icon={<GitCompare size={16} />}
+        title="代码对比"
+      >
+        <label className="workbench-field-v1419 diff-title-field-v1419">
           <span>报告标题</span>
           <input value={props.title} onChange={(event) => props.onTitleChange(event.target.value)} disabled={props.busy} />
         </label>
-        <label>
-          <span>语言</span>
-          <select value={props.language} onChange={(event) => props.onLanguageChange(event.target.value)} disabled={props.busy}>
-            {languageOptions.map((item) => <option key={item} value={item}>{languageLabel(item)}</option>)}
-          </select>
-        </label>
-      </div>
+        <AccessibleListbox
+          label="语言"
+          value={props.language}
+          onChange={props.onLanguageChange}
+          options={languageOptions.map((item) => ({ value: item, label: languageLabel(item) }))}
+          disabled={props.busy}
+        />
+        <button className="icon-button diff-swap-v1419" onClick={swapVersions} disabled={props.busy} aria-label="交换旧版和新版" title="交换版本" type="button"><ArrowLeftRight size={16} /></button>
+      </WorkbenchCommandBar>
 
       {props.busy && (
-        <section className="diff-generation-v133" aria-live="polite">
-          <Loader2 className="spin" size={16} />
-          <div><strong>正在生成代码对比报告</strong><span>{latestStreamMessage(props.stream)}</span></div>
-        </section>
+        <WorkbenchGenerationStrip title="正在生成代码对比报告" detail={latestStreamMessage(props.stream)} />
       )}
 
-      <dl className="diff-status-v133">
-        <StatusMetric label="旧版行数" value={beforeLines} />
-        <StatusMetric label="新版行数" value={afterLines} />
-        <StatusMetric label="新增" value={diffStats.added} tone="add" />
-        <StatusMetric label="删除" value={diffStats.removed} tone="remove" />
-        <StatusMetric label="修改" value={diffStats.changed} tone="change" />
-        <StatusMetric label="影响" value={impact.label} tone={impact.tone} />
-      </dl>
+      <WorkbenchMetricStrip items={[
+        { label: "旧版行数", value: beforeLines },
+        { label: "新版行数", value: afterLines },
+        { label: "新增", value: diffStats.added, tone: "add" },
+        { label: "删除", value: diffStats.removed, tone: "remove" },
+        { label: "修改", value: diffStats.changed, tone: "change" },
+        { label: "影响", value: impact.label, tone: impact.tone }
+      ]} />
 
       <div className="diff-mobile-tabs-v133" role="tablist" aria-label="代码版本">
-        <button className={mobilePane === "before" ? "active" : ""} onClick={() => setMobilePane("before")} role="tab" aria-selected={mobilePane === "before"} type="button">旧版本</button>
-        <button className={mobilePane === "after" ? "active" : ""} onClick={() => setMobilePane("after")} role="tab" aria-selected={mobilePane === "after"} type="button">新版本</button>
+        <button aria-controls="diff-editor-before" className={mobilePane === "before" ? "active" : ""} data-tab-value="before" id="diff-tab-before" onClick={() => setMobilePane("before")} onKeyDown={handleMobileTabsKeyDown} role="tab" aria-selected={mobilePane === "before"} tabIndex={mobilePane === "before" ? 0 : -1} type="button">旧版本</button>
+        <button aria-controls="diff-editor-after" className={mobilePane === "after" ? "active" : ""} data-tab-value="after" id="diff-tab-after" onClick={() => setMobilePane("after")} onKeyDown={handleMobileTabsKeyDown} role="tab" aria-selected={mobilePane === "after"} tabIndex={mobilePane === "after" ? 0 : -1} type="button">新版本</button>
       </div>
 
       <div className="diff-editor-split-v133" ref={splitRef} style={splitStyle}>
@@ -290,19 +289,23 @@ function DiffEditor({
 }) {
   const versionName = side === "before" ? "旧版本" : "新版本";
   return (
-    <section className={`diff-editor-v133 ${side} ${active ? "is-mobile-active" : ""}`}>
-      <header>
-        <span>{side === "before" ? <Minus size={14} /> : <Plus size={14} />}{versionName}</span>
-        <input aria-label={`${versionName}标签`} value={label} onChange={(event) => onLabelChange(event.target.value)} disabled={disabled} />
-        <button className="icon-button" onClick={onImport} disabled={disabled} aria-label={`导入${versionName}文件`} title={`导入${versionName}文件`} type="button"><Upload size={15} /></button>
-      </header>
-      <textarea aria-label={`${versionName}代码`} value={code} onChange={(event) => onCodeChange(event.target.value)} disabled={disabled} spellCheck={false} />
-    </section>
+    <WorkbenchEditorSurface
+      actions={<button className="icon-button" onClick={onImport} disabled={disabled} aria-label={`导入${versionName}文件`} title={`导入${versionName}文件`} type="button"><Upload size={15} /></button>}
+      ariaLabel={`${versionName}代码编辑器`}
+      className={`diff-editor-v133 ${side} ${active ? "is-mobile-active" : ""}`}
+      id={`diff-editor-${side}`}
+      labelledBy={`diff-tab-${side}`}
+      role="tabpanel"
+      title={(
+        <>
+          <span className="diff-version-kind-v1419">{side === "before" ? <Minus size={14} /> : <Plus size={14} />}{versionName}</span>
+          <input aria-label={`${versionName}标签`} value={label} onChange={(event) => onLabelChange(event.target.value)} disabled={disabled} />
+        </>
+      )}
+    >
+      <textarea className="workbench-editor-textarea-v1419" aria-label={`${versionName}代码`} value={code} onChange={(event) => onCodeChange(event.target.value)} disabled={disabled} spellCheck={false} />
+    </WorkbenchEditorSurface>
   );
-}
-
-function StatusMetric({ label, value, tone = "" }: { label: string; value: string | number; tone?: string }) {
-  return <div className={tone}><dt>{label}</dt><dd>{value}</dd></div>;
 }
 
 type DiffPreviewItem = {

@@ -53,6 +53,7 @@ export function FindingsView(props: {
   const ignoreTriggerRef = useRef<HTMLButtonElement | null>(null);
   const ignoreDialogRef = useRef<HTMLElement | null>(null);
   const ignoreCancelRef = useRef<HTMLButtonElement | null>(null);
+  const selectedItemRef = useRef<HTMLButtonElement | null>(null);
 
   const reportTitles = useMemo(() => new Map(props.reports.map((report) => [report.id, report.title])), [props.reports]);
   const effectiveStatus = (finding: Finding) => statusOverrides[finding.id] || finding.status;
@@ -72,6 +73,10 @@ export function FindingsView(props: {
     const nextId = selected?.id || null;
     if (nextId !== props.activeFindingId) props.onSelectFinding(nextId);
   }, [props.activeFindingId, props.onSelectFinding, selected?.id]);
+
+  useEffect(() => {
+    selectedItemRef.current?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [selected?.id]);
 
   useEffect(() => {
     setStatusOverrides((current) => {
@@ -177,7 +182,23 @@ export function FindingsView(props: {
         <div className="findings-list-v134">
           {visible.map((item) => {
             const itemStatus = effectiveStatus(item);
-            return <button aria-current={selected?.id === item.id ? "page" : undefined} className={selected?.id === item.id ? "active" : ""} key={item.id} onClick={() => selectFinding(item.id)} type="button"><span className={`risk-dot-v134 ${item.severity}`} /><strong>{item.title}</strong><small>{severityLabel(item.severity)} · {statusLabel(itemStatus)}</small><span className="findings-list-path-v144" title={item.file_path || "未关联文件"}>{item.file_path || "未关联文件"}</span></button>;
+            const active = selected?.id === item.id;
+            return (
+              <button
+                aria-current={active ? "page" : undefined}
+                aria-label={`${item.title}，${severityLabel(item.severity)}，${statusLabel(itemStatus)}`}
+                className={active ? "active" : ""}
+                key={item.id}
+                onClick={() => selectFinding(item.id)}
+                ref={active ? selectedItemRef : undefined}
+                type="button"
+              >
+                <span className={`risk-dot-v134 ${item.severity}`} />
+                <strong title={item.title}>{item.title}</strong>
+                <small>{severityLabel(item.severity)} · {statusLabel(itemStatus)}</small>
+                <span className="findings-list-path-v144" title={item.file_path || "未关联文件"}>{item.file_path || "未关联文件"}</span>
+              </button>
+            );
           })}
           {!visible.length && <div className="finding-empty-v134"><strong>没有匹配的问题</strong><span>可清空搜索或放宽筛选范围。</span><button disabled={filterBusy} onClick={() => { setQuery(""); void runFilter(props.onResetFilters); }} type="button">重置筛选</button></div>}
         </div>

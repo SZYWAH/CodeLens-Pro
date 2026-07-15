@@ -141,7 +141,7 @@ type View = "overview" | "workbench" | "projects" | "map" | "findings" | "diff" 
 type GalaxyMode = "entry" | "explore";
 type WorkbenchMode = "single" | "diff";
 export type AppTheme = "dark" | "light";
-type BusyArea = "single" | "workspace" | "diff" | "chat" | "settings" | "llm-test" | "cards" | "material" | "daily-log" | "guide" | "agent" | "archive" | null;
+type BusyArea = "single" | "workspace-open" | "workspace-rescan" | "workspace-report" | "diff" | "chat" | "settings" | "llm-test" | "cards" | "material" | "daily-log" | "guide" | "agent" | "archive" | null;
 type NoticeScope = "global" | "projects" | "workbench-single" | "workbench-diff" | "report";
 type ReportOperation = "copy" | "export" | null;
 
@@ -306,6 +306,7 @@ export default function App() {
   const dailyLoadVersionRef = useRef(0);
   const dailyOperationVersionRef = useRef(0);
   const projectGuideLoadVersionRef = useRef(0);
+  const codeMapLoadVersionRef = useRef(0);
   const projectViewBootstrapRef = useRef<string | null>(null);
   const projectOverviewBootstrapRef = useRef<string | null>(null);
 
@@ -361,7 +362,9 @@ export default function App() {
 
   useEffect(() => {
     projectGuideLoadVersionRef.current += 1;
+    codeMapLoadVersionRef.current += 1;
     setProjectGuide((current) => current?.workspace_id === activeWorkspace?.summary.id ? current : null);
+    setCodeMap((current) => current?.workspace_id === activeWorkspace?.summary.id ? current : null);
   }, [activeWorkspace?.summary.id]);
 
   useEffect(() => {
@@ -387,7 +390,7 @@ export default function App() {
     if (projectOverviewBootstrapRef.current === workspaceId) return;
     projectOverviewBootstrapRef.current = workspaceId;
     let cancelled = false;
-    setBusyArea("workspace");
+    setBusyArea("workspace-open");
     activateWorkspaceContext(workspaceId)
       .catch((err) => {
         if (!cancelled) setError(`工作区打开失败：${friendlyError(err)}`, "projects");
@@ -705,7 +708,7 @@ export default function App() {
   }
 
   async function handleImportWorkspace() {
-    setBusyArea("workspace");
+    setBusyArea("workspace-open");
     setError(null, "projects");
     setMessage(null, "projects");
     try {
@@ -739,19 +742,22 @@ export default function App() {
   }
 
   async function handleOpenWorkspace(id: string) {
+    setBusyArea("workspace-open");
     setError(null, "projects");
     try {
       await activateWorkspaceContext(id);
       setView("projects");
     } catch (err) {
       setError(friendlyError(err), "projects");
+    } finally {
+      setBusyArea(null);
     }
   }
 
   async function resolveWorkspaceForProjectView(action: "项目导览" | "代码地图") {
     if (activeWorkspace) return activeWorkspace;
     if (workspaces.length === 1) {
-      setBusyArea("workspace");
+      setBusyArea("workspace-open");
       try {
         return await activateWorkspaceContext(workspaces[0].id);
       } catch (err) {
@@ -774,7 +780,7 @@ export default function App() {
 
   async function handleRescanWorkspace() {
     if (!activeWorkspace) return;
-    setBusyArea("workspace");
+    setBusyArea("workspace-rescan");
     setError(null, "projects");
     setMessage(null, "projects");
     try {
@@ -817,7 +823,7 @@ export default function App() {
       setError("请先导入或打开一个工作区。", "projects");
       return;
     }
-    setBusyArea("workspace");
+    setBusyArea("workspace-report");
     setWorkspaceStream("");
     setError(null, "projects");
     setMessage(null, "projects");
@@ -853,11 +859,17 @@ export default function App() {
   async function handleLoadCodeMap() {
     const workspace = await resolveWorkspaceForProjectView("代码地图");
     if (!workspace) return;
+    const workspaceId = workspace.summary.id;
+    const requestVersion = ++codeMapLoadVersionRef.current;
     setError(null, view === "projects" ? "projects" : "global");
+    setCodeMap((current) => current?.workspace_id === workspaceId ? current : null);
+    setView("map");
     try {
-      setCodeMap(await getCodeMap(workspace.summary.id));
-      setView("map");
+      const map = await getCodeMap(workspaceId);
+      if (requestVersion !== codeMapLoadVersionRef.current) return;
+      setCodeMap(map);
     } catch (err) {
+      if (requestVersion !== codeMapLoadVersionRef.current) return;
       setError(friendlyError(err), view === "projects" ? "projects" : "global");
     }
   }
@@ -1227,6 +1239,14 @@ export default function App() {
     setProjectGuide((current) => current?.workspace_id === workspaceId ? current : null);
     setError(null);
     setView("guide");
+    if (codeMap?.workspace_id !== workspaceId) {
+      const mapRequestVersion = ++codeMapLoadVersionRef.current;
+      void getCodeMap(workspaceId).then((map) => {
+        if (mapRequestVersion === codeMapLoadVersionRef.current) setCodeMap(map);
+      }).catch(() => {
+        // The guide remains useful when the optional code-map enrichment fails.
+      });
+    }
     try {
       const guide = await getProjectGuide(workspaceId);
       if (requestVersion !== projectGuideLoadVersionRef.current) return;
@@ -2498,7 +2518,9 @@ export default function App() {
               traceability={workspaceTraceability}
               query={workspaceQuery}
               stream={workspaceStream}
-              busy={busyArea === "workspace"}
+              opening={busyArea === "workspace-open"}
+              rescanning={busyArea === "workspace-rescan"}
+              reportBusy={busyArea === "workspace-report"}
               onQueryChange={setWorkspaceQuery}
               onSearch={refreshWorkspaces}
               onImport={handleImportWorkspace}
@@ -2521,6 +2543,7 @@ export default function App() {
         {view === "guide" && (
           <ProjectGuideView
             activeWorkspace={activeWorkspace}
+            codeMap={codeMap?.workspace_id === activeWorkspace?.summary.id ? codeMap : null}
             guide={projectGuide}
             busy={busyArea === "guide"}
             onGenerate={handleGenerateProjectGuide}

@@ -45,7 +45,6 @@ foreach ($token in $requiredTokens) {
 $toolbarComponents = @(
     'AgentWorkspaceView.tsx',
     'AiChatView.tsx',
-    'CodeDiffView.tsx',
     'CodeMapView.tsx',
     'CodeWorkbenchView.tsx',
     'DailyLearningCenterView.tsx',
@@ -60,6 +59,14 @@ foreach ($component in $toolbarComponents) {
     if (-not $source.Contains('<ProductToolbar>')) {
         throw "$component is not connected to the ProductShell toolbar."
     }
+}
+
+$diffSource = [System.IO.File]::ReadAllText((Join-Path $ComponentsRoot 'CodeDiffView.tsx'))
+if (-not $diffSource.Contains('<WorkbenchCommandBar')) {
+    throw 'CodeDiffView is not connected to the shared workbench command bar.'
+}
+if ($diffSource.Contains('<ProductToolbar>')) {
+    throw 'CodeDiffView must not inject mode-specific controls into ProductShell.'
 }
 
 $formalSources = Get-ChildItem $ComponentsRoot -Filter '*.tsx' -File |
