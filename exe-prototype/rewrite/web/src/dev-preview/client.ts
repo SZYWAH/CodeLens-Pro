@@ -1617,6 +1617,33 @@ function seedPreviewFixtures() {
   mockCardCandidates.unshift(...report.risks.map((item, index) => makeCardCandidate(report, item, index)));
   mockActivity("report", "生成预览审查报告", report.title, "report", report.id);
   mockActivity("card", "沉淀预览知识卡片", `${cards.length} 张卡片`, "learning_card", cards[0]?.id);
+  const showcaseActivityTitles = [
+    "完成风险审查",
+    "定位复杂度热点",
+    "整理边界验证",
+    "复盘异常路径",
+    "补充回归检查",
+    "归纳项目结构",
+    "记录关键依赖",
+    "更新问题状态",
+    "沉淀审查结论",
+    "整理阅读路线",
+    "核对代码地图",
+    "生成学习摘要",
+    "复习知识卡片",
+    "记录每日进展",
+    "确认后续动作",
+    "归档审查上下文"
+  ];
+  while (mockActivityEvents.length < 18) {
+    const index = mockActivityEvents.length;
+    mockActivity(
+      "activity",
+      showcaseActivityTitles[index % showcaseActivityTitles.length],
+      `活动展示台交互样本 ${String(index + 1).padStart(2, "0")}`,
+      "activity"
+    );
+  }
 }
 
 seedPreviewFixtures();

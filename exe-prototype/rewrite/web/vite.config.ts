@@ -7,7 +7,8 @@ export default defineConfig(({ mode }) => ({
   clearScreen: false,
   resolve: mode === "preview" ? {
     alias: {
-      "./api": fileURLToPath(new URL("./src/dev-preview/client.ts", import.meta.url))
+      "./api": fileURLToPath(new URL("./src/dev-preview/client.ts", import.meta.url)),
+      "./showcaseMaterialLab": fileURLToPath(new URL("./src/dev-preview/ShowcaseMaterialLab.tsx", import.meta.url))
     }
   } : undefined,
   build: {

@@ -127,7 +127,9 @@ import { FindingsView } from "./components/FindingsView";
 import { HistoryReportsView, type ReportFilter } from "./components/HistoryReportsView";
 import { HealthStatusView } from "./components/HealthStatusView";
 import { LearningCardsView } from "./components/LearningCardsView";
+import { LaunchScreen } from "./components/LaunchScreen";
 import { ProjectGuideView } from "./components/ProjectGuideView";
+import { ProjectWorkspaceView } from "./components/ProjectWorkspaceView";
 import { ProductShell, type ProductGlobalCommand, type ProductNavGroup } from "./components/ProductShell";
 import { SettingsView } from "./components/SettingsView";
 
@@ -137,10 +139,10 @@ const ActivityGalaxyView = lazy(() =>
 
 type View = "overview" | "workbench" | "projects" | "map" | "findings" | "diff" | "chat" | "cards" | "logs" | "guide" | "agent" | "galaxy" | "history" | "settings" | "health";
 type GalaxyMode = "entry" | "explore";
-type WorkbenchMode = "project" | "single";
+type WorkbenchMode = "single" | "diff";
 export type AppTheme = "dark" | "light";
 type BusyArea = "single" | "workspace" | "diff" | "chat" | "settings" | "llm-test" | "cards" | "material" | "daily-log" | "guide" | "agent" | "archive" | null;
-type NoticeScope = "global" | "workbench-project" | "workbench-single" | "report";
+type NoticeScope = "global" | "projects" | "workbench-single" | "workbench-diff" | "report";
 type ReportOperation = "copy" | "export" | null;
 
 const sampleBefore = `function calculateTotal(items) {
@@ -186,7 +188,8 @@ export default function App() {
   const [view, setViewState] = useState<View>(() => initialViewFromLocation());
   const [theme, setTheme] = useState<AppTheme>(() => initialTheme());
   const [galaxyMode, setGalaxyMode] = useState<GalaxyMode>(() => initialGalaxyModeFromLocation());
-  const [workbenchMode, setWorkbenchMode] = useState<WorkbenchMode>("project");
+  const [workbenchMode, setWorkbenchMode] = useState<WorkbenchMode>(() => initialWorkbenchMode());
+  const [showLaunch, setShowLaunch] = useState(() => shouldShowLaunchScreen());
   const [health, setHealth] = useState<AppHealth | null>(null);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [reports, setReports] = useState<ReportSummary[]>([]);
@@ -230,6 +233,14 @@ export default function App() {
       // Theme persistence is optional when storage is unavailable.
     }
   }, [theme]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem("codelens.workbench.mode", workbenchMode);
+    } catch {
+      // Workbench mode persistence is optional when storage is unavailable.
+    }
+  }, [workbenchMode]);
 
   const [workspaceQuery, setWorkspaceQuery] = useState("");
   const [workspaceStream, setWorkspaceStream] = useState("");
@@ -296,6 +307,7 @@ export default function App() {
   const dailyOperationVersionRef = useRef(0);
   const projectGuideLoadVersionRef = useRef(0);
   const projectViewBootstrapRef = useRef<string | null>(null);
+  const projectOverviewBootstrapRef = useRef<string | null>(null);
 
   function setMessage(value: string | null, scope: NoticeScope = "global") {
     setMessageState(value);
@@ -317,15 +329,15 @@ export default function App() {
 
   function changeWorkbenchMode(value: WorkbenchMode) {
     setWorkbenchMode(value);
-    const targetScope: NoticeScope = value === "project" ? "workbench-project" : "workbench-single";
+    const targetScope: NoticeScope = value === "single" ? "workbench-single" : "workbench-diff";
     if (message && messageScope !== "global" && messageScope !== targetScope) setMessage(null);
     if (error && errorScope !== "global" && errorScope !== targetScope) setError(null);
   }
 
   function setView(nextView: View, nextGalaxyMode?: GalaxyMode) {
-    const resolvedView: View = nextView === "projects" || nextView === "overview" ? "workbench" : nextView;
+    const resolvedView: View = nextView === "overview" ? "projects" : nextView === "diff" ? "workbench" : nextView;
     const resolvedGalaxyMode = resolvedView === "galaxy" ? nextGalaxyMode || "explore" : galaxyMode;
-    if (resolvedView === "workbench") changeWorkbenchMode("project");
+    if (nextView === "diff") changeWorkbenchMode("diff");
     if (resolvedView === "galaxy") {
       setGalaxyMode(resolvedGalaxyMode);
     }
@@ -365,6 +377,30 @@ export default function App() {
   }, [activeWorkspace, initialDataReady, view, workspaces]);
 
   useEffect(() => {
+    if (!initialDataReady || view !== "projects" || activeWorkspace || workspaces.length !== 1) {
+      if (view !== "projects" || activeWorkspace || workspaces.length !== 1) {
+        projectOverviewBootstrapRef.current = null;
+      }
+      return;
+    }
+    const workspaceId = workspaces[0].id;
+    if (projectOverviewBootstrapRef.current === workspaceId) return;
+    projectOverviewBootstrapRef.current = workspaceId;
+    let cancelled = false;
+    setBusyArea("workspace");
+    activateWorkspaceContext(workspaceId)
+      .catch((err) => {
+        if (!cancelled) setError(`工作区打开失败：${friendlyError(err)}`, "projects");
+      })
+      .finally(() => {
+        if (!cancelled) setBusyArea(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWorkspace, initialDataReady, view, workspaces]);
+
+  useEffect(() => {
     if (!settings) return;
     setApiBase(settings.api_base);
     setModel(settings.model);
@@ -372,7 +408,7 @@ export default function App() {
   }, [settings]);
 
   useEffect(() => {
-    if (view !== "workbench" || workbenchMode !== "project" || !activeWorkspace) return;
+    if (view !== "projects" || !activeWorkspace) return;
     let cancelled = false;
     getTraceabilitySnapshot("workspace", activeWorkspace.summary.id)
       .then((snapshot) => {
@@ -384,7 +420,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [activeWorkspace?.summary.id, view, workbenchMode]);
+  }, [activeWorkspace?.summary.id, view]);
 
   const statusText = useMemo(() => {
     if (!health) return "正在检查本地状态";
@@ -670,8 +706,8 @@ export default function App() {
 
   async function handleImportWorkspace() {
     setBusyArea("workspace");
-    setError(null, "workbench-project");
-    setMessage(null, "workbench-project");
+    setError(null, "projects");
+    setMessage(null, "projects");
     try {
       const detail = await importWorkspaceFolder();
       setActiveWorkspace(detail);
@@ -681,10 +717,10 @@ export default function App() {
       setTraceability(snapshot);
       setWorkspaceTraceability(snapshot);
       await Promise.all([refreshWorkspaces(), refreshFindings(detail.summary.id), refreshCards(detail.summary.id)]);
-      setMessage(`工作区已导入：${detail.summary.file_count} 个文件，${detail.summary.total_lines} 行。`, "workbench-project");
-      setView("workbench");
+      setMessage(`工作区已导入：${detail.summary.file_count} 个文件，${detail.summary.total_lines} 行。`, "projects");
+      setView("projects");
     } catch (err) {
-      setError(friendlyError(err), "workbench-project");
+      setError(friendlyError(err), "projects");
     } finally {
       setBusyArea(null);
     }
@@ -703,12 +739,12 @@ export default function App() {
   }
 
   async function handleOpenWorkspace(id: string) {
-    setError(null, "workbench-project");
+    setError(null, "projects");
     try {
       await activateWorkspaceContext(id);
       setView("projects");
     } catch (err) {
-      setError(friendlyError(err), "workbench-project");
+      setError(friendlyError(err), "projects");
     }
   }
 
@@ -719,19 +755,19 @@ export default function App() {
       try {
         return await activateWorkspaceContext(workspaces[0].id);
       } catch (err) {
-        setView("workbench");
-        setError(`工作区打开失败：${friendlyError(err)}`, "workbench-project");
+        setView("projects");
+        setError(`工作区打开失败：${friendlyError(err)}`, "projects");
         return null;
       } finally {
         setBusyArea(null);
       }
     }
-    setView("workbench");
+    setView("projects");
     setError(
       workspaces.length > 1
-        ? `请先在审查工作台选择一个工作区，再查看${action}。`
-        : `请先在审查工作台导入一个项目，再查看${action}。`,
-      "workbench-project"
+        ? `请先在项目总览选择一个工作区，再查看${action}。`
+        : `请先在项目总览导入一个项目，再查看${action}。`,
+      "projects"
     );
     return null;
   }
@@ -739,8 +775,8 @@ export default function App() {
   async function handleRescanWorkspace() {
     if (!activeWorkspace) return;
     setBusyArea("workspace");
-    setError(null, "workbench-project");
-    setMessage(null, "workbench-project");
+    setError(null, "projects");
+    setMessage(null, "projects");
     try {
       const detail = await rescanWorkspace(activeWorkspace.summary.id);
       setActiveWorkspace(detail);
@@ -750,16 +786,16 @@ export default function App() {
       setTraceability(snapshot);
       setWorkspaceTraceability(snapshot);
       await Promise.all([refreshWorkspaces(), refreshFindings(detail.summary.id), refreshCards(detail.summary.id)]);
-      setMessage(`工作区已重新扫描：${detail.summary.file_count} 个文件。`, "workbench-project");
+      setMessage(`工作区已重新扫描：${detail.summary.file_count} 个文件。`, "projects");
     } catch (err) {
-      setError(friendlyError(err), "workbench-project");
+      setError(friendlyError(err), "projects");
     } finally {
       setBusyArea(null);
     }
   }
 
   async function handleDeleteWorkspace(id: string) {
-    setError(null, "workbench-project");
+    setError(null, "projects");
     try {
       await deleteWorkspace(id);
       if (activeWorkspace?.summary.id === id) {
@@ -770,21 +806,21 @@ export default function App() {
         setWorkspaceTraceability(null);
       }
       await refreshWorkspaces();
-      setMessage("工作区已删除。", "workbench-project");
+      setMessage("工作区已删除。", "projects");
     } catch (err) {
-      setError(friendlyError(err), "workbench-project");
+      setError(friendlyError(err), "projects");
     }
   }
 
   async function handleAnalyzeWorkspace() {
     if (!activeWorkspace) {
-      setError("请先导入或打开一个工作区。", "workbench-project");
+      setError("请先导入或打开一个工作区。", "projects");
       return;
     }
     setBusyArea("workspace");
     setWorkspaceStream("");
-    setError(null, "workbench-project");
-    setMessage(null, "workbench-project");
+    setError(null, "projects");
+    setMessage(null, "projects");
     try {
       const response = await analyzeWorkspaceStream(activeWorkspace.summary.id, (chunk) => setWorkspaceStream((value) => value + chunk));
       setActiveReport(response.report);
@@ -805,10 +841,10 @@ export default function App() {
       setFindings(nextFindings);
       setTraceability(reportSnapshot);
       setWorkspaceTraceability(workspaceSnapshot);
-      setMessage(response.warnings[0] || "工作区审查报告已生成。", "workbench-project");
+      setMessage(response.warnings[0] || "工作区审查报告已生成。", "projects");
       setView("history");
     } catch (err) {
-      setError(friendlyError(err), "workbench-project");
+      setError(friendlyError(err), "projects");
     } finally {
       setBusyArea(null);
     }
@@ -817,12 +853,12 @@ export default function App() {
   async function handleLoadCodeMap() {
     const workspace = await resolveWorkspaceForProjectView("代码地图");
     if (!workspace) return;
-    setError(null, view === "workbench" ? "workbench-project" : "global");
+    setError(null, view === "projects" ? "projects" : "global");
     try {
       setCodeMap(await getCodeMap(workspace.summary.id));
       setView("map");
     } catch (err) {
-      setError(friendlyError(err), view === "workbench" ? "workbench-project" : "global");
+      setError(friendlyError(err), view === "projects" ? "projects" : "global");
     }
   }
 
@@ -1675,7 +1711,7 @@ export default function App() {
   }
 
   async function handleImportDiffFile(side: "before" | "after") {
-    setError(null);
+    setError(null, "workbench-diff");
     try {
       const result = await importSingleCodeFile();
       const file = result.files[0];
@@ -1689,18 +1725,18 @@ export default function App() {
       }
       if (file.language) setDiffLanguage(file.language);
     } catch (err) {
-      setError(friendlyError(err));
+      setError(friendlyError(err), "workbench-diff");
     }
   }
 
   async function handleAnalyzeDiff() {
     if (!beforeCode.trim() || !afterCode.trim()) {
-      setError("请同时提供旧版本和新版本代码。");
+      setError("请同时提供旧版本和新版本代码。", "workbench-diff");
       return;
     }
     setBusyArea("diff");
     setDiffStream("");
-    setError(null);
+    setError(null, "workbench-diff");
     try {
       const response = await analyzeDiffStream(
         {
@@ -1723,10 +1759,10 @@ export default function App() {
       setReports(nextReports);
       setWorkspaceReports(nextWorkspaceReports);
       setTraceability(reportSnapshot);
-      setMessage(response.warnings[0] || "代码对比报告已生成。");
+      setMessage(response.warnings[0] || "代码对比报告已生成。", "report");
       setView("history");
     } catch (err) {
-      setError(friendlyError(err));
+      setError(friendlyError(err), "workbench-diff");
     } finally {
       setBusyArea(null);
     }
@@ -1778,7 +1814,7 @@ export default function App() {
   async function handleOpenReport(id: string, targetView: View = "history") {
     const requestVersion = ++reportOpenVersionRef.current;
     const failureScope: NoticeScope = view === "workbench"
-      ? (workbenchMode === "project" ? "workbench-project" : "workbench-single")
+      ? (workbenchMode === "single" ? "workbench-single" : "workbench-diff")
       : targetView === "history"
         ? "report"
         : "global";
@@ -2009,7 +2045,7 @@ export default function App() {
     {
       title: "审查主线",
       items: [
-        { key: "workbench", label: "审查工作台", description: "项目审查与单文件分析", icon: <FileCode2 size={18} />, active: view === "workbench", onClick: () => setView("workbench") },
+        { key: "workbench", label: "审查工作台", description: "单文件分析与代码对比", icon: <FileCode2 size={18} />, active: view === "workbench", onClick: () => setView("workbench") },
         { key: "history", label: "历史报告", description: "阅读与导出审查报告", icon: <History size={18} />, active: view === "history", onClick: () => setView("history") },
         { key: "findings", label: "问题清单", description: "跟踪风险与修复建议", icon: <ShieldAlert size={18} />, active: view === "findings", onClick: () => setView("findings") }
       ]
@@ -2017,15 +2053,14 @@ export default function App() {
     {
       title: "项目视图",
       items: [
+        { key: "projects", label: "项目总览", description: "管理工作区并生成项目报告", icon: <Layers3 size={18} />, active: view === "projects", onClick: () => setView("projects") },
         { key: "guide", label: "项目导览", description: "架构摘要与阅读路线", icon: <Map size={18} />, active: view === "guide", onClick: handleLoadProjectGuide },
-        { key: "map", label: "代码地图", description: "符号、依赖与热点文件", icon: <GitBranch size={18} />, active: view === "map", onClick: handleLoadCodeMap },
-        { key: "diff", label: "代码对比", description: "审查两个版本差异", icon: <Columns3 size={18} />, active: view === "diff", onClick: () => setView("diff") }
+        { key: "map", label: "代码地图", description: "符号、依赖与热点文件", icon: <GitBranch size={18} />, active: view === "map", onClick: handleLoadCodeMap }
       ]
     },
     {
       title: "沉淀复盘",
       items: [
-        { key: "galaxy", label: "活动展示台", description: "浏览本地活动卡片", icon: <Activity size={18} />, active: view === "galaxy", onClick: () => { setView("galaxy", "explore"); refreshActivity(); } },
         { key: "cards", label: "知识卡片", description: "从报告和问题沉淀知识", icon: <GraduationCap size={18} />, active: view === "cards", onClick: () => { void openCardsForWorkspace(); } },
         { key: "logs", label: "每日日志", description: "记录学习与审查活动", icon: <FileText size={18} />, active: view === "logs", onClick: () => { setView("logs"); refreshDaily(); } },
         { key: "chat", label: "AI 对话", description: "围绕报告继续追问", icon: <MessageSquare size={18} />, active: view === "chat", onClick: () => setView("chat") },
@@ -2033,8 +2068,9 @@ export default function App() {
       ]
     },
     {
-      title: "系统",
+      title: "工具",
       items: [
+        { key: "galaxy", label: "活动展示台", description: "浏览本地活动卡片", icon: <Activity size={18} />, active: view === "galaxy", onClick: () => { setView("galaxy", "explore"); refreshActivity(); } },
         { key: "settings", label: "设置", description: "模型、Key 与偏好", icon: <SettingsIcon size={18} />, active: view === "settings", onClick: () => setView("settings") },
         { key: "health", label: "状态", description: "本地存储与运行状态", icon: <Database size={18} />, active: view === "health", onClick: () => setView("health") }
       ]
@@ -2042,18 +2078,46 @@ export default function App() {
   ];
 
   const globalCommands = useMemo<ProductGlobalCommand[]>(() => {
-    const actionCommands: ProductGlobalCommand[] = [];
+    const actionCommands: ProductGlobalCommand[] = [
+      {
+        key: "action:workbench-single",
+        label: "打开单文件审查",
+        description: "在审查工作台分析一段代码或单个文件",
+        group: "代码审查",
+        icon: <FileCode2 size={18} />,
+        active: view === "workbench" && workbenchMode === "single",
+        keywords: ["单文件", "代码分析", "审查工作台"],
+        onClick: () => {
+          changeWorkbenchMode("single");
+          setView("workbench");
+        }
+      },
+      {
+        key: "action:workbench-diff",
+        label: "打开代码对比",
+        description: "在审查工作台比较旧版本与新版本",
+        group: "代码审查",
+        icon: <Columns3 size={18} />,
+        active: view === "workbench" && workbenchMode === "diff",
+        keywords: ["代码对比", "版本差异", "审查工作台"],
+        onClick: () => {
+          changeWorkbenchMode("diff");
+          setView("workbench");
+        }
+      }
+    ];
 
     if (activeWorkspace) {
       actionCommands.push(
         {
-          key: `action:workspace-analyze:${activeWorkspace.summary.id}`,
-          label: "分析当前工作区",
-          description: `${activeWorkspace.summary.name} / 生成项目级审查报告`,
+          key: `action:workspace-overview:${activeWorkspace.summary.id}`,
+          label: "打开当前项目总览",
+          description: `${activeWorkspace.summary.name} / 扫描、热点与项目报告`,
           group: "上下文动作",
           icon: <Layers3 size={18} />,
-          keywords: ["项目分析", "工作区审查", "生成报告", activeWorkspace.summary.name],
-          onClick: handleAnalyzeWorkspace
+          keywords: ["项目总览", "项目分析", "工作区审查", activeWorkspace.summary.name],
+          active: view === "projects",
+          onClick: () => setView("projects")
         },
         {
           key: `action:workspace-map:${activeWorkspace.summary.id}`,
@@ -2313,30 +2377,21 @@ export default function App() {
     findings,
     reports,
     view,
+    workbenchMode,
     workspaces
   ]);
 
   const activeNoticeScope: NoticeScope = view === "workbench"
-    ? (workbenchMode === "project" ? "workbench-project" : "workbench-single")
-    : view === "history"
+    ? (workbenchMode === "single" ? "workbench-single" : "workbench-diff")
+    : view === "projects"
+      ? "projects"
+      : view === "history"
       ? "report"
       : "global";
   const visibleMessage = message && (messageScope === "global" || messageScope === activeNoticeScope) ? message : null;
   const visibleError = error && (errorScope === "global" || errorScope === activeNoticeScope) ? error : null;
 
-  if (view === "galaxy" && galaxyMode === "entry") {
-    return (
-      <Suspense fallback={<div className="galaxy-entry-loading-next"><Loader2 className="spin" size={24} /><p>正在加载活动展示台...</p></div>}>
-        <ActivityGalaxyView
-          mode="entry"
-          constellation={activityConstellation}
-          onRefresh={refreshActivity}
-          onEnterWorkbench={() => setView("workbench")}
-          onOpenActivity={handleOpenActivityStar}
-        />
-      </Suspense>
-    );
-  }
+  if (showLaunch) return <LaunchScreen onComplete={() => setShowLaunch(false)} />;
 
   return (
     <ProductShell
@@ -2360,6 +2415,29 @@ export default function App() {
         {view === "workbench" && (
           <CodeWorkbenchView
             workbenchMode={workbenchMode}
+            diffContent={(
+              <CodeDiffView
+                embedded
+                active={workbenchMode === "diff"}
+                title={diffTitle}
+                language={diffLanguage}
+                beforeLabel={beforeLabel}
+                afterLabel={afterLabel}
+                beforeCode={beforeCode}
+                afterCode={afterCode}
+                stream={diffStream}
+                busy={busyArea === "diff"}
+                onTitleChange={setDiffTitle}
+                onLanguageChange={setDiffLanguage}
+                onBeforeLabelChange={setBeforeLabel}
+                onAfterLabelChange={setAfterLabel}
+                onBeforeCodeChange={setBeforeCode}
+                onAfterCodeChange={setAfterCode}
+                onImportBefore={() => handleImportDiffFile("before")}
+                onImportAfter={() => handleImportDiffFile("after")}
+                onAnalyze={handleAnalyzeDiff}
+              />
+            )}
             language={singleLanguage}
             modeGroup={singleModeGroup}
             mode={singleMode}
@@ -2367,15 +2445,8 @@ export default function App() {
             code={singleCode}
             report={singleReport}
             traceability={singleTraceability}
-            workspaces={workspaces}
-            activeWorkspace={activeWorkspace}
-            recentReports={workspaceReports}
-            workspaceTraceability={workspaceTraceability}
-            workspaceQuery={workspaceQuery}
-            workspaceStream={workspaceStream}
             singleBusy={busyArea === "single"}
             reportOperationBusy={reportOperation !== null}
-            workspaceBusy={busyArea === "workspace"}
             onWorkbenchModeChange={changeWorkbenchMode}
             onLanguageChange={setSingleLanguage}
             onModeGroupChange={(value) => {
@@ -2415,23 +2486,37 @@ export default function App() {
             onAddDailyLog={() => addReportToDailyLog(singleReport)}
             onChatAboutReport={() => openReportChat(singleReport)}
             onRenameReport={handleRenameReport}
-            onImportWorkspace={handleImportWorkspace}
-            onAnalyzeWorkspace={handleAnalyzeWorkspace}
-            onWorkspaceQueryChange={setWorkspaceQuery}
-            onSearchWorkspaces={refreshWorkspaces}
-            onOpenWorkspace={handleOpenWorkspace}
-            onDeleteWorkspace={handleDeleteWorkspace}
-            onRescanWorkspace={handleRescanWorkspace}
-            onOpenCodeMap={handleLoadCodeMap}
-            onOpenProjectGuide={handleLoadProjectGuide}
-            onOpenReport={(id) => handleOpenReport(id, "history")}
-            onOpenWorkspaceFindings={openWorkspaceFindings}
-            onOpenWorkspaceCards={openWorkspaceCards}
-            onOpenWorkspaceLogs={openWorkspaceLogs}
           />
         )}
 
-        {view === "map" && <CodeMapView activeWorkspace={activeWorkspace} codeMap={codeMap} onRefresh={handleLoadCodeMap} onBack={() => setView("workbench")} onOpenGuide={handleLoadProjectGuide} />}
+        {view === "projects" && (
+          <section className="code-workbench-v12 project-overview-v1417">
+            <ProjectWorkspaceView
+              workspaces={workspaces}
+              activeWorkspace={activeWorkspace}
+              recentReports={workspaceReports}
+              traceability={workspaceTraceability}
+              query={workspaceQuery}
+              stream={workspaceStream}
+              busy={busyArea === "workspace"}
+              onQueryChange={setWorkspaceQuery}
+              onSearch={refreshWorkspaces}
+              onImport={handleImportWorkspace}
+              onOpen={handleOpenWorkspace}
+              onDelete={handleDeleteWorkspace}
+              onRescan={handleRescanWorkspace}
+              onAnalyze={handleAnalyzeWorkspace}
+              onMap={handleLoadCodeMap}
+              onGuide={handleLoadProjectGuide}
+              onOpenReport={(id) => handleOpenReport(id, "history")}
+              onOpenFindings={openWorkspaceFindings}
+              onOpenCards={openWorkspaceCards}
+              onOpenLogs={openWorkspaceLogs}
+            />
+          </section>
+        )}
+
+        {view === "map" && <CodeMapView activeWorkspace={activeWorkspace} codeMap={codeMap} onRefresh={handleLoadCodeMap} onBack={() => setView("projects")} onOpenGuide={handleLoadProjectGuide} />}
 
         {view === "guide" && (
           <ProjectGuideView
@@ -2439,7 +2524,7 @@ export default function App() {
             guide={projectGuide}
             busy={busyArea === "guide"}
             onGenerate={handleGenerateProjectGuide}
-            onBack={() => setView("workbench")}
+            onBack={() => setView("projects")}
             onOpenCodeMap={handleLoadCodeMap}
           />
         )}
@@ -2466,28 +2551,6 @@ export default function App() {
             onCreateCards={handleCreateCards}
             onChatAboutFinding={handleFindingToChat}
             onAddDailyLog={handleFindingToDailyLog}
-          />
-        )}
-
-        {view === "diff" && (
-          <CodeDiffView
-            title={diffTitle}
-            language={diffLanguage}
-            beforeLabel={beforeLabel}
-            afterLabel={afterLabel}
-            beforeCode={beforeCode}
-            afterCode={afterCode}
-            stream={diffStream}
-            busy={busyArea === "diff"}
-            onTitleChange={setDiffTitle}
-            onLanguageChange={setDiffLanguage}
-            onBeforeLabelChange={setBeforeLabel}
-            onAfterLabelChange={setAfterLabel}
-            onBeforeCodeChange={setBeforeCode}
-            onAfterCodeChange={setAfterCode}
-            onImportBefore={() => handleImportDiffFile("before")}
-            onImportAfter={() => handleImportDiffFile("after")}
-            onAnalyze={handleAnalyzeDiff}
           />
         )}
 
@@ -2699,9 +2762,9 @@ export default function App() {
 
 function viewTitle(view: View) {
   const titles: Record<View, string> = {
-    overview: "工作台总览",
+    overview: "项目总览",
     workbench: "审查工作台",
-    projects: "分析主线",
+    projects: "项目总览",
     guide: "项目导览",
     map: "代码地图",
     findings: "问题清单",
@@ -2719,25 +2782,34 @@ function viewTitle(view: View) {
 }
 
 function initialViewFromLocation(): View {
-  if (typeof window === "undefined") return "galaxy";
+  if (typeof window === "undefined") return "workbench";
   const url = new URL(window.location.href);
   const requested = url.searchParams.get("view");
   const allowed: View[] = ["overview", "workbench", "projects", "map", "findings", "diff", "chat", "cards", "logs", "guide", "agent", "galaxy", "history", "settings", "health"];
-  if (requested === "projects" || requested === "overview") {
-    url.searchParams.set("view", "workbench");
-    window.history.replaceState(null, "", `${url.pathname}${url.search}${url.hash}`);
-    return "workbench";
-  }
-  return allowed.includes(requested as View) ? requested as View : "galaxy";
+  if (requested === "overview") return "projects";
+  if (requested === "diff") return "workbench";
+  return allowed.includes(requested as View) ? requested as View : "workbench";
 }
 
 function initialGalaxyModeFromLocation(): GalaxyMode {
-  if (typeof window === "undefined") return "entry";
-  const params = new URLSearchParams(window.location.search);
-  const requestedView = params.get("view");
-  const requestedMode = params.get("galaxy");
-  if (requestedMode === "entry" || requestedMode === "explore") return requestedMode;
-  return requestedView ? "explore" : "entry";
+  return "explore";
+}
+
+function initialWorkbenchMode(): WorkbenchMode {
+  if (typeof window === "undefined") return "single";
+  const requestedView = new URL(window.location.href).searchParams.get("view");
+  if (requestedView === "diff") return "diff";
+  try {
+    return window.localStorage.getItem("codelens.workbench.mode") === "diff" ? "diff" : "single";
+  } catch {
+    return "single";
+  }
+}
+
+function shouldShowLaunchScreen() {
+  if (typeof window === "undefined") return false;
+  const params = new URL(window.location.href).searchParams;
+  return !params.has("view") && params.get("skipLaunch") !== "1";
 }
 
 function initialTheme(): AppTheme {
@@ -2751,9 +2823,9 @@ function initialTheme(): AppTheme {
 
 function viewSubtitle(view: View) {
   const subtitles: Record<View, string> = {
-    overview: "查看最近工作、待处理问题和下一步动作。",
-    workbench: "从本地工作区完成项目审查，或切换到单文件快速分析。",
-    projects: "从本地工作区进入项目审查，生成项目级报告并沉淀后续动作。",
+    overview: "管理本地工作区，查看项目热点并生成项目级报告。",
+    workbench: "在单文件分析和双版本代码对比之间快速切换。",
+    projects: "管理本地工作区，查看项目热点并生成项目级报告。",
     guide: "把代码地图转成架构说明、关键模块和推荐阅读路径。",
     map: "查看语言分布、热点文件、符号和轻量依赖关系。",
     findings: "把分析结果拆成可跟踪的问题、风险和修复建议。",

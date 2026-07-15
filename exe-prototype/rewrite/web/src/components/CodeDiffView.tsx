@@ -20,6 +20,8 @@ import { ProductToolbar } from "./ProductShell";
 const diffSplitStorageKey = "codelens.diff.editorSplit";
 
 export function CodeDiffView(props: {
+  embedded?: boolean;
+  active?: boolean;
   title: string;
   language: string;
   beforeLabel: string;
@@ -108,8 +110,8 @@ export function CodeDiffView(props: {
   const splitStyle = { "--diff-editor-split": `${splitPercent}%` } as CSSProperties;
 
   return (
-    <section className={`diff-workspace-v133 ${summaryOpen ? "is-summary-open" : ""}`}>
-      <ProductToolbar>
+    <section className={`diff-workspace-v133 ${props.embedded ? "is-embedded" : ""} ${summaryOpen ? "is-summary-open" : ""}`}>
+      {props.active !== false && <ProductToolbar>
         <div className="diff-toolbar-title-v133 product-toolbar-field-next">
           <GitCompare size={16} />
           <label>
@@ -129,7 +131,7 @@ export function CodeDiffView(props: {
             {props.busy ? <Loader2 className="spin" size={16} /> : <Play size={16} />}{props.busy ? "正在生成" : "生成对比报告"}
           </button>
         </div>
-      </ProductToolbar>
+      </ProductToolbar>}
 
       <div className="diff-mobile-config-v151" aria-label="代码对比配置">
         <label>

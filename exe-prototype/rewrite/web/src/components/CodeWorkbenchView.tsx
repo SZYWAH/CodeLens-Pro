@@ -1,9 +1,8 @@
-import { Check, Clipboard, Eraser, FileCode2, FolderOpen, Loader2, Play, RotateCcw } from "lucide-react";
-import { useEffect, useState, type KeyboardEvent } from "react";
-import type { ReportDetail, ReportMetrics, ReportSummary, TraceabilitySnapshot, WorkspaceDetail, WorkspaceSummary } from "../types";
+import { Check, Clipboard, Columns3, Eraser, FileCode2, FolderOpen, Loader2, Play, RotateCcw } from "lucide-react";
+import { useEffect, useState, type KeyboardEvent, type ReactNode } from "react";
+import type { ReportDetail, ReportMetrics, TraceabilitySnapshot } from "../types";
 import { AccessibleListbox } from "./AccessibleListbox";
 import { ReportPanel } from "./ReportPanel";
-import { ProjectWorkspaceView } from "./ProjectWorkspaceView";
 import { ProductToolbar } from "./ProductShell";
 
 const languages = ["auto", "Python", "TypeScript", "JavaScript", "Rust", "Java", "C/C++", "Plain Text"];
@@ -27,7 +26,8 @@ const reportModes: Record<string, Array<{ value: string; label: string; detail: 
 };
 
 export function CodeWorkbenchView(props: {
-  workbenchMode: "project" | "single";
+  workbenchMode: "single" | "diff";
+  diffContent: ReactNode;
   language: string;
   modeGroup: string;
   mode: string;
@@ -35,16 +35,9 @@ export function CodeWorkbenchView(props: {
   code: string;
   report: ReportDetail | null;
   traceability: TraceabilitySnapshot | null;
-  workspaces?: WorkspaceSummary[];
-  activeWorkspace?: WorkspaceDetail | null;
-  recentReports?: ReportSummary[];
-  workspaceTraceability: TraceabilitySnapshot | null;
-  workspaceQuery: string;
-  workspaceStream: string;
   singleBusy: boolean;
   reportOperationBusy: boolean;
-  workspaceBusy: boolean;
-  onWorkbenchModeChange: (value: "project" | "single") => void;
+  onWorkbenchModeChange: (value: "single" | "diff") => void;
   onLanguageChange: (value: string) => void;
   onModeGroupChange: (value: string) => void;
   onModeChange: (value: string) => void;
@@ -61,19 +54,6 @@ export function CodeWorkbenchView(props: {
   onAddDailyLog: () => void;
   onChatAboutReport: () => void;
   onRenameReport: (id: string, title: string) => Promise<void>;
-  onImportWorkspace?: () => void;
-  onAnalyzeWorkspace?: () => void;
-  onWorkspaceQueryChange?: (value: string) => void;
-  onSearchWorkspaces?: (query: string) => void;
-  onOpenWorkspace?: (id: string) => void;
-  onDeleteWorkspace?: (id: string) => void;
-  onRescanWorkspace?: () => void;
-  onOpenCodeMap?: () => void;
-  onOpenProjectGuide?: () => void;
-  onOpenReport?: (id: string) => void;
-  onOpenWorkspaceFindings?: () => void;
-  onOpenWorkspaceCards?: () => void;
-  onOpenWorkspaceLogs?: () => void;
 }) {
   const [singleMobilePane, setSingleMobilePane] = useState<"code" | "report">("code");
   const [codeCopyState, setCodeCopyState] = useState<"copied" | "error" | null>(null);
@@ -91,7 +71,7 @@ export function CodeWorkbenchView(props: {
     return () => window.clearTimeout(timeout);
   }, [codeCopyState]);
 
-  function changeWorkbenchMode(value: "project" | "single") {
+  function changeWorkbenchMode(value: "single" | "diff") {
     if (value === "single") setSingleMobilePane("code");
     props.onWorkbenchModeChange(value);
   }
@@ -134,47 +114,25 @@ export function CodeWorkbenchView(props: {
   return (
     <section className="code-workbench-v12">
       <ProductToolbar>
-        <div className="product-toolbar-context-next">{props.workbenchMode === "project" ? "项目审查主线" : "单文件快速分析"}</div>
+        <div className="product-toolbar-context-next">{props.workbenchMode === "single" ? "单文件快速分析" : "双版本差异审查"}</div>
         <div className="workbench-mode-switch-v12" role="tablist" aria-label="工作台模式">
-          <button aria-controls="workbench-panel-project" className={props.workbenchMode === "project" ? "active" : ""} data-tab-value="project" id="workbench-tab-project-desktop" onClick={() => changeWorkbenchMode("project")} onKeyDown={(event) => handleTabsKeyDown(event, ["project", "single"] as const, props.workbenchMode, changeWorkbenchMode)} role="tab" aria-selected={props.workbenchMode === "project"} tabIndex={props.workbenchMode === "project" ? 0 : -1} type="button"><FolderOpen size={15} />项目</button>
-          <button aria-controls="workbench-panel-single" className={props.workbenchMode === "single" ? "active" : ""} data-tab-value="single" id="workbench-tab-single-desktop" onClick={() => changeWorkbenchMode("single")} onKeyDown={(event) => handleTabsKeyDown(event, ["project", "single"] as const, props.workbenchMode, changeWorkbenchMode)} role="tab" aria-selected={props.workbenchMode === "single"} tabIndex={props.workbenchMode === "single" ? 0 : -1} type="button"><FileCode2 size={15} />单文件</button>
+          <button aria-controls="workbench-panel-single" className={props.workbenchMode === "single" ? "active" : ""} data-tab-value="single" id="workbench-tab-single-desktop" onClick={() => changeWorkbenchMode("single")} onKeyDown={(event) => handleTabsKeyDown(event, ["single", "diff"] as const, props.workbenchMode, changeWorkbenchMode)} role="tab" aria-selected={props.workbenchMode === "single"} tabIndex={props.workbenchMode === "single" ? 0 : -1} type="button"><FileCode2 size={15} />单文件</button>
+          <button aria-controls="workbench-panel-diff" className={props.workbenchMode === "diff" ? "active" : ""} data-tab-value="diff" id="workbench-tab-diff-desktop" onClick={() => changeWorkbenchMode("diff")} onKeyDown={(event) => handleTabsKeyDown(event, ["single", "diff"] as const, props.workbenchMode, changeWorkbenchMode)} role="tab" aria-selected={props.workbenchMode === "diff"} tabIndex={props.workbenchMode === "diff" ? 0 : -1} type="button"><Columns3 size={15} />代码对比</button>
         </div>
       </ProductToolbar>
 
       <div className="workbench-mobile-mode-v142" role="tablist" aria-label="工作台模式">
-        <button aria-controls="workbench-panel-project" className={props.workbenchMode === "project" ? "active" : ""} data-tab-value="project" id="workbench-tab-project-mobile" onClick={() => changeWorkbenchMode("project")} onKeyDown={(event) => handleTabsKeyDown(event, ["project", "single"] as const, props.workbenchMode, changeWorkbenchMode)} role="tab" aria-selected={props.workbenchMode === "project"} tabIndex={props.workbenchMode === "project" ? 0 : -1} type="button"><FolderOpen size={15} />项目审查</button>
-        <button aria-controls="workbench-panel-single" className={props.workbenchMode === "single" ? "active" : ""} data-tab-value="single" id="workbench-tab-single-mobile" onClick={() => changeWorkbenchMode("single")} onKeyDown={(event) => handleTabsKeyDown(event, ["project", "single"] as const, props.workbenchMode, changeWorkbenchMode)} role="tab" aria-selected={props.workbenchMode === "single"} tabIndex={props.workbenchMode === "single" ? 0 : -1} type="button"><FileCode2 size={15} />单文件</button>
+        <button aria-controls="workbench-panel-single" className={props.workbenchMode === "single" ? "active" : ""} data-tab-value="single" id="workbench-tab-single-mobile" onClick={() => changeWorkbenchMode("single")} onKeyDown={(event) => handleTabsKeyDown(event, ["single", "diff"] as const, props.workbenchMode, changeWorkbenchMode)} role="tab" aria-selected={props.workbenchMode === "single"} tabIndex={props.workbenchMode === "single" ? 0 : -1} type="button"><FileCode2 size={15} />单文件</button>
+        <button aria-controls="workbench-panel-diff" className={props.workbenchMode === "diff" ? "active" : ""} data-tab-value="diff" id="workbench-tab-diff-mobile" onClick={() => changeWorkbenchMode("diff")} onKeyDown={(event) => handleTabsKeyDown(event, ["single", "diff"] as const, props.workbenchMode, changeWorkbenchMode)} role="tab" aria-selected={props.workbenchMode === "diff"} tabIndex={props.workbenchMode === "diff" ? 0 : -1} type="button"><Columns3 size={15} />代码对比</button>
       </div>
 
-      {props.workbenchMode === "project" && (
-        <div aria-labelledby="workbench-tab-project-desktop" id="workbench-panel-project" role="tabpanel">
-          <ProjectWorkspaceView
-            workspaces={props.workspaces || []}
-            activeWorkspace={props.activeWorkspace || null}
-            recentReports={props.recentReports || []}
-            traceability={props.workspaceTraceability}
-            query={props.workspaceQuery}
-            stream={props.workspaceStream}
-            busy={props.workspaceBusy}
-            onQueryChange={props.onWorkspaceQueryChange || (() => undefined)}
-            onSearch={props.onSearchWorkspaces || (() => undefined)}
-            onImport={props.onImportWorkspace || (() => undefined)}
-            onOpen={props.onOpenWorkspace || (() => undefined)}
-            onDelete={props.onDeleteWorkspace || (() => undefined)}
-            onRescan={props.onRescanWorkspace || (() => undefined)}
-            onAnalyze={props.onAnalyzeWorkspace || (() => undefined)}
-            onMap={props.onOpenCodeMap || (() => undefined)}
-            onGuide={props.onOpenProjectGuide || (() => undefined)}
-            onOpenReport={props.onOpenReport || (() => undefined)}
-            onOpenFindings={props.onOpenWorkspaceFindings || (() => undefined)}
-            onOpenCards={props.onOpenWorkspaceCards || (() => undefined)}
-            onOpenLogs={props.onOpenWorkspaceLogs || (() => undefined)}
-          />
-        </div>
-      )}
-
-      {props.workbenchMode === "single" && (
-      <section aria-label="单文件分析" className={`single-workbench-v12 ${props.report ? "has-report" : "no-report"} show-${singleMobilePane}`} id="workbench-panel-single" role="tabpanel">
+      <section
+        aria-label="单文件分析"
+        className={`single-workbench-v12 ${props.report ? "has-report" : "no-report"} show-${singleMobilePane}`}
+        hidden={props.workbenchMode !== "single"}
+        id="workbench-panel-single"
+        role="tabpanel"
+      >
       {props.report && <div className="single-mobile-tabs-v142" role="tablist" aria-label="单文件工作区">
         <button aria-controls="single-pane-code" className={singleMobilePane === "code" ? "active" : ""} data-tab-value="code" id="single-tab-code" onClick={() => setSingleMobilePane("code")} onKeyDown={(event) => handleTabsKeyDown(event, ["code", "report"] as const, singleMobilePane, setSingleMobilePane)} role="tab" aria-selected={singleMobilePane === "code"} tabIndex={singleMobilePane === "code" ? 0 : -1} type="button"><FileCode2 size={15} />代码</button>
         <button aria-controls="single-pane-report" className={singleMobilePane === "report" ? "active" : ""} data-tab-value="report" id="single-tab-report" onClick={() => setSingleMobilePane("report")} onKeyDown={(event) => handleTabsKeyDown(event, ["code", "report"] as const, singleMobilePane, setSingleMobilePane)} role="tab" aria-selected={singleMobilePane === "report"} tabIndex={singleMobilePane === "report" ? 0 : -1} type="button"><Play size={15} />报告</button>
@@ -243,7 +201,16 @@ export function CodeWorkbenchView(props: {
         />
       </main>}
       </section>
-      )}
+
+      <div
+        aria-labelledby="workbench-tab-diff-desktop"
+        className="workbench-diff-panel-v1417"
+        hidden={props.workbenchMode !== "diff"}
+        id="workbench-panel-diff"
+        role="tabpanel"
+      >
+        {props.diffContent}
+      </div>
     </section>
   );
 }

@@ -6,6 +6,112 @@
   text-rendering: optimizeLegibility;
 }
 
+/* V14.17: cold-start brand screen and embedded analysis workspaces. */
+.launch-screen-v1417 {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+  color: #eef3f8;
+  background:
+    radial-gradient(circle at 50% 46%, rgba(46, 58, 70, 0.12), transparent 34%),
+    #030507;
+  opacity: 1;
+  cursor: default;
+  transition: opacity 160ms ease;
+}
+
+.launch-screen-v1417::after {
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(circle at center, transparent 42%, rgba(0, 0, 0, 0.28) 100%);
+  content: "";
+  pointer-events: none;
+}
+
+.launch-screen-v1417.is-leaving {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.launch-brand-v1417 {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  justify-items: center;
+  gap: 10px;
+  text-align: center;
+}
+
+.launch-brand-v1417 img {
+  width: 54px;
+  height: 54px;
+  margin-bottom: 12px;
+  filter: drop-shadow(0 10px 28px rgba(0, 0, 0, 0.5));
+}
+
+.launch-brand-v1417 h1 {
+  margin: 0;
+  color: #f2f5f8;
+  font-size: clamp(25px, 3vw, 34px);
+  font-weight: 620;
+  letter-spacing: 0;
+}
+
+.launch-brand-v1417 p {
+  margin: 0;
+  color: rgba(224, 231, 238, 0.58);
+  font-family: "STKaiti", "KaiTi", serif;
+  font-size: clamp(15px, 1.6vw, 18px);
+  letter-spacing: 0;
+}
+
+.project-overview-v1417 {
+  grid-template-rows: minmax(0, 1fr) !important;
+}
+
+.project-overview-v1417 > .project-workspace-v132 {
+  grid-row: 1 !important;
+}
+
+.workbench-diff-panel-v1417,
+.workbench-diff-panel-v1417 > .diff-workspace-v133.is-embedded {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.workbench-diff-panel-v1417 > .diff-workspace-v133.is-embedded {
+  border-top: 0;
+}
+
+.code-workbench-v12 > [hidden] {
+  display: none !important;
+}
+
+@media (max-width: 760px) {
+  .launch-brand-v1417 img {
+    width: 48px;
+    height: 48px;
+  }
+
+  .launch-brand-v1417 h1 {
+    font-size: 25px;
+  }
+
+  .launch-brand-v1417 p {
+    font-size: 15px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .launch-screen-v1417 {
+    transition: none;
+  }
+}
+
 * {
   box-sizing: border-box;
 }

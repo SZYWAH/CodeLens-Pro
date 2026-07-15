@@ -897,6 +897,7 @@ function Get-RouteDefinitions {
     return @(
         [pscustomobject]@{ name = "galaxy"; query = "?view=galaxy&galaxy=explore" }
         [pscustomobject]@{ name = "workbench"; query = "?view=workbench" }
+        [pscustomobject]@{ name = "projects"; query = "?view=projects" }
         [pscustomobject]@{ name = "map"; query = "?view=map" }
         [pscustomobject]@{ name = "guide"; query = "?view=guide" }
         [pscustomobject]@{ name = "findings"; query = "?view=findings" }

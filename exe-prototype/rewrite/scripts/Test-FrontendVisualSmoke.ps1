@@ -18,7 +18,10 @@ $DistRoot = Join-Path $WebRoot "dist"
 if (-not $OutputDir) {
     $OutputDir = Join-Path $PrototypeRoot "outputs\codelens-next"
 }
+$OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 $ScreenshotPath = Join-Path $OutputDir $ScreenshotName
+$ScreenshotStagingDir = Join-Path ([System.IO.Path]::GetPathRoot($ScreenshotPath)) "codelens-next-smoke"
+$ScreenshotCapturePath = Join-Path $ScreenshotStagingDir ("visual-{0}.png" -f [guid]::NewGuid().ToString("N"))
 
 function Invoke-CheckedCommand {
     param(
@@ -110,7 +113,70 @@ function Invoke-BrowserScreenshot {
         }
     }
 
-    return (Test-Path $ScreenshotFile)
+    $lastLength = -1
+    $stableSamples = 0
+    for ($index = 0; $index -lt 40; $index += 1) {
+        if (Test-Path $ScreenshotFile) {
+            $length = (Get-Item -LiteralPath $ScreenshotFile).Length
+            if ($length -gt 0 -and $length -eq $lastLength) {
+                $stableSamples += 1
+                if ($stableSamples -ge 2) {
+                    return $true
+                }
+            } else {
+                $stableSamples = 0
+                $lastLength = $length
+            }
+        }
+        Start-Sleep -Milliseconds 250
+    }
+
+    return $false
+}
+
+function Assert-RuntimeShowcaseMaterial {
+    param(
+        [Parameter(Mandatory = $true)][string]$BrowserPath,
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][string]$StagingDir
+    )
+
+    $profileDir = Join-Path $StagingDir ("runtime-{0}" -f [guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
+    try {
+        $runtimeUrl = if ($Url.Contains("?")) { "$Url&material=optical" } else { "$Url?material=optical" }
+        $arguments = @(
+            "--headless=new",
+            "--disable-background-networking",
+            "--disable-gpu",
+            "--no-first-run",
+            "--user-data-dir=$profileDir",
+            "--virtual-time-budget=8000",
+            "--dump-dom",
+            $runtimeUrl
+        )
+        $previousErrorActionPreference = $ErrorActionPreference
+        try {
+            $ErrorActionPreference = "Continue"
+            $dom = & $BrowserPath @arguments 2>$null | Out-String
+            $browserExitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        if ($browserExitCode -ne 0) {
+            throw "Runtime showcase material check failed with browser exit code $browserExitCode."
+        }
+        if ($dom -notmatch 'data-showcase-material-profile="liquid"') {
+            throw "Production showcase did not render the liquid material profile at runtime."
+        }
+        if ($dom -match 'showcase-material-lab-v1417') {
+            throw "Production showcase unexpectedly rendered the development material selector."
+        }
+    } finally {
+        if (Test-Path $profileDir) {
+            Remove-Item -LiteralPath $profileDir -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
 }
 
 function Test-ScreenshotHasVisiblePixels {
@@ -368,6 +434,20 @@ function Assert-BundleText {
     }
 }
 
+function Assert-BundleDoesNotContain {
+    param([Parameter(Mandatory = $true)][string[]]$Needles)
+
+    $assets = Get-ChildItem -Path (Join-Path $DistRoot "assets") -File | Where-Object { $_.Extension -in @(".js", ".css") }
+    foreach ($needle in $Needles) {
+        foreach ($asset in $assets) {
+            $content = [System.IO.File]::ReadAllText($asset.FullName, [System.Text.Encoding]::UTF8)
+            if ($content.Contains($needle)) {
+                throw "Built frontend bundle contains preview-only text: $needle in $($asset.Name)"
+            }
+        }
+    }
+}
+
 function Assert-SourceText {
     param([Parameter(Mandatory = $true)][string[]]$Needles)
 
@@ -421,6 +501,7 @@ $reviewWorkbenchText = New-TextFromCodepoints @(0x5ba1, 0x67e5, 0x5de5, 0x4f5c, 
 $traceabilityText = New-TextFromCodepoints @(0x5173, 0x8054, 0x6d1e, 0x5bdf)
 $codeSnippetText = New-TextFromCodepoints @(0x4ee3, 0x7801, 0x7247, 0x6bb5)
 $emptyReportText = New-TextFromCodepoints @(0x62a5, 0x544a, 0x6b63, 0x6587, 0x4e3a, 0x7a7a)
+$showcaseFixtureText = New-TextFromCodepoints @(0x6d3b, 0x52a8, 0x5c55, 0x793a, 0x53f0, 0x4ea4, 0x4e92, 0x6837, 0x672c)
 Assert-SourceText -Needles @($activityShowcaseText, $actionDraftText, $knowledgeCardsText, $reviewWorkbenchText, $traceabilityText, $codeSnippetText, $emptyReportText)
 Assert-ShowcaseSourceDoesNotContain -Needles @(
     "createHiddenOpticsMaterial",
@@ -472,6 +553,10 @@ Assert-SourceText -Needles @(
     "opticalThickness",
     "showcaseHeroPhase",
     "showcaseHeroActionPending",
+    "showcaseMaterialProfile",
+    'showcaseMaterialDefaultProfile: ShowcaseMaterialProfile = "liquid"',
+    "LIQUID_SCALE_WAVE_WEIGHTS = [1, 0.34, 0.32, 0.3, 0.28, 0.25, 0.22, 0.18, 0.13, 0.07, 0]",
+    "LIQUID_HOVER_SCALE_Y_GAIN = 0.44",
     "activity-showcase-hero-copy",
     "activity-showcase-hero-action",
     "ArrowUpRight",
@@ -536,10 +621,15 @@ Assert-SourceText -Needles @(
     "report-actions-drawer-v131"
 )
 Assert-BundleText -Needles @("CodeLens Pro Next")
+Assert-BundleDoesNotContain -Needles @(
+    "showcase-material-lab-v1417",
+    "local-preview/storage",
+    $showcaseFixtureText
+)
 
 $browser = Find-Browser
-$url = "http://127.0.0.1:$Port"
-$BrowserUserDataDir = Join-Path $OutputDir ".visual-smoke-browser"
+$url = "http://127.0.0.1:$Port/?view=galaxy&galaxy=explore"
+$BrowserUserDataDir = Join-Path $ScreenshotStagingDir ("browser-{0}" -f [guid]::NewGuid().ToString("N"))
 $npm = Get-Command npm.cmd -ErrorAction SilentlyContinue
 if (-not $npm) {
     $npm = Get-Command npm -ErrorAction Stop
@@ -558,6 +648,11 @@ try {
 
     if (Test-Path $ScreenshotPath) {
         Remove-Item -LiteralPath $ScreenshotPath -Force
+    }
+    New-Item -ItemType Directory -Force -Path $ScreenshotStagingDir | Out-Null
+    Assert-RuntimeShowcaseMaterial -BrowserPath $browser -Url $url -StagingDir $ScreenshotStagingDir
+    if (Test-Path $ScreenshotCapturePath) {
+        Remove-Item -LiteralPath $ScreenshotCapturePath -Force
     }
     if (Test-Path $BrowserUserDataDir) {
         Remove-Item -LiteralPath $BrowserUserDataDir -Recurse -Force
@@ -582,12 +677,16 @@ try {
         "--window-size=$ViewportWidth,$ViewportHeight"
     )
 
-    $headlessNewArgs = @("--headless=new") + $browserBaseArgs + @("--screenshot=$ScreenshotPath", $url)
-    $captured = Invoke-BrowserScreenshot -BrowserPath $browser -Arguments $headlessNewArgs -ScreenshotFile $ScreenshotPath
+    $headlessNewArgs = @("--headless=new") + $browserBaseArgs + @("--screenshot=$ScreenshotCapturePath", $url)
+    $captured = Invoke-BrowserScreenshot -BrowserPath $browser -Arguments $headlessNewArgs -ScreenshotFile $ScreenshotCapturePath
 
     if (-not $captured) {
-        $headlessClassicArgs = @("--headless") + $browserBaseArgs + @("--screenshot=$ScreenshotPath", $url)
-        $captured = Invoke-BrowserScreenshot -BrowserPath $browser -Arguments $headlessClassicArgs -ScreenshotFile $ScreenshotPath
+        $headlessClassicArgs = @("--headless") + $browserBaseArgs + @("--screenshot=$ScreenshotCapturePath", $url)
+        $captured = Invoke-BrowserScreenshot -BrowserPath $browser -Arguments $headlessClassicArgs -ScreenshotFile $ScreenshotCapturePath
+    }
+
+    if ($captured) {
+        Copy-Item -LiteralPath $ScreenshotCapturePath -Destination $ScreenshotPath -Force
     }
 
     if (-not (Test-Path $ScreenshotPath)) {
@@ -616,6 +715,7 @@ try {
         Url = $url
         Browser = $browser
         ScreenshotCaptured = $true
+        RuntimeMaterialProfile = "liquid"
         Screenshot = $ScreenshotPath
         ScreenshotKB = [math]::Round($screenshot.Length / 1KB, 2)
         ScreenshotPixels = "$($pixelCheck.Width)x$($pixelCheck.Height)"
@@ -639,5 +739,11 @@ try {
     }
     if ($previewProcess) {
         Stop-ProcessTree -TargetProcessId $previewProcess.Id
+    }
+    if (Test-Path $ScreenshotCapturePath) {
+        Remove-Item -LiteralPath $ScreenshotCapturePath -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path $BrowserUserDataDir) {
+        Remove-Item -LiteralPath $BrowserUserDataDir -Recurse -Force -ErrorAction SilentlyContinue
     }
 }

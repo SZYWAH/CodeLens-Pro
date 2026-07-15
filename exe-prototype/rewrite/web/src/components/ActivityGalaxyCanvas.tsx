@@ -6,6 +6,8 @@ import type { ActivityStarItem } from "../types";
 
 type GalaxyMode = "entry" | "explore";
 
+export type ShowcaseMaterialProfile = "legacy" | "optical" | "liquid" | "dispersion";
+
 type ShowcaseCard = ActivityStarItem & {
   guide?: boolean;
 };
@@ -23,6 +25,7 @@ type CrystalUniforms = {
   uHighlightShift: THREE.IUniform<number>;
   uHalfExtents: THREE.IUniform<THREE.Vector3>;
   uStageDim: THREE.IUniform<number>;
+  uMaterialProfile: THREE.IUniform<number>;
 };
 
 type CrystalMaterial = THREE.ShaderMaterial & {
@@ -125,15 +128,23 @@ const HERO_REDUCED_DURATION = 120;
 const HERO_DOCK_DIM = 0.45;
 const HERO_DOCK_MOTION = 0.4;
 const WAVE_WEIGHTS = [1, 0.47, 0.17, 0.04, 0] as const;
+const LIQUID_SCALE_WAVE_WEIGHTS = [1, 0.34, 0.32, 0.3, 0.28, 0.25, 0.22, 0.18, 0.13, 0.07, 0] as const;
+const LIQUID_PUSH_WAVE_WEIGHTS = [1, 0.52, 0.22, 0.06, 0] as const;
+const LIQUID_HOVER_SCALE_X_GAIN = 0.1;
+const LIQUID_HOVER_SCALE_Y_GAIN = 0.44;
+const LIQUID_HOVER_LIFT = 0.68;
+const LIQUID_HOVER_FORWARD = 0.52;
 
 export function ActivityGalaxyCanvas({
   items,
+  materialProfile = "legacy",
   mode,
   onBack,
   onOpenActivity
 }: {
   codeLineCount: number;
   items: ActivityStarItem[];
+  materialProfile?: ShowcaseMaterialProfile;
   mode: GalaxyMode;
   onBack: () => void;
   onBlankClick?: () => void;
@@ -194,6 +205,7 @@ export function ActivityGalaxyCanvas({
     const host = hostRef.current;
     if (!host) return;
     const hostElement = host;
+    const usesLiquidDockMotion = materialProfile === "liquid";
 
     const cardsScene = new THREE.Scene();
     const backgroundScene = new THREE.Scene();
@@ -219,6 +231,7 @@ export function ActivityGalaxyCanvas({
     renderer.domElement.tabIndex = 0;
     renderer.domElement.setAttribute("aria-label", "活动玻璃展示台");
     renderer.domElement.dataset.showcaseRenderer = "screen-transmission-crystal";
+    renderer.domElement.dataset.showcaseMaterialProfile = materialProfile;
     hostElement.appendChild(renderer.domElement);
     const diagnosticsEnabled = window.location.hostname === "127.0.0.1" || window.location.hostname === "localhost";
     const supportsHalfFloatTarget = Boolean(renderer.getContext().getExtension("EXT_color_buffer_float"));
@@ -248,16 +261,21 @@ export function ActivityGalaxyCanvas({
     const cardsDockGroup = new THREE.Group();
     cardsScene.add(cardsDockGroup);
 
-    const spineGeometry = new RoundedBoxGeometry(SPINE_WIDTH, SPINE_HEIGHT, SPINE_DEPTH, 10, SPINE_RADIUS);
-    const spineHalfExtents = new THREE.Vector3(SPINE_WIDTH * 0.5, SPINE_HEIGHT * 0.5, SPINE_DEPTH * 0.5);
-    const totalWidth = Math.max(1, (cards.length - 1) * SPINE_SPACING + SPINE_WIDTH);
+    const labMaterial = materialProfile !== "legacy";
+    const spineWidth = labMaterial ? 0.09 : SPINE_WIDTH;
+    const spineDepth = labMaterial ? 0.2 : SPINE_DEPTH;
+    const spineRadius = labMaterial ? 0.018 : SPINE_RADIUS;
+    const spineYaw = labMaterial ? THREE.MathUtils.degToRad(5.5) : SPINE_YAW;
+    const spineGeometry = new RoundedBoxGeometry(spineWidth, SPINE_HEIGHT, spineDepth, 10, spineRadius);
+    const spineHalfExtents = new THREE.Vector3(spineWidth * 0.5, SPINE_HEIGHT * 0.5, spineDepth * 0.5);
+    const totalWidth = Math.max(1, (cards.length - 1) * SPINE_SPACING + spineWidth);
     const contactShadowTexture = createContactShadowTexture();
     const neutralGlowColor = new THREE.Color("#70a99b");
 
     const runtimes = cards.map((card, index) => {
       const baseX = (index - (cards.length - 1) / 2) * SPINE_SPACING;
       const group = new THREE.Group();
-      group.rotation.y = SPINE_YAW;
+      group.rotation.y = spineYaw;
       const color = new THREE.Color(colorForKind(card.kind));
       const contactShadowMaterial = new THREE.SpriteMaterial({
         map: contactShadowTexture,
@@ -282,7 +300,9 @@ export function ActivityGalaxyCanvas({
           backDepthTarget.texture,
           camera,
           packedBackDepth,
-          spineHalfExtents
+          spineHalfExtents,
+          1,
+          materialProfile
         )
       );
       spine.userData.cardId = card.id;
@@ -320,7 +340,8 @@ export function ActivityGalaxyCanvas({
       camera,
       packedBackDepth,
       new THREE.Vector3(HERO_WIDTH * 0.5, HERO_HEIGHT * 0.5, HERO_DEPTH * 0.5),
-      0.34
+      0.34,
+      materialProfile
     );
     const heroMesh = new THREE.Mesh(heroGeometry, heroMaterial);
     heroMesh.renderOrder = 3;
@@ -418,11 +439,11 @@ export function ActivityGalaxyCanvas({
       cardsDockGroup.updateMatrixWorld(true);
 
       for (const runtime of runtimes) {
-        projectFrom(cardsDockGroup, runtime.baseX, DOCK_Y, SPINE_DEPTH * 0.5, width, height, projectedCenter);
-        projectFrom(cardsDockGroup, runtime.baseX, DOCK_Y + SPINE_HEIGHT * 0.5, SPINE_DEPTH * 0.5, width, height, projectedTop);
-        projectFrom(cardsDockGroup, runtime.baseX, DOCK_Y - SPINE_HEIGHT * 0.5, SPINE_DEPTH * 0.5, width, height, projectedBottom);
-        projectFrom(cardsDockGroup, runtime.baseX - SPINE_WIDTH * 0.5, DOCK_Y, SPINE_DEPTH * 0.5, width, height, projectedLeft);
-        projectFrom(cardsDockGroup, runtime.baseX + SPINE_WIDTH * 0.5, DOCK_Y, SPINE_DEPTH * 0.5, width, height, projectedRight);
+        projectFrom(cardsDockGroup, runtime.baseX, DOCK_Y, spineDepth * 0.5, width, height, projectedCenter);
+        projectFrom(cardsDockGroup, runtime.baseX, DOCK_Y + SPINE_HEIGHT * 0.5, spineDepth * 0.5, width, height, projectedTop);
+        projectFrom(cardsDockGroup, runtime.baseX, DOCK_Y - SPINE_HEIGHT * 0.5, spineDepth * 0.5, width, height, projectedBottom);
+        projectFrom(cardsDockGroup, runtime.baseX - spineWidth * 0.5, DOCK_Y, spineDepth * 0.5, width, height, projectedLeft);
+        projectFrom(cardsDockGroup, runtime.baseX + spineWidth * 0.5, DOCK_Y, spineDepth * 0.5, width, height, projectedRight);
         runtime.baseScreenX = projectedCenter.x;
         runtime.baseScreenTop = Math.min(projectedTop.y, projectedBottom.y);
         runtime.baseScreenBottom = Math.max(projectedTop.y, projectedBottom.y);
@@ -435,11 +456,11 @@ export function ActivityGalaxyCanvas({
       camera.updateMatrixWorld();
       cardsDockGroup.updateMatrixWorld(true);
       for (const runtime of runtimes) {
-        projectFrom(runtime.group, 0, 0, SPINE_DEPTH * 0.5, width, height, projectedCenter);
-        projectFrom(runtime.group, 0, SPINE_HEIGHT * 0.5, SPINE_DEPTH * 0.5, width, height, projectedTop);
-        projectFrom(runtime.group, 0, -SPINE_HEIGHT * 0.5, SPINE_DEPTH * 0.5, width, height, projectedBottom);
-        projectFrom(runtime.group, -SPINE_WIDTH * 0.5, 0, SPINE_DEPTH * 0.5, width, height, projectedLeft);
-        projectFrom(runtime.group, SPINE_WIDTH * 0.5, 0, SPINE_DEPTH * 0.5, width, height, projectedRight);
+        projectFrom(runtime.group, 0, 0, spineDepth * 0.5, width, height, projectedCenter);
+        projectFrom(runtime.group, 0, SPINE_HEIGHT * 0.5, spineDepth * 0.5, width, height, projectedTop);
+        projectFrom(runtime.group, 0, -SPINE_HEIGHT * 0.5, spineDepth * 0.5, width, height, projectedBottom);
+        projectFrom(runtime.group, -spineWidth * 0.5, 0, spineDepth * 0.5, width, height, projectedLeft);
+        projectFrom(runtime.group, spineWidth * 0.5, 0, spineDepth * 0.5, width, height, projectedRight);
         runtime.visualScreenX = projectedCenter.x;
         runtime.visualScreenTop = Math.min(projectedTop.y, projectedBottom.y);
         runtime.visualScreenBottom = Math.max(projectedTop.y, projectedBottom.y);
@@ -473,9 +494,9 @@ export function ActivityGalaxyCanvas({
       const worldScale = new THREE.Vector3();
       runtime.spine.getWorldScale(worldScale);
       heroStartScale.set(
-        Math.max(0.012, SPINE_WIDTH * worldScale.x / HERO_WIDTH),
+        Math.max(0.012, spineWidth * worldScale.x / HERO_WIDTH),
         Math.max(0.2, SPINE_HEIGHT * worldScale.y / HERO_HEIGHT),
-        Math.max(1, SPINE_DEPTH * worldScale.z / HERO_DEPTH)
+        Math.max(1, spineDepth * worldScale.z / HERO_DEPTH)
       );
     }
 
@@ -934,7 +955,13 @@ export function ActivityGalaxyCanvas({
         : 36;
       const hasPointerWave = pointer != null && pointer.waveStrength > 0;
       const targetFocusX = hasPointerWave
-        ? clamp(pointer.x, firstX, lastX)
+        ? clamp(
+          usesLiquidDockMotion && pointer.directRuntime
+            ? pointer.directRuntime.baseScreenX
+            : pointer.x,
+          firstX,
+          lastX
+        )
         : selectedRuntime?.baseScreenX ?? focusX;
       const targetFocusStrength = hasPointerWave ? pointer.waveStrength : selectedRuntime ? SELECTED_MATERIAL_STRENGTH : 0;
       const hoverRuntime = hasPointerWave
@@ -960,19 +987,39 @@ export function ActivityGalaxyCanvas({
         const selectedDistance = selectedRuntime
           ? Math.abs(runtime.baseScreenX - selectedRuntime.baseScreenX) / spacing
           : Number.POSITIVE_INFINITY;
-        const hoverInfluence = hasPointerWave ? waveFalloff(hoverDistance) * focusStrength : 0;
-        const selectedInfluence = selectedRuntime ? waveFalloff(selectedDistance) : 0;
         const sharedFocus = hoverRuntime?.id === selectedRuntime?.id;
-        const hoverPushInfluence = sharedFocus
-          ? Math.max(hoverInfluence, selectedInfluence)
+        const hoverInfluence = hasPointerWave
+          ? usesLiquidDockMotion
+            ? pointer?.directRuntime?.id === runtime.id
+              ? focusStrength
+              : liquidScaleWaveFalloff(hoverDistance) * focusStrength
+            : waveFalloff(hoverDistance) * focusStrength
+          : 0;
+        const selectedInfluence = selectedRuntime
+          ? usesLiquidDockMotion
+            ? hasPointerWave && !sharedFocus
+              ? runtime.id === selectedRuntime.id ? SELECTED_MATERIAL_STRENGTH : 0
+              : liquidScaleWaveFalloff(selectedDistance) * SELECTED_MATERIAL_STRENGTH
+            : waveFalloff(selectedDistance)
+          : 0;
+        const hoverPushBase = usesLiquidDockMotion
+          ? hasPointerWave ? liquidPushWaveFalloff(hoverDistance) * focusStrength : 0
           : hoverInfluence;
+        const selectedPushInfluence = usesLiquidDockMotion
+          ? selectedRuntime && (!hasPointerWave || sharedFocus)
+            ? liquidPushWaveFalloff(selectedDistance) * SELECTED_MATERIAL_STRENGTH
+            : 0
+          : selectedInfluence;
+        const hoverPushInfluence = sharedFocus
+          ? Math.max(hoverPushBase, selectedPushInfluence)
+          : hoverPushBase;
         const hoverPush = hoverRuntime && hoverRuntime.id !== runtime.id
           ? Math.sign(runtime.index - hoverRuntime.index) * hoverPushInfluence * HOVER_NEIGHBOR_PUSH
           : 0;
         const selectedPush = selectedRuntime
           && selectedRuntime.id !== runtime.id
           && selectedRuntime.id !== hoverRuntime?.id
-          ? Math.sign(runtime.index - selectedRuntime.index) * selectedInfluence * SELECTED_NEIGHBOR_PUSH
+          ? Math.sign(runtime.index - selectedRuntime.index) * selectedPushInfluence * SELECTED_NEIGHBOR_PUSH
           : 0;
         const magnetRatio = hoverRuntime?.id === runtime.id && hasPointerWave
           ? clamp(((pointer?.x ?? runtime.baseScreenX) - runtime.baseScreenX) / spacing, -1, 1)
@@ -982,24 +1029,24 @@ export function ActivityGalaxyCanvas({
           + magnetRatio * 0.04
         ) * motionScale;
         const targetY = DOCK_Y + Math.max(
-          hoverInfluence * HOVER_LIFT,
-          selectedInfluence * SELECTED_LIFT
+          hoverInfluence * (usesLiquidDockMotion ? LIQUID_HOVER_LIFT : HOVER_LIFT),
+          selectedInfluence * (usesLiquidDockMotion ? LIQUID_HOVER_LIFT : SELECTED_LIFT)
         ) * motionScale;
         const targetZ = Math.max(
-          hoverInfluence * HOVER_FORWARD,
-          selectedInfluence * SELECTED_FORWARD
+          hoverInfluence * (usesLiquidDockMotion ? LIQUID_HOVER_FORWARD : HOVER_FORWARD),
+          selectedInfluence * (usesLiquidDockMotion ? LIQUID_HOVER_FORWARD : SELECTED_FORWARD)
         ) * motionScale;
         const targetScaleX = 1 + Math.max(
-          hoverInfluence * HOVER_SCALE_X_GAIN,
-          selectedInfluence * SELECTED_SCALE_X_GAIN
+          hoverInfluence * (usesLiquidDockMotion ? LIQUID_HOVER_SCALE_X_GAIN : HOVER_SCALE_X_GAIN),
+          selectedInfluence * (usesLiquidDockMotion ? LIQUID_HOVER_SCALE_X_GAIN : SELECTED_SCALE_X_GAIN)
         ) * motionScale;
         const targetScaleY = 1 + Math.max(
-          hoverInfluence * HOVER_SCALE_Y_GAIN,
-          selectedInfluence * SELECTED_SCALE_Y_GAIN
+          hoverInfluence * (usesLiquidDockMotion ? LIQUID_HOVER_SCALE_Y_GAIN : HOVER_SCALE_Y_GAIN),
+          selectedInfluence * (usesLiquidDockMotion ? LIQUID_HOVER_SCALE_Y_GAIN : SELECTED_SCALE_Y_GAIN)
         ) * motionScale;
         const activity = clamp(Math.max(
           hoverInfluence,
-          selectedInfluence * SELECTED_MATERIAL_STRENGTH
+          selectedInfluence * (usesLiquidDockMotion ? 1 : SELECTED_MATERIAL_STRENGTH)
         ), 0, 1);
 
         return {
@@ -1100,6 +1147,15 @@ export function ActivityGalaxyCanvas({
         const diagnosticNeighbor = diagnosticRuntime
           ? runtimes[diagnosticRuntime.index < runtimes.length - 1 ? diagnosticRuntime.index + 1 : diagnosticRuntime.index - 1]
           : null;
+        const diagnosticNeighborScale = (offset: number, axis: "x" | "y") => {
+          if (!diagnosticRuntime) return 1;
+          const candidates = [
+            runtimes[diagnosticRuntime.index - offset],
+            runtimes[diagnosticRuntime.index + offset]
+          ].filter((candidate): candidate is SpineRuntime => Boolean(candidate));
+          if (!candidates.length) return 1;
+          return Math.max(...candidates.map((candidate) => candidate.group.scale[axis]));
+        };
         const currentClickCandidate = pointer
           ? resolveClickCandidate(pointer.x, pointer.y)
           : { runtimeId: null, source: "outside" as const };
@@ -1108,6 +1164,12 @@ export function ActivityGalaxyCanvas({
         renderer.domElement.dataset.showcaseActiveScaleX = diagnosticRuntime?.group.scale.x.toFixed(3) || "1.000";
         renderer.domElement.dataset.showcaseActiveScaleY = diagnosticRuntime?.group.scale.y.toFixed(3) || "1.000";
         renderer.domElement.dataset.showcaseNeighborScaleX = diagnosticNeighbor?.group.scale.x.toFixed(3) || "1.000";
+        renderer.domElement.dataset.showcaseNeighbor1ScaleX = diagnosticNeighborScale(1, "x").toFixed(3);
+        renderer.domElement.dataset.showcaseNeighbor1ScaleY = diagnosticNeighborScale(1, "y").toFixed(3);
+        renderer.domElement.dataset.showcaseNeighbor2ScaleX = diagnosticNeighborScale(2, "x").toFixed(3);
+        renderer.domElement.dataset.showcaseNeighbor2ScaleY = diagnosticNeighborScale(2, "y").toFixed(3);
+        renderer.domElement.dataset.showcaseNeighbor3ScaleX = diagnosticNeighborScale(3, "x").toFixed(3);
+        renderer.domElement.dataset.showcaseNeighbor3ScaleY = diagnosticNeighborScale(3, "y").toFixed(3);
         renderer.domElement.dataset.showcaseActiveBaseX = diagnosticRuntime?.baseScreenX.toFixed(2) || "0.00";
         renderer.domElement.dataset.showcaseActiveVisualX = diagnosticRuntime?.visualScreenX.toFixed(2) || "0.00";
         renderer.domElement.dataset.showcaseActiveVisualTop = diagnosticRuntime?.visualScreenTop.toFixed(2) || "0.00";
@@ -1188,7 +1250,7 @@ export function ActivityGalaxyCanvas({
       renderer.dispose();
       renderer.domElement.remove();
     };
-  }, [cards]);
+  }, [cards, materialProfile]);
 
   return (
     <div className="activity-showcase-page">
@@ -1251,7 +1313,7 @@ function guideCards(): ShowcaseCard[] {
   const now = new Date().toISOString();
   return [
     ["guide:workbench", "代码工作台", "粘贴代码或导入单个文件，生成第一份本地审查报告。", "workbench"],
-    ["guide:projects", "项目审查", "导入真实工作区，生成项目报告和问题清单。", "projects"],
+    ["guide:projects", "项目总览", "导入真实工作区，查看热点并生成项目报告。", "projects"],
     ["guide:history", "历史报告", "重新打开最近报告，继续阅读、导出和沉淀。", "history"],
     ["guide:findings", "问题清单", "跟踪风险、修复建议和后续学习卡片。", "findings"],
     ["guide:cards", "知识卡片", "把高价值问题沉淀成长期复习材料。", "cards"],
@@ -1501,7 +1563,8 @@ function createCrystalMaterial(
   camera: THREE.PerspectiveCamera,
   packedDepth: boolean,
   halfExtents: THREE.Vector3,
-  environmentGain = 1
+  environmentGain = 1,
+  materialProfile: ShowcaseMaterialProfile = "legacy"
 ) {
   const tint = kindColor.clone();
   const material = new THREE.ShaderMaterial({
@@ -1518,7 +1581,8 @@ function createCrystalMaterial(
       uTint: { value: tint },
       uHighlightShift: { value: 0 },
       uHalfExtents: { value: halfExtents.clone() },
-      uStageDim: { value: 1 }
+      uStageDim: { value: 1 },
+      uMaterialProfile: { value: materialProfileValue(materialProfile) }
     },
     vertexShader: `
       varying vec3 vLocalPosition;
@@ -1555,6 +1619,7 @@ function createCrystalMaterial(
       uniform float uHighlightShift;
       uniform vec3 uHalfExtents;
       uniform float uStageDim;
+      uniform float uMaterialProfile;
 
       varying vec3 vLocalPosition;
       varying vec3 vViewNormal;
@@ -1636,6 +1701,11 @@ function createCrystalMaterial(
           viewNormal.x * refractionPixels + lensCurvePixels + horizontal * (0.24 + pathRatio * 0.42) + uHighlightShift * (0.52 + interaction * 0.84),
           viewNormal.y * refractionPixels + vertical * (0.16 + endRoll * 0.42)
         ) * pixel;
+        float liquidProfile = step(1.5, uMaterialProfile) * (1.0 - step(2.5, uMaterialProfile));
+        bend += vec2(
+          sin(vertical * 3.1 + horizontal * 1.4 + uHighlightShift * 4.2),
+          cos(vertical * 2.4 - horizontal * 1.7 + uHighlightShift * 2.8)
+        ) * pixel * interaction * liquidProfile * 3.2;
 
         vec2 refractedUv = clamp(screenUv + bend, vec2(0.002), vec2(0.998));
         float dispersion = mix(1.008, 1.038, interaction);
@@ -1714,6 +1784,53 @@ function createCrystalMaterial(
         float refractionContrast = 1.9 + pathRatio * 2.1 + interaction * 0.35;
         vec3 crystal = max(sceneBase + (refracted - sceneBase) * refractionContrast, vec3(0.0));
         crystal *= transmittance;
+
+        if (uMaterialProfile > 0.5) {
+          float bevelReflection = clamp(
+            polishedContour * (0.72 + fresnel * 0.38)
+            + capRim * 0.24
+            + fresnel * 0.08,
+            0.0,
+            1.0
+          );
+          float centerWindow = 1.0 - smoothstep(0.38, 0.9, abs(horizontal));
+          float edgeWindow = 1.0 - centerWindow;
+          vec3 neutralTransmission = mix(sceneBase, greenSample, 0.94);
+          vec3 sampleCrystal = neutralTransmission;
+          vec3 pearlReflection = environmentReflection
+            * bevelReflection
+            * (0.16 + interaction * 0.1)
+            * (0.72 + edgeWindow * 0.28);
+          sampleCrystal += pearlReflection;
+          sampleCrystal += vec3(0.21, 0.225, 0.235)
+            * bevelReflection
+            * (0.42 + interaction * 0.12)
+            * (0.78 + edgeWindow * 0.22);
+
+          float interactionSweep = exp(-pow((faceCoordinate + 0.34 + uHighlightShift * 0.46) / 0.46, 2.0))
+            * verticalFace
+            * interaction;
+          if (uMaterialProfile > 1.5 && uMaterialProfile < 2.5) {
+            sampleCrystal += vec3(0.075, 0.225, 0.42)
+              * interactionSweep
+              * (0.34 + pathRatio * 0.12);
+          }
+          if (uMaterialProfile >= 2.5) {
+            float dispersionEdge = clamp(bevelReflection * 0.72 + interactionSweep * 0.46, 0.0, 1.0)
+              * (0.18 + interaction * 0.82);
+            vec3 dispersedTransmission = vec3(redSample.r, greenSample.g, blueSample.b);
+            sampleCrystal = mix(sampleCrystal, dispersedTransmission, dispersionEdge * 0.22);
+            sampleCrystal += vec3(0.03, 0.2, 0.18) * dispersionEdge * smoothstep(-0.1, 0.95, horizontal) * 0.24;
+            sampleCrystal += vec3(0.15, 0.07, 0.2) * dispersionEdge * smoothstep(-0.1, 0.95, -horizontal) * 0.18;
+          }
+
+          sampleCrystal += abs(greenSample - reverseSample) * bevelReflection * (0.03 + interaction * 0.025);
+          sampleCrystal = mix(sceneBase, sampleCrystal, clamp(uStageDim, 0.0, 1.0));
+          sampleCrystal = min(sampleCrystal, vec3(1.65));
+          gl_FragColor = vec4(sampleCrystal, 1.0);
+          #include <colorspace_fragment>
+          return;
+        }
 
         vec3 sceneDelta = abs(refracted - reverseSample);
         float caustic = dot(sceneDelta, vec3(0.2126, 0.7152, 0.0722));
@@ -1813,6 +1930,13 @@ function createCrystalMaterial(
   return material;
 }
 
+function materialProfileValue(profile: ShowcaseMaterialProfile) {
+  if (profile === "optical") return 1;
+  if (profile === "liquid") return 2;
+  if (profile === "dispersion") return 3;
+  return 0;
+}
+
 function disposeObject(object: THREE.Object3D) {
   object.traverse((child) => {
     const maybeMesh = child as THREE.Mesh<THREE.BufferGeometry, THREE.Material | THREE.Material[]>;
@@ -1852,11 +1976,23 @@ function formatActivityTime(value: string) {
 }
 
 function waveFalloff(distance: number) {
-  if (distance >= WAVE_WEIGHTS.length - 1) return 0;
+  return sampleWaveFalloff(distance, WAVE_WEIGHTS);
+}
+
+function liquidScaleWaveFalloff(distance: number) {
+  return sampleWaveFalloff(distance, LIQUID_SCALE_WAVE_WEIGHTS);
+}
+
+function liquidPushWaveFalloff(distance: number) {
+  return sampleWaveFalloff(distance, LIQUID_PUSH_WAVE_WEIGHTS);
+}
+
+function sampleWaveFalloff(distance: number, weights: readonly number[]) {
+  if (distance >= weights.length - 1) return 0;
   const lowerIndex = Math.floor(Math.max(0, distance));
-  const upperIndex = Math.min(WAVE_WEIGHTS.length - 1, lowerIndex + 1);
+  const upperIndex = Math.min(weights.length - 1, lowerIndex + 1);
   const fraction = smoothstep(0, 1, distance - lowerIndex);
-  return THREE.MathUtils.lerp(WAVE_WEIGHTS[lowerIndex], WAVE_WEIGHTS[upperIndex], fraction);
+  return THREE.MathUtils.lerp(weights[lowerIndex], weights[upperIndex], fraction);
 }
 
 function dampTowards(current: number, target: number, settleTime: number, delta: number) {
