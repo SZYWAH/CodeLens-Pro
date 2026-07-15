@@ -479,7 +479,7 @@ export default function App() {
         listWorkspaces(workspaceQuery),
         listChatSessions(chatQuery),
         listFindings(activeWorkspace?.summary.id, findingStatus, findingSeverity, findingReportId || undefined),
-        listLearningCards(cardWorkspaceId || activeWorkspace?.summary.id, cardStatus),
+        listLearningCards(cardWorkspaceId || activeWorkspace?.summary.id, "all"),
         getDailySummary(dailyDate),
         listDailyLogs(),
         listAgentTasks(),
@@ -539,8 +539,8 @@ export default function App() {
     setFindings(await listFindings(workspaceId || undefined, findingStatus, findingSeverity, reportId || undefined));
   }
 
-  async function refreshCards(workspaceId = cardWorkspaceId, status = cardStatus) {
-    setCards(await listLearningCards(workspaceId || undefined, status));
+  async function refreshCards(workspaceId = cardWorkspaceId) {
+    setCards(await listLearningCards(workspaceId || undefined, "all"));
   }
 
   async function resolveCardSourceFinding(card: LearningCard): Promise<Finding | null> {
@@ -617,16 +617,6 @@ export default function App() {
 
   async function handleCardStatusFilter(status: string) {
     setCardStatus(status);
-    const nextCards = await listLearningCards(cardWorkspaceId || undefined, status);
-    setCards(nextCards);
-    const current = nextCards.find((card) => card.id === activeCardId) || nextCards[0] || null;
-    if (current && current.id !== activeCardId) await selectCard(current);
-    if (!current) {
-      ++cardSelectionVersionRef.current;
-      setActiveCardId(null);
-      setCardMaterials([]);
-      setActiveCardSourceFinding(null);
-    }
   }
 
   async function loadDaily(date: string, syncDraft: boolean) {
@@ -1043,7 +1033,7 @@ export default function App() {
     setError(null);
     try {
       await deleteLearningCard(id);
-      const nextCards = await listLearningCards(cardWorkspaceId || undefined, cardStatus);
+      const nextCards = await listLearningCards(cardWorkspaceId || undefined, "all");
       setCards(nextCards);
       const replacement = nextCards.find((card) => card.id !== id) || null;
       if (replacement) {
@@ -2647,6 +2637,7 @@ export default function App() {
             }}
             onOpenSourceFinding={activeCardSourceFinding ? () => void handleOpenFinding(activeCardSourceFinding) : undefined}
             onOpenSourceReport={activeCardSourceFinding?.report_id ? () => void handleOpenReport(activeCardSourceFinding.report_id!, "history") : undefined}
+            onOpenFindings={() => setView("findings")}
             onExportCards={handleExportLearningCards}
             busy={busyArea === "cards" || busyArea === "material"}
           />
