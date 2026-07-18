@@ -1,24 +1,32 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use std::collections::HashMap;
 use std::env;
 use std::fs;
+use std::future::Future;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use codelens_next_core::{
+    classify_llm_error_code,
     ActivityConstellationData, ActivityEvent, ActivityGalaxyData, ActivitySummary,
     AgentApplyRequest, AgentApplyResult, AgentPlanRequest, AgentTask, AnalysisRequest,
-    AnalysisResponse, AppHealth, CardMaterial, ChatSessionDetail, ChatSessionSummary,
+    AppHealth, CardMaterial, ChatSessionDetail, ChatSessionSummary,
     ChatStreamRequest, CodeMap, CoreApp, DailyLog, DailySummary, DiffAnalyzeRequest, Finding,
     LearningCalendarItem, LearningCard,
-    LearningCardCandidate, LearningCardCreate, LearningCenterData, LlmTestResult,
+    LearningCardCandidate, LearningCardCreate, LearningCenterData, LlmTestRequest, LlmTestResult,
     ModelProfile, ModelProfileInput, ProductArchiveImportResult, ProductArchiveResult, ProjectAnalyzeRequest, ProjectGuide,
     ProjectImportResult, ReportDetail, ReportSummary, Settings, SettingsUpdate,
     TraceabilitySnapshot, WorkspaceBridgeInboxApplyResult, WorkspaceBridgeInboxRequest,
     WorkspaceBridgeManifestResult, WorkspaceBridgeStatus, WorkspaceDetail, WorkspaceSummary,
 };
 use serde::Serialize;
+use serde_json::Value;
 use tauri::{Emitter, Manager, State, Window};
+use tokio_util::sync::CancellationToken;
 
 #[cfg(not(windows))]
 use std::io::Write;
@@ -27,19 +35,330 @@ use std::os::windows::process::CommandExt;
 
 type CommandResult<T> = Result<T, String>;
 
-#[derive(Debug, Clone, Serialize)]
-struct StreamChunk {
-    chunk: String,
-}
+const AI_TASK_TIMEOUT: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Clone, Serialize)]
-struct StreamDone<T> {
-    result: T,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct StreamError {
+struct AiTaskError {
+    code: String,
     message: String,
+    retryable: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct AiStreamEvent {
+    request_id: String,
+    task: String,
+    event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<String>,
+    sequence: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chunk: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<AiTaskError>,
+}
+
+#[derive(Default)]
+struct AiRequestRegistry {
+    active: Mutex<HashMap<String, CancellationToken>>,
+}
+
+impl AiRequestRegistry {
+    fn register(&self, request_id: &str) -> CommandResult<CancellationToken> {
+        if request_id.trim().is_empty() {
+            return Err("request_id 不能为空。".to_string());
+        }
+        let mut active = self
+            .active
+            .lock()
+            .map_err(|_| "AI 请求注册表不可用。".to_string())?;
+        if active.contains_key(request_id) {
+            return Err(format!("AI 请求已存在：{request_id}"));
+        }
+        let token = CancellationToken::new();
+        active.insert(request_id.to_string(), token.clone());
+        Ok(token)
+    }
+
+    fn cancel(&self, request_id: &str) -> CommandResult<bool> {
+        let active = self
+            .active
+            .lock()
+            .map_err(|_| "AI 请求注册表不可用。".to_string())?;
+        if let Some(token) = active.get(request_id) {
+            token.cancel();
+            Ok(true)
+        } else {
+            Ok(false)
+        }
+    }
+
+    fn remove(&self, request_id: &str) {
+        if let Ok(mut active) = self.active.lock() {
+            active.remove(request_id);
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AiEventEmitter {
+    window: Window,
+    request_id: String,
+    task: &'static str,
+    sequence: Arc<AtomicU64>,
+    streaming_started: Arc<AtomicBool>,
+    chunk_count: Arc<AtomicU64>,
+}
+
+impl AiEventEmitter {
+    fn new(window: Window, request_id: String, task: &'static str) -> Self {
+        Self {
+            window,
+            request_id,
+            task,
+            sequence: Arc::new(AtomicU64::new(0)),
+            streaming_started: Arc::new(AtomicBool::new(false)),
+            chunk_count: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    fn emit(
+        &self,
+        event: &str,
+        phase: Option<&str>,
+        chunk: Option<String>,
+        result: Option<Value>,
+        error: Option<AiTaskError>,
+    ) -> anyhow::Result<()> {
+        let payload = AiStreamEvent {
+            request_id: self.request_id.clone(),
+            task: self.task.to_string(),
+            event: event.to_string(),
+            phase: phase.map(str::to_string),
+            sequence: self.sequence.fetch_add(1, Ordering::Relaxed),
+            chunk,
+            result,
+            error,
+        };
+        self.window.emit("ai:stream", payload)?;
+        Ok(())
+    }
+
+    fn phase(&self, phase: &str) -> anyhow::Result<()> {
+        self.emit("phase", Some(phase), None, None, None)
+    }
+
+    fn chunk(&self, chunk: &str) -> anyhow::Result<()> {
+        if !self.streaming_started.swap(true, Ordering::Relaxed) {
+            self.phase("streaming")?;
+        }
+        self.chunk_count.fetch_add(1, Ordering::Relaxed);
+        self.emit("chunk", None, Some(chunk.to_string()), None, None)
+    }
+
+    fn chunk_count(&self) -> u64 {
+        self.chunk_count.load(Ordering::Relaxed)
+    }
+
+    fn error(&self, error: AiTaskError) -> anyhow::Result<()> {
+        self.emit("error", None, None, None, Some(error))
+    }
+}
+
+fn begin_ai_request(
+    registry: &AiRequestRegistry,
+    emitter: &AiEventEmitter,
+) -> CommandResult<Option<CancellationToken>> {
+    let token = match registry.register(&emitter.request_id) {
+        Ok(token) => token,
+        Err(message) => {
+            emitter
+                .error(AiTaskError {
+                    code: "internal".to_string(),
+                    message,
+                    retryable: false,
+                })
+                .map_err(format_error)?;
+            return Ok(None);
+        }
+    };
+
+    if let Err(error) = emitter
+        .phase("accepted")
+        .and_then(|_| emitter.phase("connecting"))
+    {
+        registry.remove(&emitter.request_id);
+        return Err(format_error(error));
+    }
+    Ok(Some(token))
+}
+
+async fn complete_ai_task<T, F>(
+    core: &CoreApp,
+    registry: &AiRequestRegistry,
+    emitter: &AiEventEmitter,
+    token: CancellationToken,
+    future: F,
+) -> CommandResult<()>
+where
+    T: Serialize,
+    F: Future<Output = anyhow::Result<T>>,
+{
+    enum Outcome<T> {
+        Completed(anyhow::Result<T>),
+        Cancelled,
+        TimedOut,
+    }
+
+    let started_at = Instant::now();
+    core.log_ai_task_event(
+        &emitter.request_id,
+        emitter.task,
+        "accepted",
+        0,
+        0,
+        None,
+        None,
+    );
+    let outcome = tokio::select! {
+        biased;
+        _ = token.cancelled() => Outcome::Cancelled,
+        _ = tokio::time::sleep(AI_TASK_TIMEOUT) => {
+            token.cancel();
+            Outcome::TimedOut
+        },
+        result = future => Outcome::Completed(result),
+    };
+
+    let result = match outcome {
+        Outcome::Completed(Ok(value)) => match serde_json::to_value(value) {
+            Ok(value) => {
+                let source = ai_result_source(&value).map(str::to_string);
+                let result = emit_ai_success(emitter, value);
+                core.log_ai_task_event(
+                    &emitter.request_id,
+                    emitter.task,
+                    "completed",
+                    started_at.elapsed().as_millis(),
+                    emitter.chunk_count(),
+                    source.as_deref(),
+                    None,
+                );
+                result
+            }
+            Err(error) => {
+                core.log_ai_task_event(
+                    &emitter.request_id,
+                    emitter.task,
+                    "error",
+                    started_at.elapsed().as_millis(),
+                    emitter.chunk_count(),
+                    None,
+                    Some("internal"),
+                );
+                emitter
+                    .error(AiTaskError {
+                        code: "internal".to_string(),
+                        message: format!("AI 结果序列化失败：{error}"),
+                        retryable: false,
+                    })
+                    .map_err(format_error)
+            }
+        },
+        Outcome::Completed(Err(error)) => {
+            let error = classify_ai_error(&error.to_string());
+            core.log_ai_task_event(
+                &emitter.request_id,
+                emitter.task,
+                "error",
+                started_at.elapsed().as_millis(),
+                emitter.chunk_count(),
+                None,
+                Some(&error.code),
+            );
+            emitter.error(error).map_err(format_error)
+        }
+        Outcome::Cancelled => {
+            core.log_ai_task_event(
+                &emitter.request_id,
+                emitter.task,
+                "cancelled",
+                started_at.elapsed().as_millis(),
+                emitter.chunk_count(),
+                None,
+                Some("cancelled"),
+            );
+            emitter.error(AiTaskError {
+                code: "cancelled".to_string(),
+                message: "AI 任务已取消。".to_string(),
+                retryable: false,
+            })
+            .map_err(format_error)
+        }
+        Outcome::TimedOut => {
+            core.log_ai_task_event(
+                &emitter.request_id,
+                emitter.task,
+                "timeout",
+                started_at.elapsed().as_millis(),
+                emitter.chunk_count(),
+                None,
+                Some("timeout"),
+            );
+            emitter.error(AiTaskError {
+                code: "timeout".to_string(),
+                message: "AI 任务超过 90 秒，已自动取消。".to_string(),
+                retryable: true,
+            })
+            .map_err(format_error)
+        }
+    };
+    registry.remove(&emitter.request_id);
+    result
+}
+
+fn emit_ai_success(emitter: &AiEventEmitter, value: Value) -> CommandResult<()> {
+    if is_fallback_result(&value) {
+        emitter.phase("fallback").map_err(format_error)?;
+    }
+    emitter.phase("saving").map_err(format_error)?;
+    emitter
+        .emit("done", None, None, Some(value), None)
+        .map_err(format_error)
+}
+
+fn ai_result_source(value: &Value) -> Option<&str> {
+    value
+        .pointer("/report/analysis_source")
+        .or_else(|| value.get("source"))
+        .and_then(Value::as_str)
+}
+
+fn is_fallback_result(value: &Value) -> bool {
+    value
+        .pointer("/report/analysis_source")
+        .or_else(|| value.get("source"))
+        .and_then(Value::as_str)
+        .is_some_and(|source| source == "local_fallback")
+}
+
+fn classify_ai_error(message: &str) -> AiTaskError {
+    let normalized = message.to_ascii_lowercase();
+    let code = if normalized.contains("尚未配置")
+        || normalized.contains("尚未启用")
+        || message.contains("配置")
+    {
+        "configuration"
+    } else {
+        classify_llm_error_code(message)
+    };
+    AiTaskError {
+        code: code.to_string(),
+        message: message.to_string(),
+        retryable: matches!(code, "rate_limited" | "timeout" | "network" | "protocol"),
+    }
 }
 
 #[tauri::command]
@@ -73,69 +392,92 @@ fn delete_model_profile(core: State<'_, CoreApp>, id: String) -> CommandResult<V
 }
 
 #[tauri::command]
-async fn analyze_code(
+async fn analyze_code_stream(
+    window: Window,
     core: State<'_, CoreApp>,
+    requests: State<'_, AiRequestRegistry>,
+    request_id: String,
     request: AnalysisRequest,
-) -> CommandResult<AnalysisResponse> {
-    core.inner()
-        .clone()
-        .analyze_code(request)
-        .await
-        .map_err(format_error)
+) -> CommandResult<()> {
+    let emitter = AiEventEmitter::new(window, request_id, "single_review");
+    let Some(token) = begin_ai_request(&requests, &emitter)? else {
+        return Ok(());
+    };
+    let core = core.inner().clone();
+    let future = core.analyze_code(request);
+    complete_ai_task(&core, &requests, &emitter, token, future).await
 }
 
 #[tauri::command]
 async fn analyze_project_stream(
     window: Window,
     core: State<'_, CoreApp>,
+    requests: State<'_, AiRequestRegistry>,
+    request_id: String,
     request: ProjectAnalyzeRequest,
 ) -> CommandResult<()> {
-    let emit_window = window.clone();
-    let result = core
-        .inner()
-        .clone()
-        .analyze_project_stream(request, move |chunk| {
-            emit_window.emit("analysis:chunk", StreamChunk { chunk: chunk.to_string() })?;
-            Ok(())
-        })
-        .await;
-    emit_stream_result(&window, "analysis", result)
+    let emitter = AiEventEmitter::new(window, request_id, "project_review");
+    let Some(token) = begin_ai_request(&requests, &emitter)? else {
+        return Ok(());
+    };
+    let chunk_emitter = emitter.clone();
+    let core = core.inner().clone();
+    let future = core.analyze_project_stream(request, move |chunk| {
+        chunk_emitter.chunk(chunk)?;
+        Ok(())
+    });
+    complete_ai_task(&core, &requests, &emitter, token, future).await
 }
 
 #[tauri::command]
 async fn analyze_diff_stream(
     window: Window,
     core: State<'_, CoreApp>,
+    requests: State<'_, AiRequestRegistry>,
+    request_id: String,
     request: DiffAnalyzeRequest,
 ) -> CommandResult<()> {
-    let emit_window = window.clone();
-    let result = core
-        .inner()
-        .clone()
-        .analyze_diff_stream(request, move |chunk| {
-            emit_window.emit("diff:chunk", StreamChunk { chunk: chunk.to_string() })?;
-            Ok(())
-        })
-        .await;
-    emit_stream_result(&window, "diff", result)
+    let emitter = AiEventEmitter::new(window, request_id, "diff_review");
+    let Some(token) = begin_ai_request(&requests, &emitter)? else {
+        return Ok(());
+    };
+    let chunk_emitter = emitter.clone();
+    let core = core.inner().clone();
+    let future = core.analyze_diff_stream(request, move |chunk| {
+        chunk_emitter.chunk(chunk)?;
+        Ok(())
+    });
+    complete_ai_task(&core, &requests, &emitter, token, future).await
 }
 
 #[tauri::command]
 async fn send_chat_message_stream(
     window: Window,
     core: State<'_, CoreApp>,
+    requests: State<'_, AiRequestRegistry>,
+    request_id: String,
     request: ChatStreamRequest,
 ) -> CommandResult<()> {
-    let emit_window = window.clone();
-    let result = core
-        .inner()
-        .clone()
-        .send_chat_message_stream(request, move |chunk| {
-            emit_window.emit("chat:chunk", StreamChunk { chunk: chunk.to_string() })?;
-            Ok(())
-        })
-        .await;
-    emit_stream_result(&window, "chat", result)
+    let emitter = AiEventEmitter::new(window, request_id, "chat");
+    let Some(token) = begin_ai_request(&requests, &emitter)? else {
+        return Ok(());
+    };
+    let chunk_emitter = emitter.clone();
+    let core = core.inner().clone();
+    let future = core.send_chat_message_stream(request, move |chunk| {
+        chunk_emitter.chunk(chunk)?;
+        Ok(())
+    });
+    complete_ai_task(&core, &requests, &emitter, token, future).await
+}
+
+#[tauri::command]
+fn cancel_ai_request(
+    requests: State<'_, AiRequestRegistry>,
+    request_id: String,
+) -> CommandResult<()> {
+    requests.cancel(&request_id)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -245,19 +587,28 @@ fn delete_workspace(core: State<'_, CoreApp>, id: String) -> CommandResult<()> {
 async fn analyze_workspace_stream(
     window: Window,
     core: State<'_, CoreApp>,
+    requests: State<'_, AiRequestRegistry>,
+    request_id: String,
     workspace_id: String,
     use_llm: Option<bool>,
+    retry_report_id: Option<String>,
 ) -> CommandResult<()> {
-    let emit_window = window.clone();
-    let result = core
-        .inner()
-        .clone()
-        .analyze_workspace_stream(workspace_id, use_llm, move |chunk| {
-            emit_window.emit("workspace:progress", StreamChunk { chunk: chunk.to_string() })?;
+    let emitter = AiEventEmitter::new(window, request_id, "workspace_review");
+    let Some(token) = begin_ai_request(&requests, &emitter)? else {
+        return Ok(());
+    };
+    let chunk_emitter = emitter.clone();
+    let core = core.inner().clone();
+    let future = core.analyze_workspace_stream(
+        workspace_id,
+        use_llm,
+        retry_report_id,
+        move |chunk| {
+            chunk_emitter.chunk(chunk)?;
             Ok(())
-        })
-        .await;
-    emit_stream_result(&window, "workspace", result)
+        },
+    );
+    complete_ai_task(&core, &requests, &emitter, token, future).await
 }
 
 #[tauri::command]
@@ -326,16 +677,21 @@ fn create_learning_card(
 }
 
 #[tauri::command]
-async fn generate_card_material(
+async fn generate_card_material_stream(
+    window: Window,
     core: State<'_, CoreApp>,
+    requests: State<'_, AiRequestRegistry>,
+    request_id: String,
     card_id: String,
     use_llm: Option<bool>,
-) -> CommandResult<CardMaterial> {
-    core.inner()
-        .clone()
-        .generate_card_material(card_id, use_llm)
-        .await
-        .map_err(format_error)
+) -> CommandResult<()> {
+    let emitter = AiEventEmitter::new(window, request_id, "card_material");
+    let Some(token) = begin_ai_request(&requests, &emitter)? else {
+        return Ok(());
+    };
+    let core = core.inner().clone();
+    let future = core.generate_card_material(card_id, use_llm);
+    complete_ai_task(&core, &requests, &emitter, token, future).await
 }
 
 #[tauri::command]
@@ -562,11 +918,11 @@ fn get_traceability_snapshot(
 #[tauri::command]
 async fn test_llm_connection(
     core: State<'_, CoreApp>,
-    api_key: Option<String>,
+    request: LlmTestRequest,
 ) -> CommandResult<LlmTestResult> {
     core.inner()
         .clone()
-        .test_llm_connection(api_key)
+        .test_llm_connection(request)
         .await
         .map_err(format_error)
 }
@@ -635,6 +991,7 @@ fn main() {
             let app_home = resolve_app_home()?;
             let core = CoreApp::initialize(app_home)?;
             app.manage(core);
+            app.manage(AiRequestRegistry::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -644,10 +1001,11 @@ fn main() {
             list_model_profiles,
             save_model_profile,
             delete_model_profile,
-            analyze_code,
+            analyze_code_stream,
             analyze_project_stream,
             analyze_diff_stream,
             send_chat_message_stream,
+            cancel_ai_request,
             list_reports,
             get_report,
             rename_report,
@@ -672,7 +1030,7 @@ fn main() {
             update_learning_card,
             delete_learning_card,
             create_learning_card,
-            generate_card_material,
+            generate_card_material_stream,
             list_card_materials,
             get_daily_summary,
             generate_daily_log,
@@ -716,25 +1074,6 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("failed to run CodeLens Pro Next");
-}
-
-fn emit_stream_result<T>(window: &Window, prefix: &str, result: anyhow::Result<T>) -> CommandResult<()>
-where
-    T: Serialize + Clone,
-{
-    match result {
-        Ok(value) => {
-            window
-                .emit(&format!("{prefix}:done"), StreamDone { result: value })
-                .map_err(|err| err.to_string())?;
-            Ok(())
-        }
-        Err(err) => {
-            let message = err.to_string();
-            let _ = window.emit(&format!("{prefix}:error"), StreamError { message: message.clone() });
-            Err(message)
-        }
-    }
 }
 
 fn resolve_app_home() -> anyhow::Result<PathBuf> {
@@ -816,5 +1155,54 @@ fn copy_to_clipboard(core: &CoreApp, text: &str) -> anyhow::Result<()> {
         Ok(())
     } else {
         anyhow::bail!("failed to copy report to clipboard")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn request_registry_rejects_duplicates_and_releases_after_remove() {
+        let registry = AiRequestRegistry::default();
+        let token = registry.register("request-1").expect("first registration");
+        assert!(registry.register("request-1").is_err());
+        assert!(registry.cancel("request-1").expect("cancel request"));
+        assert!(token.is_cancelled());
+
+        registry.remove("request-1");
+        assert!(registry.register("request-1").is_ok());
+        assert!(!registry.cancel("missing").expect("missing request is a no-op"));
+    }
+
+    #[test]
+    fn fallback_detection_supports_reports_and_card_materials() {
+        assert!(is_fallback_result(&json!({
+            "report": { "analysis_source": "local_fallback" }
+        })));
+        assert!(is_fallback_result(&json!({ "source": "local_fallback" })));
+        assert!(!is_fallback_result(&json!({
+            "report": { "analysis_source": "llm" }
+        })));
+    }
+
+    #[test]
+    fn errors_have_stable_codes_and_retry_policy() {
+        let configuration = classify_ai_error("设置中尚未启用 LLM。");
+        assert_eq!(configuration.code, "configuration");
+        assert!(!configuration.retryable);
+
+        let rate_limit = classify_ai_error("LLM returned HTTP 429");
+        assert_eq!(rate_limit.code, "rate_limited");
+        assert!(rate_limit.retryable);
+
+        let protocol = classify_ai_error("protocol: invalid SSE payload");
+        assert_eq!(protocol.code, "protocol");
+        assert!(protocol.retryable);
+
+        let service_error = classify_ai_error("LLM returned HTTP 500");
+        assert_eq!(service_error.code, "network");
+        assert!(service_error.retryable);
     }
 }

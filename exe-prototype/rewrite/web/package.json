@@ -6,6 +6,9 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
     "dev:preview": "vite --mode preview --host 127.0.0.1 --port 1422",
+    "test": "npm run test:graph && npm run test:ai",
+    "test:graph": "node scripts/test-dependency-graph-model.mjs",
+    "test:ai": "vitest run src/aiStreamRuntime.test.ts",
     "build": "tsc && vite build",
     "build:preview": "tsc && vite build --mode preview",
     "preview": "vite preview --host 127.0.0.1 --port 1421"
@@ -26,6 +29,7 @@
     "@types/react-dom": "^18.3.5",
     "@vitejs/plugin-react": "^4.3.4",
     "typescript": "^5.7.2",
-    "vite": "^6.0.5"
+    "vite": "^6.0.5",
+    "vitest": "^4.1.10"
   }
 }

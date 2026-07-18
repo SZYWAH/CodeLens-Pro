@@ -31,6 +31,7 @@ export function CodeDiffView(props: {
   afterCode: string;
   stream: string;
   busy: boolean;
+  retryAi?: boolean;
   onTitleChange: (value: string) => void;
   onLanguageChange: (value: string) => void;
   onBeforeLabelChange: (value: string) => void;
@@ -125,7 +126,7 @@ export function CodeDiffView(props: {
       <WorkbenchCommandBar
         action={(
           <button className="primary-button" disabled={props.busy || !canAnalyze} onClick={props.onAnalyze} type="button">
-            {props.busy ? <Loader2 className="spin" size={16} /> : <Play size={16} />}{props.busy ? "正在生成" : "生成对比报告"}
+            {props.busy ? <Loader2 className="spin" size={16} /> : <Play size={16} />}{props.busy ? "正在生成" : props.retryAi ? "重试 AI" : "生成对比报告"}
           </button>
         )}
         ariaLabel="代码对比配置"

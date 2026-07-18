@@ -1,6 +1,6 @@
 import { CheckCircle2, Database, KeyRound, Loader2, Menu, Moon, Palette, Plus, Save, Settings as SettingsIcon, ShieldCheck, Sun, Trash2, Wifi, X } from "lucide-react";
 import type { FormEvent } from "react";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { ModelProfile, Settings } from "../types";
 import { useOverlayFocus } from "../hooks/useOverlayFocus";
 import { ProductToolbar } from "./ProductShell";
@@ -21,6 +21,7 @@ export function SettingsView(props: {
     profileDefault: boolean;
     busy: string | null;
     testResult: string | null;
+    focusConnectionRequest: number;
     onEnableLlmChange: (v: boolean) => void;
     onApiBaseChange: (v: string) => void;
     onModelChange: (v: string) => void;
@@ -47,7 +48,7 @@ export function SettingsView(props: {
     const profileDeleteTriggerRef = useRef<HTMLButtonElement | null>(null);
     const profileDeleteDialogRef = useRef<HTMLDivElement | null>(null);
     const profileDeleteCancelRef = useRef<HTMLButtonElement | null>(null);
-    const keyState = props.settings.api_key_set ? "已安全保存" : props.apiKey ? "等待保存" : "未配置";
+    const keyState = props.settings.api_key_set ? "已存入本机 SQLite" : props.apiKey ? "等待保存" : "未配置";
     const mode = props.enableLlm ? (props.settings.api_key_set || props.apiKey ? "AI 增强模式" : "等待 API Key") : "本地规则模式";
 
     useOverlayFocus({
@@ -57,6 +58,12 @@ export function SettingsView(props: {
         returnFocusRef: profileDrawerTriggerRef,
         onRequestClose: () => setProfileDrawer(false)
     });
+
+    useEffect(() => {
+        if (props.focusConnectionRequest <= 0) return;
+        setSection("connection");
+        setMobile(false);
+    }, [props.focusConnectionRequest]);
     useOverlayFocus({
         active: Boolean(deleteId),
         containerRef: profileDeleteDialogRef,
@@ -75,9 +82,9 @@ export function SettingsView(props: {
             <div className="product-toolbar-context-next">{mode} · Key {keyState}</div>
             <nav className="product-toolbar-actions-next">
                 <button onClick={props.onOpenHealth} type="button"><Database size={14} />运行状态</button>
-                {section === "connection" && <button className="primary-button" disabled={props.busy === "settings"} form="settings-form-v139" type="submit">
-                    {props.busy === "settings" ? <Loader2 className="spin" size={14} /> : <Save size={14} />}保存设置
-                </button>}
+                <button className="primary-button" disabled={props.busy === "settings" || props.busy === "llm-test"} form="settings-form-v139" type="submit">
+                    {props.busy === "settings" ? <Loader2 className="spin" size={14} /> : <Save size={14} />}保存并验证
+                </button>
             </nav>
         </ProductToolbar>
         <button className="system-mobile-index-v139" onClick={() => setMobile(true)} type="button"><Menu size={15} />设置章节</button>
@@ -119,10 +126,10 @@ export function SettingsView(props: {
                             <label className="full">API Key<input type="password" value={props.apiKey} onChange={e => props.onApiKeyChange(e.target.value)} placeholder={props.settings.api_key_set ? "已保存，输入新值可替换" : "尚未配置"} /></label>
                             <label className="settings-check-v139"><input checked={props.clearApiKey} onChange={e => props.onClearApiKeyChange(e.target.checked)} type="checkbox" />清除已保存的 API Key</label>
                         </div>
-                        <div className="settings-test-v139"><button disabled={props.busy === "llm-test"} onClick={props.onTest} type="button">{props.busy === "llm-test" ? <Loader2 className="spin" size={14} /> : <Wifi size={14} />}测试连接</button>{props.testResult && <span>{props.testResult}</span>}</div>
+                        <div className="settings-test-v139"><button disabled={props.busy === "llm-test" || props.busy === "settings"} onClick={props.onTest} type="button">{props.busy === "llm-test" ? <Loader2 className="spin" size={14} /> : <Wifi size={14} />}测试当前填写</button>{props.testResult && <span>{props.testResult}</span>}</div>
                     </section>}
                     {section === "profiles" && <section className="settings-section-v139">
-                        <Header title="模型档案" detail="保存并快速切换本地模型连接配置。" />
+                        <Header title="模型档案" detail="保存并快速切换接口与模型；档案不包含 API Key。" />
                         <button className="settings-add-profile-v139" onClick={() => setProfileDrawer(true)} ref={profileDrawerTriggerRef} type="button"><Plus size={14} />保存当前配置为档案</button>
                         <div className="settings-profile-list-v139">
                             {props.modelProfiles.map(p => <article key={p.id}>
@@ -139,7 +146,7 @@ export function SettingsView(props: {
                     </section>}
                     {section === "security" && <section className="settings-section-v139">
                         <Header title="安全说明" detail="配置和项目数据只保存在本机。" />
-                        <div className="settings-security-v139"><Info title="密钥保护" text="API Key 不在界面中回显，也不会写入运行日志或产品档案。" /><Info title="本地兜底" text="LLM 未配置或调用失败时，核心审查流程继续使用本地规则。" /><Info title="档案导出" text="导出文件只记录密钥是否已配置，不包含密钥明文。" /></div>
+                        <div className="settings-security-v139"><Info title="本机存储" text="API Key 保存在本机 SQLite 中；界面不回显，也不会写入运行日志或产品档案。" /><Info title="本地兜底" text="LLM 未配置或调用失败时，核心审查流程继续使用本地规则。" /><Info title="档案导出" text="模型档案和导出文件不包含 API Key，只记录密钥是否已配置。" /></div>
                     </section>}
                 </form>
             </main>
@@ -149,6 +156,7 @@ export function SettingsView(props: {
             <aside aria-labelledby="settings-profile-drawer-title-v145" aria-modal="true" className="system-drawer-v139" ref={profileDrawerRef} role="dialog">
                 <header><strong id="settings-profile-drawer-title-v145">保存模型档案</strong><button aria-label="关闭模型档案编辑" onClick={() => setProfileDrawer(false)} ref={profileDrawerCloseRef} type="button"><X size={17} /></button></header>
                 <div className="system-drawer-body-v145">
+                    <p className="system-note-v139">档案只保存 API Base、模型和备注，不保存 API Key。</p>
                     <label>档案名称<input value={props.profileName} onChange={e => props.onProfileNameChange(e.target.value)} placeholder="例如：DeepSeek 官方" /></label>
                     <label>备注<textarea value={props.profileNote} onChange={e => props.onProfileNoteChange(e.target.value)} placeholder="用途、网络环境或费用说明" /></label>
                     <label className="settings-check-v139"><input checked={props.profileDefault} onChange={e => props.onProfileDefaultChange(e.target.checked)} type="checkbox" />设为默认档案</label>

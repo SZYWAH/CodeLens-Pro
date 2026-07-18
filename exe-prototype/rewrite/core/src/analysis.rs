@@ -335,6 +335,7 @@ mod tests {
             mode: Some("risk_review".to_string()),
             mode_label: Some("风险审查".to_string()),
             use_llm: Some(false),
+            retry_report_id: None,
         }
     }
 

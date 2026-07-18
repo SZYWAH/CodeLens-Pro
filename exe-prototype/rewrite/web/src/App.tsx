@@ -18,7 +18,8 @@ import {
 import { FormEvent, Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import {
   analyzeDiffStream,
-  analyzeCode,
+  analyzeCodeStream,
+  analyzeProjectStream,
   analyzeWorkspaceStream,
   applyAgentPlan,
   approveLearningCardCandidates,
@@ -39,7 +40,7 @@ import {
   exportReportMarkdown,
   exportProductArchive,
   exportWorkspaceBridgeManifest,
-  generateCardMaterial,
+  generateCardMaterialStream,
   generateCardCandidatesFromReport,
   generateDailyLog,
   generateProjectGuide,
@@ -94,6 +95,8 @@ import type {
   ActivityStarItem,
   ActivitySummary,
   AgentTask,
+  AiTaskKind,
+  AiTaskPhase,
   AppHealth,
   CardMaterial,
   ChatMessageItem,
@@ -132,6 +135,7 @@ import { ProjectGuideView } from "./components/ProjectGuideView";
 import { ProjectWorkspaceView } from "./components/ProjectWorkspaceView";
 import { ProductShell, type ProductGlobalCommand, type ProductNavGroup } from "./components/ProductShell";
 import { SettingsView } from "./components/SettingsView";
+import { AiTaskStatusBar, type ActiveAiTaskStatus } from "./components/AiTaskStatusBar";
 
 const ActivityGalaxyView = lazy(() =>
   import("./components/ActivityGalaxyView").then((module) => ({ default: module.ActivityGalaxyView }))
@@ -141,7 +145,7 @@ type View = "overview" | "workbench" | "projects" | "map" | "findings" | "diff" 
 type GalaxyMode = "entry" | "explore";
 type WorkbenchMode = "single" | "diff";
 export type AppTheme = "dark" | "light";
-type BusyArea = "single" | "workspace-open" | "workspace-rescan" | "workspace-report" | "diff" | "chat" | "settings" | "llm-test" | "cards" | "material" | "daily-log" | "guide" | "agent" | "archive" | null;
+type BusyArea = "single" | "workspace-open" | "workspace-rescan" | "workspace-report" | "project-report" | "diff" | "chat" | "settings" | "llm-test" | "cards" | "material" | "daily-log" | "guide" | "agent" | "archive" | null;
 type NoticeScope = "global" | "projects" | "workbench-single" | "workbench-diff" | "report";
 type ReportOperation = "copy" | "export" | null;
 
@@ -244,6 +248,8 @@ export default function App() {
 
   const [workspaceQuery, setWorkspaceQuery] = useState("");
   const [workspaceStream, setWorkspaceStream] = useState("");
+  const [workspaceRetryReportId, setWorkspaceRetryReportId] = useState<string | null>(null);
+  const [projectRetryReportId, setProjectRetryReportId] = useState<string | null>(null);
   const [findingStatus, setFindingStatus] = useState("all");
   const [findingSeverity, setFindingSeverity] = useState("all");
   const [findingReportId, setFindingReportId] = useState<string | null>(null);
@@ -274,6 +280,7 @@ export default function App() {
   const [beforeCode, setBeforeCode] = useState(sampleBefore);
   const [afterCode, setAfterCode] = useState(sampleAfter);
   const [diffStream, setDiffStream] = useState("");
+  const [diffRetryReportId, setDiffRetryReportId] = useState<string | null>(null);
 
   const [chatDraft, setChatDraft] = useState("");
   const [chatQuery, setChatQuery] = useState("");
@@ -292,6 +299,8 @@ export default function App() {
   const [profileNote, setProfileNote] = useState("");
   const [profileDefault, setProfileDefault] = useState(false);
   const [llmTestResult, setLlmTestResult] = useState<string | null>(null);
+  const [settingsConnectionRequest, setSettingsConnectionRequest] = useState(0);
+  const [aiTaskStatus, setAiTaskStatus] = useState<ActiveAiTaskStatus | null>(null);
 
   const [busyArea, setBusyArea] = useState<BusyArea>(null);
   const [initialDataReady, setInitialDataReady] = useState(false);
@@ -308,6 +317,38 @@ export default function App() {
   const projectGuideLoadVersionRef = useRef(0);
   const codeMapLoadVersionRef = useRef(0);
   const projectViewBootstrapRef = useRef<string | null>(null);
+  const aiTaskControllerRef = useRef<AbortController | null>(null);
+  const aiTaskKindRef = useRef<AiTaskKind | null>(null);
+
+  function beginAiTask(task: AiTaskKind) {
+    aiTaskControllerRef.current?.abort();
+    const controller = new AbortController();
+    aiTaskControllerRef.current = controller;
+    aiTaskKindRef.current = task;
+    setAiTaskStatus({ task, phase: "accepted", startedAt: Date.now() });
+    return {
+      options: {
+        signal: controller.signal,
+        onPhase: (phase: AiTaskPhase) => {
+          if (aiTaskControllerRef.current === controller) {
+            setAiTaskStatus((current) => current ? { ...current, phase } : current);
+          }
+        }
+      },
+      finish: () => {
+        if (aiTaskControllerRef.current !== controller) return false;
+        aiTaskControllerRef.current = null;
+        aiTaskKindRef.current = null;
+        setAiTaskStatus(null);
+        return true;
+      },
+      isCurrent: () => aiTaskControllerRef.current === controller
+    };
+  }
+
+  function cancelActiveAiTask() {
+    aiTaskControllerRef.current?.abort();
+  }
   const projectOverviewBootstrapRef = useRef<string | null>(null);
 
   function setMessage(value: string | null, scope: NoticeScope = "global") {
@@ -410,6 +451,17 @@ export default function App() {
     setEnableLlm(settings.enable_llm);
   }, [settings]);
 
+  useEffect(() => () => {
+    aiTaskControllerRef.current?.abort();
+    aiTaskControllerRef.current = null;
+    aiTaskKindRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    setWorkspaceRetryReportId(null);
+    setProjectRetryReportId(null);
+  }, [activeWorkspace?.summary.id]);
+
   useEffect(() => {
     if (view !== "projects" || !activeWorkspace) return;
     let cancelled = false;
@@ -428,9 +480,9 @@ export default function App() {
   const statusText = useMemo(() => {
     if (!health) return "正在检查本地状态";
     if (!health.database_ok) return "SQLite 异常";
-    if (health.llm_enabled && !health.llm_configured) return "等待配置 API Key";
-    return health.llm_enabled ? "LLM 已就绪" : "本地审查已就绪";
-  }, [health]);
+    if (settings?.llm_state === "missing_key") return "等待配置 API Key";
+    return settings?.llm_state === "configured" ? "LLM 已就绪" : "本地审查已就绪";
+  }, [health, settings?.llm_state]);
 
   const displayedChatMessages = useMemo<ChatMessageItem[]>(() => {
     const now = new Date().toISOString();
@@ -774,6 +826,8 @@ export default function App() {
     setError(null, "projects");
     setMessage(null, "projects");
     try {
+      setWorkspaceRetryReportId(null);
+      setProjectRetryReportId(null);
       const detail = await rescanWorkspace(activeWorkspace.summary.id);
       setActiveWorkspace(detail);
       setCodeMap(null);
@@ -817,8 +871,13 @@ export default function App() {
     setWorkspaceStream("");
     setError(null, "projects");
     setMessage(null, "projects");
+    const aiTask = beginAiTask("workspace_review");
     try {
-      const response = await analyzeWorkspaceStream(activeWorkspace.summary.id, (chunk) => setWorkspaceStream((value) => value + chunk));
+      const response = await analyzeWorkspaceStream(activeWorkspace.summary.id, {
+        ...aiTask.options,
+        onChunk: (chunk) => setWorkspaceStream((value) => value + chunk)
+      }, workspaceRetryReportId || undefined);
+      setWorkspaceRetryReportId(response.report.analysis_source === "local_fallback" ? response.report.id : null);
       setActiveReport(response.report);
       const [nextReports, nextWorkspaceReports, nextFindings, reportSnapshot, workspaceSnapshot] = await Promise.all([
         listReports(historyQuery, reportFilter === "all" ? undefined : reportFilter),
@@ -842,7 +901,55 @@ export default function App() {
     } catch (err) {
       setError(friendlyError(err), "projects");
     } finally {
-      setBusyArea(null);
+      if (aiTask.finish()) setBusyArea(null);
+    }
+  }
+
+  async function handleAnalyzeProject() {
+    const workspace = activeWorkspace;
+    if (!workspace) {
+      setError("请先导入或打开一个工作区。", "projects");
+      return;
+    }
+    setBusyArea("project-report");
+    setWorkspaceStream("");
+    setError(null, "projects");
+    setMessage(null, "projects");
+    const aiTask = beginAiTask("project_review");
+    try {
+      const response = await analyzeProjectStream({
+        project_name: workspace.summary.name,
+        workspace_id: workspace.summary.id,
+        title: `${workspace.summary.name} 项目审查`,
+        files: workspace.files.map((file) => ({
+          path: file.path,
+          content: file.content,
+          language: file.language
+        })),
+        use_llm: true,
+        retry_report_id: projectRetryReportId || undefined
+      }, {
+        ...aiTask.options,
+        onChunk: (chunk) => setWorkspaceStream((value) => value + chunk)
+      });
+      setProjectRetryReportId(response.report.analysis_source === "local_fallback" ? response.report.id : null);
+      setActiveReport(response.report);
+      const [nextReports, nextWorkspaceReports, reportSnapshot, workspaceSnapshot] = await Promise.all([
+        listReports(historyQuery, reportFilter === "all" ? undefined : reportFilter),
+        listReports(),
+        getTraceabilitySnapshot("report", response.report.id),
+        getTraceabilitySnapshot("workspace", workspace.summary.id)
+      ]);
+      setReports(nextReports);
+      setWorkspaceReports(nextWorkspaceReports);
+      setTraceability(reportSnapshot);
+      setWorkspaceTraceability(workspaceSnapshot);
+      setMessage(response.warnings[0] || "项目审查报告已生成。", "projects");
+      setView("history");
+    } catch (err) {
+      setError(friendlyError(err), "projects");
+    } finally {
+      if (aiTask.finish()) setBusyArea(null);
     }
   }
 
@@ -989,8 +1096,9 @@ export default function App() {
     setBusyArea("material");
     setError(null);
     const requestVersion = cardSelectionVersionRef.current;
+    const aiTask = beginAiTask("card_material");
     try {
-      const material = await generateCardMaterial(cardId, true);
+      const material = await generateCardMaterialStream(cardId, true, aiTask.options);
       const materials = await listCardMaterials(cardId);
       if (requestVersion === cardSelectionVersionRef.current && activeCardId === cardId) {
         setCardMaterials(materials);
@@ -1000,7 +1108,7 @@ export default function App() {
       setError(friendlyError(err));
       throw err;
     } finally {
-      setBusyArea(null);
+      if (aiTask.finish()) setBusyArea(null);
     }
   }
 
@@ -1690,16 +1798,18 @@ export default function App() {
     }
     setBusyArea("single");
     setError(null, "workbench-single");
+    const aiTask = beginAiTask("single_review");
     try {
-      const response = await analyzeCode({
+      const response = await analyzeCodeStream({
         source_label: singleSourceLabel || undefined,
         language: singleLanguage,
         mode_group: singleModeGroup,
         mode: singleMode,
         mode_label: singleModeLabel(singleMode),
         code: singleCode,
-        use_llm: true
-      });
+        use_llm: true,
+        retry_report_id: singleReport?.analysis_source === "local_fallback" ? singleReport.id : undefined
+      }, aiTask.options);
       setSingleReport(response.report);
       if (singleGenerateCards) {
         const candidates = await generateCardCandidatesFromReport(response.report.id);
@@ -1716,7 +1826,7 @@ export default function App() {
     } catch (err) {
       setError(friendlyError(err), "workbench-single");
     } finally {
-      setBusyArea(null);
+      if (aiTask.finish()) setBusyArea(null);
     }
   }
 
@@ -1733,6 +1843,7 @@ export default function App() {
         setAfterLabel(file.path);
         setAfterCode(file.content);
       }
+      setDiffRetryReportId(null);
       if (file.language) setDiffLanguage(file.language);
     } catch (err) {
       setError(friendlyError(err), "workbench-diff");
@@ -1747,6 +1858,7 @@ export default function App() {
     setBusyArea("diff");
     setDiffStream("");
     setError(null, "workbench-diff");
+    const aiTask = beginAiTask("diff_review");
     try {
       const response = await analyzeDiffStream(
         {
@@ -1756,10 +1868,15 @@ export default function App() {
           before_code: beforeCode,
           after_label: afterLabel.trim() || "新版本",
           after_code: afterCode,
-          use_llm: true
+          use_llm: true,
+          retry_report_id: diffRetryReportId || undefined
         },
-        (chunk) => setDiffStream((value) => value + chunk)
+        {
+          ...aiTask.options,
+          onChunk: (chunk) => setDiffStream((value) => value + chunk)
+        }
       );
+      setDiffRetryReportId(response.report.analysis_source === "local_fallback" ? response.report.id : null);
       setActiveReport(response.report);
       const [nextReports, nextWorkspaceReports, reportSnapshot] = await Promise.all([
         listReports(historyQuery, reportFilter === "all" ? undefined : reportFilter),
@@ -1774,7 +1891,7 @@ export default function App() {
     } catch (err) {
       setError(friendlyError(err), "workbench-diff");
     } finally {
-      setBusyArea(null);
+      if (aiTask.finish()) setBusyArea(null);
     }
   }
 
@@ -1788,6 +1905,7 @@ export default function App() {
     setPendingUserMessage(text);
     setChatStream("");
     setError(null);
+    const aiTask = beginAiTask("chat");
     try {
       const session = await sendChatMessageStream(
         {
@@ -1797,17 +1915,25 @@ export default function App() {
           context_kind: contextKind === "none" ? null : contextKind,
           context_id: contextKind === "none" ? null : contextId
         },
-        (chunk) => setChatStream((value) => value + chunk)
+        {
+          ...aiTask.options,
+          onChunk: (chunk) => setChatStream((value) => value + chunk)
+        }
       );
       setActiveChat(session);
       setChatSessions(await listChatSessions(chatQuery));
     } catch (err) {
-      setError(friendlyError(err));
-      setChatDraft(text);
+      if (aiTask.isCurrent() || aiTaskKindRef.current !== "chat") {
+        setError(friendlyError(err));
+        setChatDraft(text);
+      }
     } finally {
-      setPendingUserMessage(null);
-      setChatStream("");
-      setBusyArea(null);
+      const finishedCurrent = aiTask.finish();
+      if (aiTaskKindRef.current !== "chat") {
+        setPendingUserMessage(null);
+        setChatStream("");
+      }
+      if (finishedCurrent) setBusyArea(null);
     }
   }
 
@@ -1874,6 +2000,9 @@ export default function App() {
       setSingleReport(null);
       setSingleTraceability(null);
     }
+    if (workspaceRetryReportId === id) setWorkspaceRetryReportId(null);
+    if (projectRetryReportId === id) setProjectRetryReportId(null);
+    if (diffRetryReportId === id) setDiffRetryReportId(null);
     if (deletedWasActive) {
       setActiveReport(null);
       setTraceability(workspaceSnapshot || await getTraceabilitySnapshot("global"));
@@ -1972,19 +2101,32 @@ export default function App() {
     event.preventDefault();
     setBusyArea("settings");
     setError(null);
+    setLlmTestResult(null);
     try {
-      const nextSettings = await saveSettings({
+      await saveSettings({
         enable_llm: enableLlm,
-        api_base: apiBase,
-        model,
-        api_key: apiKey || undefined,
+        api_base: apiBase.trim(),
+        model: model.trim(),
+        api_key: apiKey.trim() || undefined,
         clear_api_key: clearApiKey
       });
+      const nextSettings = await getSettings();
       setSettings(nextSettings);
       setApiKey("");
       setClearApiKey(false);
       setHealth(await getAppHealth());
-      setMessage("设置已保存。");
+      if (nextSettings.llm_state === "configured") {
+        try {
+          const result = await testLlmConnection({ api_base: nextSettings.api_base, model: nextSettings.model });
+          setLlmTestResult(`${result.ok ? "连接成功" : "连接失败"} · ${result.latency_ms} ms：${result.message}`);
+          setMessage(result.ok ? "模型设置已保存并验证成功。" : "模型设置已保存，但连接验证失败；可检查网络或配置后重试。");
+        } catch (testError) {
+          setLlmTestResult(`连接失败：${friendlyError(testError)}`);
+          setMessage("模型设置已保存，但连接验证失败；可检查网络或配置后重试。");
+        }
+      } else {
+        setMessage(nextSettings.llm_state === "disabled" ? "设置已保存，当前使用本地规则模式。" : "设置已保存，但还需要配置 API Key。");
+      }
     } catch (err) {
       setError(friendlyError(err));
     } finally {
@@ -1997,8 +2139,12 @@ export default function App() {
     setError(null);
     setLlmTestResult(null);
     try {
-      const result = await testLlmConnection(apiKey || undefined);
-      setLlmTestResult(`${result.ok ? "连接成功" : "连接失败"}：${result.message}`);
+      const result = await testLlmConnection({
+        api_base: apiBase.trim(),
+        model: model.trim(),
+        api_key: clearApiKey ? "" : apiKey.trim() || undefined
+      });
+      setLlmTestResult(`${result.ok ? "连接成功" : "连接失败"} · ${result.latency_ms} ms：${result.message}`);
     } catch (err) {
       setError(friendlyError(err));
     } finally {
@@ -2035,7 +2181,31 @@ export default function App() {
     setApiBase(profile.api_base);
     setModel(profile.model);
     setEnableLlm(true);
-    setMessage(`已应用模型档案：${profile.name}，保存设置后生效。`);
+    setClearApiKey(false);
+    setLlmTestResult(null);
+    if (!settings?.api_key_set) {
+      setSettingsConnectionRequest((value) => value + 1);
+      setMessage(`已载入模型档案：${profile.name}。档案不包含 API Key，请补充密钥后保存并验证。`);
+      return;
+    }
+    setBusyArea("settings");
+    setError(null);
+    try {
+      await saveSettings({
+        enable_llm: true,
+        api_base: profile.api_base,
+        model: profile.model,
+        clear_api_key: false
+      });
+      const nextSettings = await getSettings();
+      setSettings(nextSettings);
+      setHealth(await getAppHealth());
+      setMessage(`模型档案已启用：${profile.name}。`);
+    } catch (err) {
+      setError(friendlyError(err));
+    } finally {
+      setBusyArea(null);
+    }
   }
 
   async function handleDeleteModelProfile(id: string) {
@@ -2410,7 +2580,7 @@ export default function App() {
       databaseOk={Boolean(health?.database_ok)}
       error={visibleError}
       globalCommands={globalCommands}
-      llmConfigured={Boolean(settings?.api_key_set)}
+      llmConfigured={settings?.llm_state === "configured"}
       message={visibleMessage}
       onDismissMessage={() => setMessage(null)}
       onDismissError={() => setError(null)}
@@ -2421,6 +2591,8 @@ export default function App() {
       onToggleTheme={() => setTheme((current) => current === "dark" ? "light" : "dark")}
       version={health?.version || "1.0.0"}
     >
+
+        <AiTaskStatusBar status={aiTaskStatus} onCancel={cancelActiveAiTask} />
 
         {view === "workbench" && (
           <CodeWorkbenchView
@@ -2437,12 +2609,13 @@ export default function App() {
                 afterCode={afterCode}
                 stream={diffStream}
                 busy={busyArea === "diff"}
-                onTitleChange={setDiffTitle}
-                onLanguageChange={setDiffLanguage}
-                onBeforeLabelChange={setBeforeLabel}
-                onAfterLabelChange={setAfterLabel}
-                onBeforeCodeChange={setBeforeCode}
-                onAfterCodeChange={setAfterCode}
+                retryAi={Boolean(diffRetryReportId)}
+                onTitleChange={(value) => { setDiffTitle(value); setDiffRetryReportId(null); }}
+                onLanguageChange={(value) => { setDiffLanguage(value); setDiffRetryReportId(null); }}
+                onBeforeLabelChange={(value) => { setBeforeLabel(value); setDiffRetryReportId(null); }}
+                onAfterLabelChange={(value) => { setAfterLabel(value); setDiffRetryReportId(null); }}
+                onBeforeCodeChange={(value) => { setBeforeCode(value); setDiffRetryReportId(null); }}
+                onAfterCodeChange={(value) => { setAfterCode(value); setDiffRetryReportId(null); }}
                 onImportBefore={() => handleImportDiffFile("before")}
                 onImportAfter={() => handleImportDiffFile("after")}
                 onAnalyze={handleAnalyzeDiff}
@@ -2458,12 +2631,22 @@ export default function App() {
             singleBusy={busyArea === "single"}
             reportOperationBusy={reportOperation !== null}
             onWorkbenchModeChange={changeWorkbenchMode}
-            onLanguageChange={setSingleLanguage}
+            onLanguageChange={(value) => {
+              setSingleLanguage(value);
+              setSingleReport(null);
+              setSingleTraceability(null);
+            }}
             onModeGroupChange={(value) => {
               setSingleModeGroup(value);
               setSingleMode(value === "script" ? "script_review" : "risk_review");
+              setSingleReport(null);
+              setSingleTraceability(null);
             }}
-            onModeChange={setSingleMode}
+            onModeChange={(value) => {
+              setSingleMode(value);
+              setSingleReport(null);
+              setSingleTraceability(null);
+            }}
             onGenerateCardsChange={setSingleGenerateCards}
             onCodeChange={(value) => {
               setSingleCode(value);
@@ -2510,7 +2693,9 @@ export default function App() {
               stream={workspaceStream}
               opening={busyArea === "workspace-open"}
               rescanning={busyArea === "workspace-rescan"}
-              reportBusy={busyArea === "workspace-report"}
+              reportBusy={busyArea === "workspace-report" || busyArea === "project-report"}
+              retryAi={Boolean(workspaceRetryReportId)}
+              projectRetryAi={Boolean(projectRetryReportId)}
               onQueryChange={setWorkspaceQuery}
               onSearch={refreshWorkspaces}
               onImport={handleImportWorkspace}
@@ -2518,6 +2703,7 @@ export default function App() {
               onDelete={handleDeleteWorkspace}
               onRescan={handleRescanWorkspace}
               onAnalyze={handleAnalyzeWorkspace}
+              onAnalyzeProject={handleAnalyzeProject}
               onMap={handleLoadCodeMap}
               onGuide={handleLoadProjectGuide}
               onOpenReport={(id) => handleOpenReport(id, "history")}
@@ -2580,7 +2766,7 @@ export default function App() {
             draft={chatDraft}
             context={chatContext}
             busy={busyArea === "chat"}
-            llmReady={Boolean(settings?.enable_llm && settings.api_key_set)}
+            llmReady={settings?.llm_state === "configured"}
             onQueryChange={setChatQuery}
             onSearch={async () => setChatSessions(await listChatSessions(chatQuery))}
             onNew={() => { setActiveChat(null); setChatDraft(""); setChatStream(""); setPendingUserMessage(null); }}
@@ -2751,6 +2937,7 @@ export default function App() {
             profileDefault={profileDefault}
             busy={busyArea}
             testResult={llmTestResult}
+            focusConnectionRequest={settingsConnectionRequest}
             onEnableLlmChange={setEnableLlm}
             onApiBaseChange={setApiBase}
             onModelChange={setModel}
@@ -2769,7 +2956,20 @@ export default function App() {
           />
         )}
 
-        {view === "health" && health && <HealthStatusView activity={activitySummary} busy={busyArea === "archive"} health={health} onExportArchive={handleExportProductArchive} onImportArchive={handleImportProductArchive} onOpenStorage={openStorageDir} onOpenLogs={openLogsDir} onOpenSettings={() => setView("settings")} />}
+        {view === "health" && health && <HealthStatusView
+          activity={activitySummary}
+          busy={busyArea === "archive"}
+          health={{
+            ...health,
+            llm_enabled: settings?.llm_state !== "disabled",
+            llm_configured: settings?.llm_state === "configured"
+          }}
+          onExportArchive={handleExportProductArchive}
+          onImportArchive={handleImportProductArchive}
+          onOpenStorage={openStorageDir}
+          onOpenLogs={openLogsDir}
+          onOpenSettings={() => setView("settings")}
+        />}
     </ProductShell>
   );
 }

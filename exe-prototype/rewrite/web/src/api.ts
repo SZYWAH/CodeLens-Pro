@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
+import { runAiStream } from "./aiStreamRuntime";
 import type {
   ActivityEvent,
   ActivityConstellationData,
@@ -9,6 +10,9 @@ import type {
   AgentApplyResult,
   AgentPlanRequest,
   AgentTask,
+  AiStreamEvent,
+  AiTaskKind,
+  AiTaskRunOptions,
   AnalysisRequest,
   AnalysisResponse,
   AppHealth,
@@ -26,6 +30,7 @@ import type {
   LearningCardCreate,
   LearningCardCandidate,
   LearningCenterData,
+  LlmTestRequest,
   LlmTestResult,
   ModelProfile,
   ModelProfileInput,
@@ -52,10 +57,6 @@ declare global {
     __TAURI_INTERNALS__?: unknown;
   }
 }
-
-type StreamChunk = { chunk: string };
-type StreamDone<T> = { result: T };
-type StreamError = { message: string };
 
 export async function getAppHealth(): Promise<AppHealth> {
   return call("get_app_health");
@@ -93,29 +94,32 @@ export async function importProjectFolder(): Promise<ProjectImportResult> {
   return call("import_project_folder");
 }
 
-export async function analyzeCode(request: AnalysisRequest): Promise<AnalysisResponse> {
-  return call("analyze_code", { request });
+export async function analyzeCodeStream(
+  request: AnalysisRequest,
+  options?: AiTaskRunOptions
+): Promise<AnalysisResponse> {
+  return runStream("single_review", "analyze_code_stream", (requestId) => ({ requestId, request }), options);
 }
 
 export async function analyzeProjectStream(
   request: ProjectAnalyzeRequest,
-  onChunk: (chunk: string) => void
+  options?: AiTaskRunOptions
 ): Promise<AnalysisResponse> {
-  return runStream("analysis", "analyze_project_stream", { request }, onChunk);
+  return runStream("project_review", "analyze_project_stream", (requestId) => ({ requestId, request }), options);
 }
 
 export async function analyzeDiffStream(
   request: DiffAnalyzeRequest,
-  onChunk: (chunk: string) => void
+  options?: AiTaskRunOptions
 ): Promise<AnalysisResponse> {
-  return runStream("diff", "analyze_diff_stream", { request }, onChunk);
+  return runStream("diff_review", "analyze_diff_stream", (requestId) => ({ requestId, request }), options);
 }
 
 export async function sendChatMessageStream(
   request: ChatStreamRequest,
-  onChunk: (chunk: string) => void
+  options?: AiTaskRunOptions
 ): Promise<ChatSessionDetail> {
-  return runStream("chat", "send_chat_message_stream", { request }, onChunk);
+  return runStream("chat", "send_chat_message_stream", (requestId) => ({ requestId, request }), options);
 }
 
 export async function importWorkspaceFolder(): Promise<WorkspaceDetail> {
@@ -140,9 +144,15 @@ export async function deleteWorkspace(id: string): Promise<void> {
 
 export async function analyzeWorkspaceStream(
   workspaceId: string,
-  onChunk: (chunk: string) => void
+  options?: AiTaskRunOptions,
+  retryReportId?: string
 ): Promise<AnalysisResponse> {
-  return runStream("workspace", "analyze_workspace_stream", { workspaceId, useLlm: true }, onChunk, "progress");
+  return runStream("workspace_review", "analyze_workspace_stream", (requestId) => ({
+    requestId,
+    workspaceId,
+    useLlm: true,
+    retryReportId: retryReportId || null
+  }), options);
 }
 
 export async function getCodeMap(workspaceId: string): Promise<CodeMap> {
@@ -186,8 +196,12 @@ export async function createLearningCard(input: LearningCardCreate): Promise<Lea
   return call("create_learning_card", { input });
 }
 
-export async function generateCardMaterial(cardId: string, useLlm = true): Promise<CardMaterial> {
-  return call("generate_card_material", { cardId, useLlm });
+export async function generateCardMaterialStream(
+  cardId: string,
+  useLlm = true,
+  options?: AiTaskRunOptions
+): Promise<CardMaterial> {
+  return runStream("card_material", "generate_card_material_stream", (requestId) => ({ requestId, cardId, useLlm }), options);
 }
 
 export async function listCardMaterials(cardId?: string): Promise<CardMaterial[]> {
@@ -359,8 +373,10 @@ export async function deleteChatSession(id: string): Promise<void> {
   return call("delete_chat_session", { id });
 }
 
-export async function testLlmConnection(apiKey?: string): Promise<LlmTestResult> {
-  return call("test_llm_connection", { apiKey: apiKey || null });
+export async function testLlmConnection(request: LlmTestRequest): Promise<LlmTestResult> {
+  return call("test_llm_connection", {
+    request: { ...request, api_key: request.api_key === undefined ? null : request.api_key }
+  });
 }
 
 export async function openStorageDir(): Promise<void> {
@@ -404,52 +420,17 @@ export async function importProductArchive(): Promise<ProductArchiveImportResult
 }
 
 async function runStream<T>(
-  prefix: string,
+  task: AiTaskKind,
   command: string,
-  args: Record<string, unknown>,
-  onChunk: (chunk: string) => void,
-  chunkEvent = "chunk"
+  buildArgs: (requestId: string) => Record<string, unknown>,
+  options?: AiTaskRunOptions
 ): Promise<T> {
   ensureDesktopRuntime();
-  const unlisteners: UnlistenFn[] = [];
-  try {
-    return await new Promise<T>(async (resolve, reject) => {
-      let settled = false;
-      const cleanup = () => {
-        for (const unlisten of unlisteners) unlisten();
-      };
-      unlisteners.push(
-        await listen<StreamChunk>(`${prefix}:${chunkEvent}`, (event) => {
-          onChunk(event.payload.chunk);
-        })
-      );
-      unlisteners.push(
-        await listen<StreamDone<T>>(`${prefix}:done`, (event) => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          resolve(event.payload.result);
-        })
-      );
-      unlisteners.push(
-        await listen<StreamError>(`${prefix}:error`, (event) => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          reject(new Error(event.payload.message));
-        })
-      );
-
-      invoke(command, args).catch((error) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(error);
-      });
-    });
-  } finally {
-    for (const unlisten of unlisteners.splice(0)) unlisten();
-  }
+  return runAiStream<T>({
+    listen: async (eventName, handler) => listen<AiStreamEvent<unknown>>(eventName, (event) => handler(event.payload)),
+    invoke: (name, args) => invoke(name, args),
+    cancel: (requestId) => invoke("cancel_ai_request", { requestId })
+  }, { command, task, buildArgs, options });
 }
 
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {

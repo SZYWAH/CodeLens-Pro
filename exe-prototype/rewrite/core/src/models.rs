@@ -19,6 +19,7 @@ pub struct Settings {
     pub api_base: String,
     pub model: String,
     pub api_key_set: bool,
+    pub llm_state: String,
 }
 
 impl Default for Settings {
@@ -28,6 +29,7 @@ impl Default for Settings {
             api_base: "https://api.deepseek.com/v1".to_string(),
             model: "deepseek-chat".to_string(),
             api_key_set: false,
+            llm_state: "disabled".to_string(),
         }
     }
 }
@@ -73,6 +75,8 @@ pub struct AnalysisRequest {
     pub mode: Option<String>,
     pub mode_label: Option<String>,
     pub use_llm: Option<bool>,
+    #[serde(default)]
+    pub retry_report_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,9 +151,13 @@ pub struct ProjectFileInput {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectAnalyzeRequest {
     pub project_name: String,
+    #[serde(default)]
+    pub workspace_id: Option<String>,
     pub title: Option<String>,
     pub files: Vec<ProjectFileInput>,
     pub use_llm: Option<bool>,
+    #[serde(default)]
+    pub retry_report_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,6 +177,8 @@ pub struct DiffAnalyzeRequest {
     pub after_label: String,
     pub after_code: String,
     pub use_llm: Option<bool>,
+    #[serde(default)]
+    pub retry_report_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -213,6 +223,17 @@ pub struct ChatStreamRequest {
 pub struct LlmTestResult {
     pub ok: bool,
     pub message: String,
+    pub api_base: String,
+    pub model: String,
+    pub latency_ms: u64,
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmTestRequest {
+    pub api_base: String,
+    pub model: String,
+    pub api_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

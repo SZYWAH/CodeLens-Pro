@@ -36,6 +36,8 @@ export function ProjectWorkspaceView(props: {
   opening: boolean;
   rescanning: boolean;
   reportBusy: boolean;
+  retryAi?: boolean;
+  projectRetryAi?: boolean;
   onQueryChange: (value: string) => void;
   onSearch: (query: string) => void;
   onImport: () => void;
@@ -43,6 +45,7 @@ export function ProjectWorkspaceView(props: {
   onDelete: (id: string) => void;
   onRescan: () => void;
   onAnalyze: () => void;
+  onAnalyzeProject: () => void;
   onMap: () => void;
   onGuide: () => void;
   onOpenReport: (id: string) => void;
@@ -289,6 +292,9 @@ export function ProjectWorkspaceView(props: {
                   <button className="icon-button" aria-expanded={workspaceActionsOpen} aria-label="更多工作区操作" onClick={() => setWorkspaceActionsOpen((value) => !value)} title="更多操作" type="button"><MoreHorizontal size={16} /></button>
                   {workspaceActionsOpen && <div role="menu">
                     <button disabled={operationBusy} onClick={() => { setWorkspaceActionsOpen(false); props.onRescan(); }} role="menuitem" type="button">{props.rescanning ? <Loader2 className="spin" size={15} /> : <RefreshCw size={15} />}{props.rescanning ? "正在扫描" : "重新扫描"}</button>
+                    <button disabled={operationBusy} onClick={() => { setWorkspaceActionsOpen(false); props.onAnalyzeProject(); }} role="menuitem" type="button">
+                      <Play size={15} />{props.projectRetryAi ? "重试项目 AI" : "运行项目审查"}
+                    </button>
                     <button
                       ref={scanDetailsTriggerRef}
                       aria-controls="workspace-scan-dialog-v145"
@@ -302,7 +308,7 @@ export function ProjectWorkspaceView(props: {
                   </div>}
                 </div>
                 <button className="primary-button" onClick={props.onAnalyze} disabled={operationBusy} type="button">
-                  {props.reportBusy ? <Loader2 className="spin" size={16} /> : <Play size={16} />}{props.reportBusy ? "正在生成" : "生成项目报告"}
+                  {props.reportBusy ? <Loader2 className="spin" size={16} /> : <Play size={16} />}{props.reportBusy ? "正在生成" : props.retryAi ? "重试 AI" : "生成工作区报告"}
                 </button>
               </div>
             </header>

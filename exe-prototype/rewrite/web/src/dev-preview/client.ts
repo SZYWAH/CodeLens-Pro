@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
+import { runAiStream } from "../aiStreamRuntime";
 import type {
   ActivityEvent,
   ActivityConstellationData,
@@ -9,6 +10,9 @@ import type {
   AgentApplyResult,
   AgentPlanRequest,
   AgentTask,
+  AiStreamEvent,
+  AiTaskKind,
+  AiTaskRunOptions,
   AnalysisRequest,
   AnalysisResponse,
   AppHealth,
@@ -26,6 +30,7 @@ import type {
   LearningCardCreate,
   LearningCardCandidate,
   LearningCenterData,
+  LlmTestRequest,
   LlmTestResult,
   ModelProfile,
   ModelProfileInput,
@@ -55,10 +60,6 @@ declare global {
   }
 }
 
-type StreamChunk = { chunk: string };
-type StreamDone<T> = { result: T };
-type StreamError = { message: string };
-
 const mockReports: ReportDetail[] = [];
 const mockSessions: ChatSessionDetail[] = [];
 const mockWorkspaces: WorkspaceDetail[] = [];
@@ -84,11 +85,27 @@ export async function getSettings(): Promise<Settings> {
 
 export async function saveSettings(update: SettingsUpdate): Promise<Settings> {
   return call("save_settings", { update }, () => {
+    const apiBase = update.api_base.trim();
+    const model = update.model.trim();
+    let parsed: URL;
+    try {
+      parsed = new URL(apiBase);
+    } catch {
+      throw new Error("API Base 必须是有效的 HTTP 或 HTTPS 地址。");
+    }
+    if (!(["http:", "https:"] as string[]).includes(parsed.protocol)) {
+      throw new Error("API Base 必须是有效的 HTTP 或 HTTPS 地址。");
+    }
+    if (!model) throw new Error("模型名称不能为空。");
+    const apiKeySet = update.clear_api_key ? false : Boolean(update.api_key?.trim()) || mockSettingsValue.api_key_set;
+    const enabled = update.clear_api_key ? false : update.enable_llm;
+    if (enabled && !apiKeySet) throw new Error("启用 LLM 前必须保存 API Key。");
     mockSettingsValue = {
-      enable_llm: update.enable_llm,
-      api_base: update.api_base,
-      model: update.model,
-      api_key_set: update.clear_api_key ? false : Boolean(update.api_key) || mockSettingsValue.api_key_set
+      enable_llm: enabled,
+      api_base: apiBase,
+      model,
+      api_key_set: apiKeySet,
+      llm_state: !enabled ? "disabled" : apiKeySet ? "configured" : "missing_key"
     };
     return mockSettingsValue;
   });
@@ -142,34 +159,34 @@ export async function importProjectFolder(): Promise<ProjectImportResult> {
   return call("import_project_folder", undefined, () => mockImport());
 }
 
-export async function analyzeCode(request: AnalysisRequest): Promise<AnalysisResponse> {
-  return call("analyze_code", { request }, () => mockCodeAnalysis(request));
+export async function analyzeCodeStream(request: AnalysisRequest, options?: AiTaskRunOptions): Promise<AnalysisResponse> {
+  return runStream("single_review", "analyze_code_stream", (requestId) => ({ requestId, request }), options, async () => mockCodeAnalysis(request));
 }
 
 export async function analyzeProjectStream(
   request: ProjectAnalyzeRequest,
-  onChunk: (chunk: string) => void
+  options?: AiTaskRunOptions
 ): Promise<AnalysisResponse> {
-  return runStream("analysis", "analyze_project_stream", { request }, onChunk, () =>
-    mockProjectAnalysis(request, onChunk)
+  return runStream("project_review", "analyze_project_stream", (requestId) => ({ requestId, request }), options, () =>
+    mockProjectAnalysis(request, options?.onChunk || (() => undefined))
   );
 }
 
 export async function analyzeDiffStream(
   request: DiffAnalyzeRequest,
-  onChunk: (chunk: string) => void
+  options?: AiTaskRunOptions
 ): Promise<AnalysisResponse> {
-  return runStream("diff", "analyze_diff_stream", { request }, onChunk, () =>
-    mockDiffAnalysis(request, onChunk)
+  return runStream("diff_review", "analyze_diff_stream", (requestId) => ({ requestId, request }), options, () =>
+    mockDiffAnalysis(request, options?.onChunk || (() => undefined))
   );
 }
 
 export async function sendChatMessageStream(
   request: ChatStreamRequest,
-  onChunk: (chunk: string) => void
+  options?: AiTaskRunOptions
 ): Promise<ChatSessionDetail> {
-  return runStream("chat", "send_chat_message_stream", { request }, onChunk, () =>
-    mockChat(request, onChunk)
+  return runStream("chat", "send_chat_message_stream", (requestId) => ({ requestId, request }), options, () =>
+    mockChat(request, options?.onChunk || (() => undefined))
   );
 }
 
@@ -207,13 +224,14 @@ export async function deleteWorkspace(id: string): Promise<void> {
 
 export async function analyzeWorkspaceStream(
   workspaceId: string,
-  onChunk: (chunk: string) => void
+  options?: AiTaskRunOptions,
+  retryReportId?: string
 ): Promise<AnalysisResponse> {
   return runStream(
-    "workspace",
+    "workspace_review",
     "analyze_workspace_stream",
-    { workspaceId, useLlm: true },
-    onChunk,
+    (requestId) => ({ requestId, workspaceId, useLlm: true, retryReportId: retryReportId || null }),
+    options,
     async () => {
       const workspace = await getWorkspace(workspaceId);
       return mockProjectAnalysis(
@@ -227,10 +245,9 @@ export async function analyzeWorkspaceStream(
           })),
           use_llm: true
         },
-        onChunk
+        options?.onChunk || (() => undefined)
       );
-    },
-    "progress"
+    }
   );
 }
 
@@ -347,7 +364,7 @@ export async function createLearningCard(input: LearningCardCreate): Promise<Lea
   });
 }
 
-export async function generateCardMaterial(cardId: string, useLlm = true): Promise<CardMaterial> {
+async function generateCardMaterial(cardId: string, useLlm = true): Promise<CardMaterial> {
   return call("generate_card_material", { cardId, useLlm }, () => {
     const card = mockCards.find((item) => item.id === cardId);
     if (!card) throw new Error("未找到知识卡片");
@@ -504,6 +521,16 @@ export async function getProjectGuide(workspaceId: string): Promise<ProjectGuide
     if (existing) return existing;
     throw new Error("当前工作区还没有项目导览，请先生成导览。");
   });
+}
+
+export async function generateCardMaterialStream(
+  cardId: string,
+  useLlm = true,
+  options?: AiTaskRunOptions
+): Promise<CardMaterial> {
+  return runStream("card_material", "generate_card_material_stream", (requestId) => ({ requestId, cardId, useLlm }), options, () =>
+    generateCardMaterial(cardId, useLlm)
+  );
 }
 
 export async function createAgentPlan(request: AgentPlanRequest): Promise<AgentTask> {
@@ -864,10 +891,20 @@ export async function deleteChatSession(id: string): Promise<void> {
   });
 }
 
-export async function testLlmConnection(apiKey?: string): Promise<LlmTestResult> {
-  return call("test_llm_connection", { apiKey: apiKey || null }, () => ({
-    ok: mockSettingsValue.enable_llm && (Boolean(apiKey) || mockSettingsValue.api_key_set),
-    message: mockSettingsValue.enable_llm ? "本地预览连接结果。" : "设置中尚未启用 LLM。"
+export async function testLlmConnection(request: LlmTestRequest): Promise<LlmTestResult> {
+  const keyAvailable = request.api_key === undefined
+    ? mockSettingsValue.api_key_set
+    : Boolean(request.api_key.trim());
+  const configured = Boolean(request.api_base.trim() && request.model.trim() && keyAvailable);
+  return call("test_llm_connection", {
+    request: { ...request, api_key: request.api_key === undefined ? null : request.api_key }
+  }, () => ({
+    ok: configured,
+    message: configured ? "本地预览连接结果。" : "请完整填写 API Base、模型和 API Key。",
+    api_base: request.api_base,
+    model: request.model,
+    latency_ms: 12,
+    error_code: configured ? null : "configuration"
   }));
 }
 
@@ -900,7 +937,7 @@ export async function exportLearningCardsMarkdown(workspaceId?: string, status?:
 }
 
 export async function copyReportText(id: string, text: string): Promise<void> {
-  if (!window.__TAURI_INTERNALS__ && navigator.clipboard) {
+  if (!hasTauriInvoke() && navigator.clipboard) {
     await navigator.clipboard.writeText(text);
     return;
   }
@@ -936,57 +973,30 @@ export async function importProductArchive(): Promise<ProductArchiveImportResult
 }
 
 async function runStream<T>(
-  prefix: string,
+  task: AiTaskKind,
   command: string,
-  args: Record<string, unknown>,
-  onChunk: (chunk: string) => void,
-  mock: () => Promise<T>,
-  chunkEvent = "chunk"
+  buildArgs: (requestId: string) => Record<string, unknown>,
+  options: AiTaskRunOptions | undefined,
+  mock: () => Promise<T>
 ): Promise<T> {
   recordPreviewCommand(command);
-  if (!window.__TAURI_INTERNALS__) {
+  if (!hasTauriInvoke()) {
+    if (options?.signal?.aborted) throw new Error("AI 任务已取消。");
+    previewPhases(options);
     return mock();
   }
+  return runAiStream<T>({
+    listen: async (eventName, handler) => listen<AiStreamEvent<unknown>>(eventName, (event) => handler(event.payload)),
+    invoke: (name, args) => invoke(name, args),
+    cancel: (requestId) => invoke("cancel_ai_request", { requestId })
+  }, { command, task, buildArgs, options });
+}
 
-  const unlisteners: UnlistenFn[] = [];
-  try {
-    return await new Promise<T>(async (resolve, reject) => {
-      let settled = false;
-      const cleanup = () => {
-        for (const unlisten of unlisteners) unlisten();
-      };
-      unlisteners.push(
-        await listen<StreamChunk>(`${prefix}:${chunkEvent}`, (event) => {
-          onChunk(event.payload.chunk);
-        })
-      );
-      unlisteners.push(
-        await listen<StreamDone<T>>(`${prefix}:done`, (event) => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          resolve(event.payload.result);
-        })
-      );
-      unlisteners.push(
-        await listen<StreamError>(`${prefix}:error`, (event) => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          reject(new Error(event.payload.message));
-        })
-      );
-
-      invoke(command, args).catch((error) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(error);
-      });
-    });
-  } finally {
-    for (const unlisten of unlisteners.splice(0)) unlisten();
-  }
+function previewPhases(options?: AiTaskRunOptions) {
+  options?.onPhase?.("accepted");
+  options?.onPhase?.("connecting");
+  options?.onPhase?.("streaming");
+  options?.onPhase?.("saving");
 }
 
 async function call<T>(
@@ -995,10 +1005,15 @@ async function call<T>(
   mock: () => T | Promise<T>
 ): Promise<T> {
   recordPreviewCommand(command);
-  if (window.__TAURI_INTERNALS__) {
+  if (hasTauriInvoke()) {
     return invoke<T>(command, args);
   }
   return mock();
+}
+
+function hasTauriInvoke(): boolean {
+  const internals = window.__TAURI_INTERNALS__ as { invoke?: unknown } | undefined;
+  return typeof internals?.invoke === "function";
 }
 
 function recordPreviewCommand(command: string) {
@@ -1012,7 +1027,8 @@ let mockSettingsValue: Settings = {
   enable_llm: false,
   api_base: "https://api.deepseek.com/v1",
   model: "deepseek-chat",
-  api_key_set: false
+  api_key_set: false,
+  llm_state: "disabled"
 };
 
 function defaultModelProfiles(): ModelProfile[] {

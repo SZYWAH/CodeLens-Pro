@@ -15,7 +15,10 @@ export type Settings = {
   api_base: string;
   model: string;
   api_key_set: boolean;
+  llm_state: LlmState;
 };
+
+export type LlmState = "disabled" | "missing_key" | "configured";
 
 export type SettingsUpdate = {
   enable_llm: boolean;
@@ -112,9 +115,11 @@ export type ProjectImportResult = {
 
 export type ProjectAnalyzeRequest = {
   project_name: string;
+  workspace_id?: string | null;
   title?: string;
   files: ProjectFileInput[];
   use_llm?: boolean;
+  retry_report_id?: string | null;
 };
 
 export type AnalysisRequest = {
@@ -126,6 +131,7 @@ export type AnalysisRequest = {
   mode?: string;
   mode_label?: string;
   use_llm?: boolean;
+  retry_report_id?: string | null;
 };
 
 export type DiffAnalyzeRequest = {
@@ -136,6 +142,7 @@ export type DiffAnalyzeRequest = {
   after_label: string;
   after_code: string;
   use_llm?: boolean;
+  retry_report_id?: string | null;
 };
 
 export type AnalysisResponse = {
@@ -177,9 +184,63 @@ export type ChatStreamRequest = {
   context_id?: string | null;
 };
 
+export type LlmTestRequest = {
+  api_base: string;
+  model: string;
+  api_key?: string;
+};
+
 export type LlmTestResult = {
   ok: boolean;
   message: string;
+  api_base: string;
+  model: string;
+  latency_ms: number;
+  error_code?: string | null;
+};
+
+export type AiTaskKind =
+  | "single_review"
+  | "project_review"
+  | "workspace_review"
+  | "diff_review"
+  | "chat"
+  | "card_material";
+
+export type AiTaskPhase = "accepted" | "connecting" | "streaming" | "fallback" | "saving";
+
+export type AiTaskErrorCode =
+  | "configuration"
+  | "unauthorized"
+  | "rate_limited"
+  | "timeout"
+  | "network"
+  | "protocol"
+  | "cancelled"
+  | "internal";
+
+export type AiTaskError = {
+  code: AiTaskErrorCode;
+  message: string;
+  retryable: boolean;
+};
+
+export type AiStreamEvent<T> = {
+  request_id: string;
+  task: AiTaskKind;
+  event: "phase" | "chunk" | "done" | "error";
+  phase?: AiTaskPhase;
+  sequence: number;
+  chunk?: string;
+  result?: T;
+  error?: AiTaskError;
+};
+
+export type AiTaskRunOptions = {
+  onChunk?: (chunk: string) => void;
+  onPhase?: (phase: AiTaskPhase) => void;
+  onRequestId?: (requestId: string) => void;
+  signal?: AbortSignal;
 };
 
 export type WorkspaceSummary = {

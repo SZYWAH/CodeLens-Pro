@@ -1,23 +1,26 @@
-import cytoscape, { type Core, type ElementDefinition, type StylesheetCSS } from "cytoscape";
-import { ArrowLeft, Focus, List, Network, RotateCcw, Search } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { WorkspaceDetail, WorkspaceFile } from "../types";
+import cytoscape, { type Core, type StylesheetCSS } from "cytoscape";
+import { ArrowLeft, Box, Crosshair, Focus, List, Maximize2, Minimize2, Network, RotateCcw, Search, Workflow } from "lucide-react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type Ref } from "react";
+import type { WorkspaceDetail } from "../types";
 import type { InspectTarget, ResolvedDependency } from "../utils/projectNavigation";
 import { normalizeProjectPath, projectBasename, topLevelArea } from "../utils/projectNavigation";
 import { AccessibleListbox } from "./AccessibleListbox";
+import type { DependencyGraph3DHandle } from "./ProjectDependencyGraph3D";
+import {
+  buildDependencyGraphModel,
+  buildDependencySpatialModel,
+  fileNodeId,
+  filterDependencyGraphModel,
+  toCytoscapeElements,
+  type DependencyGraphLevel,
+  type DependencyGraphNode,
+  type IdleEdgeMode
+} from "./projectDependencyGraphModel";
 
-type GraphLevel = { mode: "overview" } | { mode: "directory"; directory: string };
 type GraphPhase = "preparing" | "layout" | "ready" | "empty" | "error";
+type GraphPresentation = "2d" | "3d";
 
-type GraphModel = {
-  elements: ElementDefinition[];
-  fileCount: number;
-  totalFileCount: number;
-  connectedFileCount: number;
-  isolatedFileCount: number;
-  edgeCount: number;
-  dense: boolean;
-};
+const ProjectDependencyGraph3D = lazy(() => import("./ProjectDependencyGraph3D").then((module) => ({ default: module.ProjectDependencyGraph3D })));
 
 export function ProjectDependencyGraph({
   workspace,
@@ -34,11 +37,22 @@ export function ProjectDependencyGraph({
 }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const graphRef = useRef<Core | null>(null);
-  const [level, setLevel] = useState<GraphLevel>({ mode: "overview" });
+  const spaceRef = useRef<DependencyGraph3DHandle | null>(null);
+  const immersiveTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const immersiveExitRef = useRef<HTMLButtonElement | null>(null);
+  const wasImmersiveRef = useRef(false);
+  const [level, setLevel] = useState<DependencyGraphLevel>({ mode: "overview" });
   const [phase, setPhase] = useState<GraphPhase>("preparing");
+  const [presentation, setPresentation] = useState<GraphPresentation>("2d");
+  const [spaceVisited, setSpaceVisited] = useState(false);
   const [query, setQuery] = useState("");
   const [language, setLanguage] = useState("all");
   const [showIsolated, setShowIsolated] = useState(false);
+  const [focusedNodeId, setFocusedNodeId] = useState<string | null>(null);
+  const [showSecondHop, setShowSecondHop] = useState(false);
+  const [idleEdgeMode, setIdleEdgeMode] = useState<IdleEdgeMode>("backbone");
+  const [fallbackNotice, setFallbackNotice] = useState<string | null>(null);
+  const [isImmersive, setIsImmersive] = useState(false);
   const [theme, setTheme] = useState<"dark" | "light">(() => document.documentElement.dataset.theme === "light" ? "light" : "dark");
 
   const internalDependencies = useMemo(
@@ -50,11 +64,26 @@ export function ProjectDependencyGraph({
     [workspace.files]
   );
   const model = useMemo(
-    () => level.mode === "overview"
-      ? buildDirectoryOverview(workspace, internalDependencies)
-      : buildDirectoryFocus(workspace, internalDependencies, level.directory, showIsolated),
+    () => buildDependencyGraphModel(workspace, internalDependencies, level, showIsolated),
     [internalDependencies, level, showIsolated, workspace]
   );
+  const visibleModel = useMemo(
+    () => filterDependencyGraphModel(model, query, language, level.mode),
+    [language, level.mode, model, query]
+  );
+  const spatialLayoutModel = useMemo(
+    () => buildDependencySpatialModel(workspace, internalDependencies, level, true),
+    [internalDependencies, level, workspace]
+  );
+  const spatialVisibleBase = useMemo(
+    () => buildDependencySpatialModel(workspace, internalDependencies, level, showIsolated),
+    [internalDependencies, level, showIsolated, workspace]
+  );
+  const spatialVisibleModel = useMemo(
+    () => filterDependencyGraphModel(spatialVisibleBase, query, language, level.mode),
+    [language, level.mode, query, spatialVisibleBase]
+  );
+  const cytoscapeElements = useMemo(() => toCytoscapeElements(visibleModel), [visibleModel]);
   const quickItems = useMemo(() => {
     if (level.mode === "overview") {
       const counts = new Map<string, number>();
@@ -74,10 +103,54 @@ export function ProjectDependencyGraph({
 
   useEffect(() => {
     setLevel({ mode: "overview" });
+    setPresentation("2d");
+    setSpaceVisited(false);
     setQuery("");
     setLanguage("all");
     setShowIsolated(false);
+    setFocusedNodeId(null);
+    setShowSecondHop(false);
+    setIdleEdgeMode("backbone");
+    setFallbackNotice(null);
+    setIsImmersive(false);
   }, [workspace.summary.id]);
+
+  useEffect(() => {
+    if (!isImmersive) return;
+    document.body.classList.add("dependency-graph-immersive-open");
+    const focusFrame = window.requestAnimationFrame(() => immersiveExitRef.current?.focus());
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      document.body.classList.remove("dependency-graph-immersive-open");
+    };
+  }, [isImmersive]);
+
+  useEffect(() => {
+    if (isImmersive) {
+      wasImmersiveRef.current = true;
+      return;
+    }
+    if (!wasImmersiveRef.current) return;
+    wasImmersiveRef.current = false;
+    const focusFrame = window.requestAnimationFrame(() => immersiveTriggerRef.current?.focus());
+    return () => window.cancelAnimationFrame(focusFrame);
+  }, [isImmersive]);
+
+  useEffect(() => {
+    if (!isImmersive) return;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || event.defaultPrevented) return;
+      if (selectedPath) return;
+      event.preventDefault();
+      if (focusedNodeId) {
+        setFocusedNodeId(null);
+        return;
+      }
+      setIsImmersive(false);
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [focusedNodeId, isImmersive, selectedPath]);
 
   useEffect(() => {
     setQuery("");
@@ -88,8 +161,19 @@ export function ProjectDependencyGraph({
   useEffect(() => {
     if (!selectedPath) return;
     const file = workspace.files.find((item) => normalizeProjectPath(item.path) === normalizeProjectPath(selectedPath));
-    if (file) setLevel({ mode: "directory", directory: topLevelArea(file.path) });
+    if (file) {
+      setLevel({ mode: "directory", directory: topLevelArea(file.path) });
+      setFocusedNodeId(fileNodeId(file.path));
+    }
   }, [selectedPath, workspace.files]);
+
+  useEffect(() => {
+    // Keep a spatial file focus while temporarily visiting the compact 2D
+    // overview or hiding it with a visibility filter. Only a real level/model
+    // change should invalidate the selection.
+    const availableNodes = spatialLayoutModel.nodes;
+    if (focusedNodeId && !availableNodes.some((node) => node.id === focusedNodeId)) setFocusedNodeId(null);
+  }, [focusedNodeId, spatialLayoutModel.nodes]);
 
   useEffect(() => {
     const observer = new MutationObserver(() => setTheme(document.documentElement.dataset.theme === "light" ? "light" : "dark"));
@@ -99,14 +183,14 @@ export function ProjectDependencyGraph({
 
   useEffect(() => {
     const host = hostRef.current;
-    if (!host) return;
+    if (!host || presentation !== "2d") return;
 
     let graph: Core | null = null;
     let cancelled = false;
     let sizeFrame = 0;
     let layoutFrame = 0;
     let sizeAttempts = 0;
-    setPhase(model.elements.length ? "preparing" : "empty");
+    setPhase(visibleModel.nodes.length ? "preparing" : "empty");
 
     const createGraph = () => {
       if (cancelled) return;
@@ -126,18 +210,18 @@ export function ProjectDependencyGraph({
         try {
           graph = cytoscape({
             container: host,
-            elements: model.elements,
+            elements: cytoscapeElements,
             minZoom: 0.24,
             maxZoom: 2.6,
-            style: graphStyles(theme, model.dense),
+            style: graphStyles(theme, visibleModel.dense),
             layout: { name: "preset" }
           });
           graphRef.current = graph;
-          bindGraphInteractions(graph, level, onInspect, setLevel);
+          bindGraphInteractions(graph, level, onInspect, setLevel, setFocusedNodeId);
 
           const layout = level.mode === "overview"
             ? graph.layout({ name: "concentric", animate: false, fit: false, padding: 44, minNodeSpacing: 56, concentric: () => 1, levelWidth: () => 1 })
-            : model.dense
+            : visibleModel.dense
               ? graph.layout({
                   name: "grid",
                   animate: false,
@@ -146,7 +230,7 @@ export function ProjectDependencyGraph({
                   avoidOverlap: true,
                   avoidOverlapPadding: 34,
                   condense: false,
-                  cols: denseGridColumns(model.fileCount, host.clientWidth, host.clientHeight)
+                  cols: denseGridColumns(visibleModel.fileCount, host.clientWidth, host.clientHeight)
                 })
               : graph.layout({ name: "breadthfirst", animate: false, fit: false, padding: 58, directed: true, circle: false, grid: true, spacingFactor: 1.82 });
 
@@ -155,9 +239,8 @@ export function ProjectDependencyGraph({
             window.requestAnimationFrame(() => {
               if (cancelled || !graph) return;
               graph.resize();
-              applyGraphFilter(graph, query, language, level.mode);
               fitVisible(graph);
-              setPhase(graph.nodes().filter((node) => node.visible()).length ? "ready" : "empty");
+              setPhase(graph.nodes().length ? "ready" : "empty");
             });
           });
           layout.run();
@@ -173,7 +256,6 @@ export function ProjectDependencyGraph({
       window.requestAnimationFrame(() => {
         if (!graph || cancelled) return;
         graph.resize();
-        fitVisible(graph);
       });
     });
     resizeObserver.observe(host);
@@ -186,61 +268,134 @@ export function ProjectDependencyGraph({
       graph?.destroy();
       if (graphRef.current === graph) graphRef.current = null;
     };
-  }, [level, model, onInspect, theme]);
-
-  useEffect(() => {
-    const graph = graphRef.current;
-    if (!graph || phase === "preparing" || phase === "layout" || phase === "error") return;
-    applyGraphFilter(graph, query, language, level.mode);
-    fitVisible(graph);
-    const nextPhase = graph.nodes().filter((node) => node.visible()).length ? "ready" : "empty";
-    if (nextPhase !== phase) setPhase(nextPhase);
-  }, [language, level.mode, phase, query]);
+  }, [cytoscapeElements, level, onInspect, presentation, theme, visibleModel.dense, visibleModel.fileCount, visibleModel.nodes.length]);
 
   useEffect(() => {
     const graph = graphRef.current;
     if (!graph) return;
     graph.nodes().removeClass("is-selected");
-    if (!selectedPath) return;
-    const node = graph.getElementById(fileNodeId(selectedPath));
+    const activeNodeId = focusedNodeId || (selectedPath ? fileNodeId(selectedPath) : null);
+    if (!activeNodeId) return;
+    const node = graph.getElementById(activeNodeId);
     if (node.nonempty()) {
       node.addClass("is-selected");
       graph.animate({ center: { eles: node }, duration: 140 });
     }
-  }, [phase, selectedPath]);
+  }, [focusedNodeId, phase, selectedPath]);
 
   function resetGraph() {
+    if (presentation === "3d") {
+      spaceRef.current?.resetView();
+      return;
+    }
     setQuery("");
     setLanguage("all");
+    setFocusedNodeId(null);
+    setShowSecondHop(false);
     if (level.mode === "directory") setLevel({ mode: "overview" });
     else window.requestAnimationFrame(() => graphRef.current && fitVisible(graphRef.current));
   }
 
-  const title = level.mode === "overview" ? "目录依赖概览" : level.directory;
+  function changePresentation(next: GraphPresentation) {
+    if (next === "3d") {
+      setSpaceVisited(true);
+      setFallbackNotice(null);
+    }
+    setPresentation(next);
+  }
+
+  function fitCurrentPresentation() {
+    if (presentation === "3d") spaceRef.current?.fitContent();
+    else if (graphRef.current) fitVisible(graphRef.current);
+  }
+
+  function inspectSpaceNode(node: DependencyGraphNode) {
+    if (node.path) {
+      onInspect({ path: node.path, title: projectBasename(node.path), source: "graph" });
+      return;
+    }
+    if (node.directory) setLevel({ mode: "directory", directory: node.directory });
+  }
+
+  function returnToOverview() {
+    setFocusedNodeId(null);
+    setLevel({ mode: "overview" });
+  }
+
+  const title = level.mode === "overview"
+    ? presentation === "3d" ? "项目依赖星群" : "目录依赖概览"
+    : level.directory;
   const subtitle = level.mode === "overview"
     ? `${workspace.files.length} 个文件 · ${internalDependencies.length} 条内部依赖`
     : `${model.connectedFileCount} 个关联文件 · ${model.isolatedFileCount} 个无关联文件 · ${model.edgeCount} 条依赖`;
+  const focusedNodeSource = presentation === "3d" ? spatialLayoutModel : model;
+  const focusedNode = focusedNodeId ? focusedNodeSource.nodes.find((node) => node.id === focusedNodeId) || null : null;
+  const activePath = focusedNode?.path || selectedPath;
 
   return (
     <section
-      className={`dependency-graph-v1420 dependency-graph-v1420a is-${level.mode}`}
+      className={`dependency-graph-v1420 dependency-graph-v1420a is-${level.mode}${isImmersive ? " is-immersive" : ""}`}
       data-graph-level={level.mode}
-      data-graph-phase={phase}
-      data-graph-density={model.dense ? "dense" : "normal"}
+      data-graph-phase={presentation === "2d" ? phase : spatialVisibleModel.nodes.length ? "ready" : "empty"}
+      data-graph-density={(presentation === "3d" ? spatialVisibleModel : model).dense ? "dense" : "normal"}
+      data-graph-immersive={isImmersive ? "true" : "false"}
+      data-graph-presentation={presentation}
     >
+      <div aria-label="全屏图谱控制栏" className="dependency-graph-immersive-toolbar-v2">
+        <div className="dependency-graph-immersive-context-v2">
+          {level.mode === "directory" ? (
+            <button aria-label="返回目录概览" onClick={returnToOverview} title="返回目录概览" type="button">
+              <ArrowLeft size={15}/>
+            </button>
+          ) : <Network size={16}/>}
+          <div><strong>{title}</strong><span>{subtitle}</span></div>
+        </div>
+        <nav>
+          <GraphViewControls
+            focusedNodeId={focusedNodeId}
+            fullscreenButtonRef={immersiveExitRef}
+            idleEdgeMode={idleEdgeMode}
+            immersive
+            level={level}
+            onCenter={() => spaceRef.current?.centerSelection()}
+            onClose={onClose}
+            onFit={fitCurrentPresentation}
+            onReset={resetGraph}
+            onToggleFullscreen={() => setIsImmersive(false)}
+            onToggleIdleEdgeMode={() => setIdleEdgeMode((current) => current === "backbone" ? "all" : "backbone")}
+            onToggleSecondHop={() => setShowSecondHop((current) => !current)}
+            onPresentation={changePresentation}
+            presentation={presentation}
+            showSecondHop={showSecondHop}
+          />
+        </nav>
+      </div>
       <header>
         <div>
           {level.mode === "directory"
-            ? <button aria-label="返回目录概览" className="dependency-graph-back-v1420a" onClick={() => setLevel({ mode: "overview" })} type="button"><ArrowLeft size={15}/></button>
+            ? <button aria-label="返回目录概览" className="dependency-graph-back-v1420a" onClick={returnToOverview} type="button"><ArrowLeft size={15}/></button>
             : (
               <Network size={16} />
             )}
           <div><strong>{title}</strong><span>{subtitle}</span></div>
         </div>
         <nav>
-          <button className="dependency-graph-list-v1420a" onClick={onClose} title="返回依赖列表" type="button"><List size={14}/>列表</button>
-          <button onClick={() => graphRef.current && fitVisible(graphRef.current)} title="适应视口" type="button"><Focus size={14}/>适应</button>
-          <button onClick={resetGraph} title="重置图谱" type="button"><RotateCcw size={14}/>重置</button>
+          <GraphViewControls
+            focusedNodeId={focusedNodeId}
+            fullscreenButtonRef={immersiveTriggerRef}
+            idleEdgeMode={idleEdgeMode}
+            level={level}
+            onCenter={() => spaceRef.current?.centerSelection()}
+            onClose={onClose}
+            onFit={fitCurrentPresentation}
+            onReset={resetGraph}
+            onToggleFullscreen={() => setIsImmersive(true)}
+            onToggleIdleEdgeMode={() => setIdleEdgeMode((current) => current === "backbone" ? "all" : "backbone")}
+            onToggleSecondHop={() => setShowSecondHop((current) => !current)}
+            onPresentation={changePresentation}
+            presentation={presentation}
+            showSecondHop={showSecondHop}
+          />
         </nav>
       </header>
       {level.mode === "directory" && (
@@ -273,16 +428,21 @@ export function ProjectDependencyGraph({
         <span>{level.mode === "overview" ? "目录" : "文件"}</span>
         <div>
           {quickItems.slice(0, 16).map((item) => {
-            const active = "path" in item && selectedPath
-              ? normalizeProjectPath(item.path) === normalizeProjectPath(selectedPath)
+            const active = "path" in item && activePath
+              ? normalizeProjectPath(item.path) === normalizeProjectPath(activePath)
               : false;
             return (
               <button
                 className={active ? "is-active" : ""}
                 key={("path" in item ? item.path : item.directory) || item.label}
                 onClick={() => {
-                  if ("path" in item) onInspect({ path: item.path, title: item.label, source: "graph" });
-                  else setLevel({ mode: "directory", directory: item.directory });
+                  if ("path" in item) {
+                    setFocusedNodeId(fileNodeId(item.path));
+                    if (presentation === "2d") onInspect({ path: item.path, title: item.label, source: "graph" });
+                  } else {
+                    setFocusedNodeId(null);
+                    setLevel({ mode: "directory", directory: item.directory });
+                  }
                 }}
                 title={`${item.label} · ${item.detail}`}
                 type="button"
@@ -295,21 +455,133 @@ export function ProjectDependencyGraph({
         </div>
       </nav>
       <div className="dependency-graph-canvas-wrap-v1420a">
-        <div aria-label="项目文件依赖关系图" className="dependency-graph-canvas-v1420" ref={hostRef} role="application"/>
-        {phase !== "ready" ? (
-          <GraphStatus level={level} phase={phase} onBack={() => setLevel({ mode: "overview" })} />
+        {presentation === "2d" ? (
+          <>
+            <div aria-label="项目文件依赖关系俯视图" className="dependency-graph-canvas-v1420" ref={hostRef} role="application"/>
+            {phase !== "ready" ? (
+              <GraphStatus level={level} phase={phase} onBack={() => setLevel({ mode: "overview" })} />
+            ) : null}
+          </>
+        ) : null}
+        {spaceVisited ? (
+          <div hidden={presentation !== "3d"} style={{ position: "absolute", inset: 0 }}>
+            <Suspense fallback={<div className="dependency-space-v1-loading"><Network size={22}/><strong>正在建立三维依赖空间</strong></div>}>
+              <ProjectDependencyGraph3D
+                ref={spaceRef}
+                cacheScope={workspace.summary.id}
+                focusedNodeId={focusedNodeId}
+                idleEdgeMode={idleEdgeMode}
+                level={level}
+                model={spatialLayoutModel}
+                onFallback={(message) => {
+                  setFallbackNotice(message);
+                  setPresentation("2d");
+                  setSpaceVisited(false);
+                }}
+                onFocus={setFocusedNodeId}
+                onInspect={inspectSpaceNode}
+                onOpenDirectory={(directory) => {
+                  setFocusedNodeId(null);
+                  setLevel({ mode: "directory", directory });
+                }}
+                showSecondHop={showSecondHop}
+                sourceInspectorOpen={Boolean(selectedPath)}
+                theme={theme}
+                visibleModel={spatialVisibleModel}
+              />
+            </Suspense>
+          </div>
+        ) : null}
+        {fallbackNotice ? (
+          <div className="dependency-graph-fallback-v1" role="alert">
+            <strong>三维空间暂时不可用</strong>
+            <p>{fallbackNotice}</p>
+            <button onClick={() => setFallbackNotice(null)} type="button">继续使用俯视图</button>
+          </div>
         ) : null}
       </div>
       <footer>
-        <span><i className="file"/>{level.mode === "overview" ? "一级目录" : "当前目录文件"}</span>
+        <span><i className="file"/>{presentation === "3d" && level.mode === "overview" ? "真实文件节点" : level.mode === "overview" ? "一级目录" : "当前目录文件"}</span>
+        {presentation === "3d" && level.mode === "overview" ? <span><i className="cluster"/>目录核心与空间簇</span> : null}
         {level.mode === "directory" && <span><i className="boundary"/>跨目录边界</span>}
-        <span>{level.mode === "overview" ? "点击目录查看文件关系" : "点击文件查看源码，点击边界切换目录"}</span>
+        <span>{presentation === "3d" ? "左拖旋转 · 右拖或 Shift 平移 · 滚轮缩放 · 单击关注" : level.mode === "overview" ? "点击目录查看文件关系" : "点击文件查看源码，点击边界切换目录"}</span>
       </footer>
     </section>
   );
 }
 
-function GraphStatus({ level, phase, onBack }: { level: GraphLevel; phase: GraphPhase; onBack: () => void }) {
+function GraphViewControls({
+  focusedNodeId,
+  fullscreenButtonRef,
+  idleEdgeMode,
+  immersive = false,
+  level,
+  onCenter,
+  onClose,
+  onFit,
+  onPresentation,
+  onReset,
+  onToggleFullscreen,
+  onToggleIdleEdgeMode,
+  onToggleSecondHop,
+  presentation,
+  showSecondHop
+}: {
+  focusedNodeId: string | null;
+  fullscreenButtonRef?: Ref<HTMLButtonElement>;
+  idleEdgeMode: IdleEdgeMode;
+  immersive?: boolean;
+  level: DependencyGraphLevel;
+  onCenter: () => void;
+  onClose: () => void;
+  onFit: () => void;
+  onPresentation: (value: GraphPresentation) => void;
+  onReset: () => void;
+  onToggleFullscreen: () => void;
+  onToggleIdleEdgeMode: () => void;
+  onToggleSecondHop: () => void;
+  presentation: GraphPresentation;
+  showSecondHop: boolean;
+}) {
+  return (
+    <>
+      <div aria-label="图谱呈现方式" className="dependency-graph-presentation-v1" role="tablist">
+        <button aria-selected={presentation === "2d"} className={presentation === "2d" ? "active" : ""} onClick={() => onPresentation("2d")} role="tab" type="button"><Workflow size={14}/>俯视</button>
+        <button aria-selected={presentation === "3d"} className={presentation === "3d" ? "active" : ""} onClick={() => onPresentation("3d")} role="tab" type="button"><Box size={14}/>空间</button>
+      </div>
+      {!immersive ? <button className="dependency-graph-list-v1420a" onClick={onClose} title="返回依赖列表" type="button"><List size={14}/>列表</button> : null}
+      {presentation === "3d" && level.mode === "directory" ? (
+        <button aria-pressed={showSecondHop} className={`dependency-space-v1-secondary-hop${showSecondHop ? " is-active" : ""}`} onClick={onToggleSecondHop} title="显示或隐藏二跳关系" type="button"><Network size={14}/>二跳</button>
+      ) : null}
+      {presentation === "3d" && !focusedNodeId ? (
+        <button
+          aria-pressed={idleEdgeMode === "all"}
+          className={`dependency-space-v1-edge-mode${idleEdgeMode === "all" ? " is-active" : ""}`}
+          onClick={onToggleIdleEdgeMode}
+          title={idleEdgeMode === "backbone" ? "显示全部真实依赖" : "返回结构骨架"}
+          type="button"
+        ><Workflow size={14}/>{idleEdgeMode === "backbone" ? "全量" : "骨架"}</button>
+      ) : null}
+      {presentation === "3d" ? <button disabled={!focusedNodeId} onClick={onCenter} title="将关注节点移到视野中心" type="button"><Crosshair size={14}/>归中</button> : null}
+      <button onClick={onFit} title="适应视口" type="button"><Focus size={14}/>适应</button>
+      <button onClick={onReset} title={presentation === "3d" ? "重置空间视角" : "重置图谱"} type="button"><RotateCcw size={14}/>重置</button>
+      <button
+        aria-label={immersive ? "退出全屏" : "全屏显示图谱"}
+        aria-pressed={immersive}
+        className={immersive ? "dependency-graph-immersive-exit-v2" : "dependency-graph-immersive-trigger-v2"}
+        onClick={onToggleFullscreen}
+        ref={fullscreenButtonRef}
+        title={immersive ? "退出全屏" : "全屏显示图谱"}
+        type="button"
+      >
+        {immersive ? <Minimize2 size={14}/> : <Maximize2 size={14}/>}
+        {immersive ? "退出全屏" : "全屏"}
+      </button>
+    </>
+  );
+}
+
+function GraphStatus({ level, phase, onBack }: { level: DependencyGraphLevel; phase: GraphPhase; onBack: () => void }) {
   const content = phase === "preparing"
     ? ["正在准备关系", "整理当前层级的内部依赖"]
     : phase === "layout"
@@ -322,9 +594,10 @@ function GraphStatus({ level, phase, onBack }: { level: GraphLevel; phase: Graph
 
 function bindGraphInteractions(
   graph: Core,
-  level: GraphLevel,
+  level: DependencyGraphLevel,
   onInspect: (target: InspectTarget) => void,
-  setLevel: (value: GraphLevel) => void
+  setLevel: (value: DependencyGraphLevel) => void,
+  onFocus: (nodeId: string | null) => void
 ) {
   graph.on("mouseover", "node", (event) => event.target.addClass("is-hovered"));
   graph.on("mouseout", "node", (event) => event.target.removeClass("is-hovered"));
@@ -332,6 +605,7 @@ function bindGraphInteractions(
     const node = event.target;
     const path = node.data("path") as string | undefined;
     if (path) {
+      onFocus(node.id());
       onInspect({ path, title: projectBasename(path), source: "graph" });
       return;
     }
@@ -350,155 +624,6 @@ function bindGraphInteractions(
       context: edge.data("targetPath") ? `内部依赖：${edge.data("targetPath") as string}` : "跨目录依赖",
       source: "dependency"
     });
-  });
-}
-
-function buildDirectoryOverview(workspace: WorkspaceDetail, dependencies: ResolvedDependency[]): GraphModel {
-  const directoryFiles = new Map<string, number>();
-  for (const file of workspace.files) {
-    const directory = topLevelArea(file.path);
-    directoryFiles.set(directory, (directoryFiles.get(directory) || 0) + 1);
-  }
-  const edgeGroups = new Map<string, { source: string; target: string; count: number }>();
-  for (const dependency of dependencies) {
-    if (!dependency.sourceFile || !dependency.targetFile) continue;
-    const source = topLevelArea(dependency.sourceFile.path);
-    const target = topLevelArea(dependency.targetFile.path);
-    if (source === target) continue;
-    const key = `${source}|${target}`;
-    const current = edgeGroups.get(key);
-    if (current) current.count += 1;
-    else edgeGroups.set(key, { source, target, count: 1 });
-  }
-
-  const elements: ElementDefinition[] = [...directoryFiles.entries()].map(([directory, fileCount]) => ({
-    data: { id: directoryNodeId(directory), label: directory, directory, kind: "directory", fileCount }
-  }));
-  for (const edge of edgeGroups.values()) {
-    elements.push({ data: {
-      id: `directory-edge:${hashString(`${edge.source}|${edge.target}`)}`,
-      source: directoryNodeId(edge.source),
-      target: directoryNodeId(edge.target),
-      count: edge.count,
-      edgeLabel: edge.count > 1 ? String(edge.count) : "",
-      kind: "directory-edge"
-    }});
-  }
-  return {
-    elements,
-    fileCount: directoryFiles.size,
-    totalFileCount: workspace.files.length,
-    connectedFileCount: workspace.files.length,
-    isolatedFileCount: 0,
-    edgeCount: edgeGroups.size,
-    dense: directoryFiles.size > 24
-  };
-}
-
-function buildDirectoryFocus(workspace: WorkspaceDetail, dependencies: ResolvedDependency[], directory: string, showIsolated: boolean): GraphModel {
-  const files = workspace.files.filter((file) => topLevelArea(file.path) === directory);
-  const filePaths = new Set(files.map((file) => normalizeProjectPath(file.path)));
-  const connectedPaths = new Set<string>();
-  const edgeElements: ElementDefinition[] = [];
-  const boundaryDirectories = new Set<string>();
-  const edgeKeys = new Set<string>();
-  let edgeCount = 0;
-
-  for (const dependency of dependencies) {
-    if (!dependency.sourceFile || !dependency.targetFile) continue;
-    const sourceInside = filePaths.has(normalizeProjectPath(dependency.sourceFile.path));
-    const targetInside = filePaths.has(normalizeProjectPath(dependency.targetFile.path));
-    if (!sourceInside && !targetInside) continue;
-
-    if (sourceInside) connectedPaths.add(normalizeProjectPath(dependency.sourceFile.path));
-    if (targetInside) connectedPaths.add(normalizeProjectPath(dependency.targetFile.path));
-
-    const sourceDirectory = topLevelArea(dependency.sourceFile.path);
-    const targetDirectory = topLevelArea(dependency.targetFile.path);
-    if (!sourceInside) boundaryDirectories.add(sourceDirectory);
-    if (!targetInside) boundaryDirectories.add(targetDirectory);
-
-    const sourceId = sourceInside ? fileNodeId(dependency.sourceFile.path) : boundaryNodeId(sourceDirectory);
-    const targetId = targetInside ? fileNodeId(dependency.targetFile.path) : boundaryNodeId(targetDirectory);
-    const key = `${sourceId}|${targetId}|${dependency.kind}`;
-    if (edgeKeys.has(key)) continue;
-    edgeKeys.add(key);
-    edgeCount += 1;
-    edgeElements.push({ data: {
-      id: `edge:${hashString(key)}`,
-      source: sourceId,
-      target: targetId,
-      sourcePath: dependency.sourceFile.path,
-      targetPath: dependency.targetFile.path,
-      targetLabel: dependency.target,
-      line: dependency.line,
-      kind: "file-edge"
-    }});
-  }
-
-  const visibleFiles = showIsolated
-    ? files
-    : files.filter((file) => connectedPaths.has(normalizeProjectPath(file.path)));
-  const elements: ElementDefinition[] = visibleFiles.map((file) => fileElement(
-    file,
-    !connectedPaths.has(normalizeProjectPath(file.path))
-  ));
-  elements.push(...edgeElements);
-
-  for (const boundary of boundaryDirectories) {
-    elements.push({ data: {
-      id: boundaryNodeId(boundary),
-      label: boundary,
-      directory: boundary,
-      kind: "boundary"
-    }});
-  }
-  const isolatedFileCount = Math.max(0, files.length - connectedPaths.size);
-  return {
-    elements,
-    fileCount: visibleFiles.length,
-    totalFileCount: files.length,
-    connectedFileCount: connectedPaths.size,
-    isolatedFileCount,
-    edgeCount,
-    dense: visibleFiles.length + boundaryDirectories.size > 24
-  };
-}
-
-function fileElement(file: WorkspaceFile, isolated = false): ElementDefinition {
-  return { data: {
-    id: fileNodeId(file.path),
-    label: projectBasename(file.path),
-    path: file.path,
-    language: file.language || "文本",
-    kind: "file",
-    isolated,
-    risk: file.metrics.risk_count
-  }};
-}
-
-function applyGraphFilter(graph: Core, query: string, language: string, mode: GraphLevel["mode"]) {
-  const needle = query.trim().toLocaleLowerCase();
-  graph.batch(() => {
-    graph.nodes().forEach((node) => {
-      if (mode === "overview" || node.data("kind") === "boundary") {
-        node.style("display", "element");
-        return;
-      }
-      const matches = (language === "all" || node.data("language") === language)
-        && (!needle || `${node.data("label")} ${node.data("path")}`.toLocaleLowerCase().includes(needle));
-      node.style("display", matches ? "element" : "none");
-      if (needle && matches) node.addClass("is-search-match");
-      else node.removeClass("is-search-match");
-    });
-    graph.edges().forEach((edge) => {
-      edge.style("display", edge.source().visible() && edge.target().visible() ? "element" : "none");
-    });
-    if (mode === "directory") {
-      graph.nodes("[kind = 'boundary']").forEach((node) => {
-        node.style("display", node.connectedEdges().filter(":visible").length ? "element" : "none");
-      });
-    }
   });
 }
 
@@ -536,25 +661,4 @@ function denseGridColumns(nodeCount: number, width: number, height: number): num
   if (nodeCount <= 1) return 1;
   const aspect = Math.max(0.7, Math.min(2.8, width / Math.max(height, 1)));
   return Math.max(2, Math.ceil(Math.sqrt(nodeCount * aspect)));
-}
-
-function directoryNodeId(directory: string): string {
-  return `directory:${hashString(directory.toLocaleLowerCase())}`;
-}
-
-function boundaryNodeId(directory: string): string {
-  return `boundary:${hashString(directory.toLocaleLowerCase())}`;
-}
-
-function fileNodeId(path: string): string {
-  return `file:${hashString(normalizeProjectPath(path))}`;
-}
-
-function hashString(value: string): string {
-  let hash = 2166136261;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(36);
 }

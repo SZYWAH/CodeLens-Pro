@@ -108,6 +108,7 @@ fn run_acceptance(workspace_path: &Path, test_root: &Path) -> anyhow::Result<Val
     let analysis = futures::executor::block_on(app.analyze_workspace_stream(
         workspace.summary.id.clone(),
         Some(false),
+        None,
         |_| Ok(()),
     ))
     .context("generate local workspace report")?;

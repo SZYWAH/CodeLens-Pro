@@ -356,12 +356,20 @@ pub fn load_public_settings(path: &Path) -> anyhow::Result<Settings> {
     let api_key_set = get_setting(&connection, "llm_api_key")?
         .map(|value| !value.trim().is_empty())
         .unwrap_or(false);
+    let llm_state = if !enable_llm {
+        "disabled"
+    } else if api_key_set {
+        "configured"
+    } else {
+        "missing_key"
+    };
 
     Ok(Settings {
         enable_llm,
         api_base,
         model,
         api_key_set,
+        llm_state: llm_state.to_string(),
     })
 }
 
@@ -371,36 +379,68 @@ pub fn load_api_key(path: &Path) -> anyhow::Result<Option<String>> {
 }
 
 pub fn save_settings(path: &Path, update: SettingsUpdate) -> anyhow::Result<()> {
-    let connection = Connection::open(path)?;
+    let mut connection = Connection::open(path)?;
+    let tx = connection.transaction()?;
     let defaults = Settings::default();
-    let api_base = if update.api_base.trim().is_empty() {
-        defaults.api_base.as_str()
+    let existing_key = get_setting(&tx, "llm_api_key")?
+        .filter(|value| !value.trim().is_empty());
+    let next_key = if update.clear_api_key {
+        None
     } else {
-        update.api_base.trim()
+        update
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or(existing_key)
     };
-    let model = if update.model.trim().is_empty() {
-        defaults.model.as_str()
+    let enable_llm = update.enable_llm && !update.clear_api_key;
+    let api_base = if !enable_llm && update.api_base.trim().is_empty() {
+        defaults.api_base
     } else {
-        update.model.trim()
+        update.api_base.trim().to_string()
+    };
+    let model = if !enable_llm && update.model.trim().is_empty() {
+        defaults.model
+    } else {
+        update.model.trim().to_string()
     };
 
-    set_setting(
-        &connection,
-        "enable_llm",
-        if update.enable_llm { "true" } else { "false" },
-    )?;
-    set_setting(&connection, "api_base", api_base)?;
-    set_setting(&connection, "model", model)?;
-
-    if update.clear_api_key {
-        connection.execute("DELETE FROM settings WHERE key = 'llm_api_key'", [])?;
-    } else if let Some(api_key) = update.api_key {
-        let trimmed = api_key.trim();
-        if !trimmed.is_empty() {
-            set_setting(&connection, "llm_api_key", trimmed)?;
+    if enable_llm {
+        validate_llm_api_base(&api_base)?;
+        if model.trim().is_empty() {
+            return Err(anyhow!("启用 LLM 时模型名称不能为空。"));
+        }
+        if next_key.is_none() {
+            return Err(anyhow!("启用 LLM 时必须配置 API Key。"));
         }
     }
 
+    set_setting(
+        &tx,
+        "enable_llm",
+        if enable_llm { "true" } else { "false" },
+    )?;
+    set_setting(&tx, "api_base", &api_base)?;
+    set_setting(&tx, "model", &model)?;
+
+    if update.clear_api_key {
+        tx.execute("DELETE FROM settings WHERE key = 'llm_api_key'", [])?;
+    } else if let Some(api_key) = next_key {
+        set_setting(&tx, "llm_api_key", &api_key)?;
+    }
+
+    tx.commit()?;
+    Ok(())
+}
+
+fn validate_llm_api_base(value: &str) -> anyhow::Result<()> {
+    let parsed = reqwest::Url::parse(value)
+        .map_err(|_| anyhow!("API Base 必须是有效的 HTTP 或 HTTPS 地址。"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(anyhow!("API Base 必须是有效的 HTTP 或 HTTPS 地址。"));
+    }
     Ok(())
 }
 
@@ -472,12 +512,27 @@ pub fn save_report(path: &Path, report: &ReportDetail) -> anyhow::Result<()> {
 
     tx.execute(
         r#"
-        INSERT OR REPLACE INTO reports (
+        INSERT INTO reports (
             id, title, language, code_excerpt, summary, full_report, analysis_source,
             risks_json, suggestions_json, metrics_json, report_type, risk_level, file_count,
             metadata_json, created_at
         )
         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
+        ON CONFLICT(id) DO UPDATE SET
+            title = excluded.title,
+            language = excluded.language,
+            code_excerpt = excluded.code_excerpt,
+            summary = excluded.summary,
+            full_report = excluded.full_report,
+            analysis_source = excluded.analysis_source,
+            risks_json = excluded.risks_json,
+            suggestions_json = excluded.suggestions_json,
+            metrics_json = excluded.metrics_json,
+            report_type = excluded.report_type,
+            risk_level = excluded.risk_level,
+            file_count = excluded.file_count,
+            metadata_json = excluded.metadata_json,
+            created_at = excluded.created_at
         "#,
         params![
             report.id,
@@ -675,63 +730,52 @@ pub fn delete_report(path: &Path, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub fn upsert_chat_session(
+pub fn save_chat_exchange(
     path: &Path,
-    session_id: Option<String>,
+    requested_session_id: Option<String>,
     title: String,
     context_report_id: Option<String>,
+    user_content: &str,
+    assistant_content: &str,
 ) -> anyhow::Result<String> {
-    let connection = Connection::open(path)?;
+    if user_content.trim().is_empty() || assistant_content.trim().is_empty() {
+        return Err(anyhow!("对话消息不能为空。"));
+    }
+
+    let mut connection = Connection::open(path)?;
+    let tx = connection.transaction()?;
     let now = Utc::now().to_rfc3339();
-    if let Some(id) = session_id {
-        let exists = connection
+    let existing_id = match requested_session_id {
+        Some(id) if !id.trim().is_empty() => tx
             .query_row(
                 "SELECT id FROM chat_sessions WHERE id = ?1",
                 params![id],
                 |row| row.get::<_, String>(0),
             )
-            .optional()?;
-        if exists.is_some() {
-            connection.execute(
-                "UPDATE chat_sessions SET title = ?1, context_report_id = ?2, updated_at = ?3 WHERE id = ?4",
-                params![title, context_report_id, now, id],
-            )?;
-            return Ok(id);
-        }
+            .optional()?,
+        _ => None,
+    };
+    let session_id = existing_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+
+    let updated = tx.execute(
+        "UPDATE chat_sessions SET title = ?1, context_report_id = ?2, updated_at = ?3 WHERE id = ?4",
+        params![title, context_report_id, now, session_id],
+    )?;
+    if updated == 0 {
+        tx.execute(
+            "INSERT INTO chat_sessions (id, title, context_report_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![session_id, title, context_report_id, now, now],
+        )?;
     }
 
-    let id = Uuid::new_v4().to_string();
-    connection.execute(
-        "INSERT INTO chat_sessions (id, title, context_report_id, created_at, updated_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![id, title, context_report_id, now, now],
-    )?;
-    Ok(id)
-}
-
-pub fn save_chat_message(
-    path: &Path,
-    session_id: &str,
-    role: &str,
-    content: &str,
-) -> anyhow::Result<ChatMessageItem> {
-    let connection = Connection::open(path)?;
-    let now = Utc::now().to_rfc3339();
-    let item = ChatMessageItem {
-        id: Uuid::new_v4().to_string(),
-        session_id: session_id.to_string(),
-        role: role.to_string(),
-        content: content.to_string(),
-        created_at: now.clone(),
-    };
-    connection.execute(
-        "INSERT INTO chat_messages (id, session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![item.id, item.session_id, item.role, item.content, item.created_at],
-    )?;
-    connection.execute(
-        "UPDATE chat_sessions SET updated_at = ?1 WHERE id = ?2",
-        params![now, session_id],
-    )?;
-    Ok(item)
+    for (role, content) in [("user", user_content), ("assistant", assistant_content)] {
+        tx.execute(
+            "INSERT INTO chat_messages (id, session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![Uuid::new_v4().to_string(), session_id, role, content, now],
+        )?;
+    }
+    tx.commit()?;
+    Ok(session_id)
 }
 
 pub fn save_chat_session_detail(path: &Path, detail: &ChatSessionDetail) -> anyhow::Result<()> {
@@ -812,8 +856,12 @@ pub fn list_chat_sessions(
 }
 
 pub fn get_chat_session(path: &Path, id: &str) -> anyhow::Result<ChatSessionDetail> {
+    find_chat_session(path, id)?.ok_or_else(|| anyhow!("chat session not found: {id}"))
+}
+
+pub fn find_chat_session(path: &Path, id: &str) -> anyhow::Result<Option<ChatSessionDetail>> {
     let connection = Connection::open(path)?;
-    let mut detail = connection
+    let detail = connection
         .query_row(
             "SELECT id, title, context_report_id, created_at, updated_at FROM chat_sessions WHERE id = ?1",
             params![id],
@@ -828,10 +876,12 @@ pub fn get_chat_session(path: &Path, id: &str) -> anyhow::Result<ChatSessionDeta
                 })
             },
         )
-        .optional()?
-        .ok_or_else(|| anyhow!("chat session not found: {id}"))?;
+        .optional()?;
+    let Some(mut detail) = detail else {
+        return Ok(None);
+    };
     detail.messages = list_chat_messages_for_connection(&connection, id)?;
-    Ok(detail)
+    Ok(Some(detail))
 }
 
 pub fn delete_chat_session(path: &Path, id: &str) -> anyhow::Result<()> {
@@ -1060,10 +1110,22 @@ pub fn get_code_map(path: &Path, workspace_id: &str) -> anyhow::Result<CodeMap> 
     Ok(workspace::build_code_map(workspace_id, &files, symbols, dependencies))
 }
 
-pub fn save_findings(path: &Path, findings: &[Finding]) -> anyhow::Result<()> {
+pub fn replace_findings_for_report(
+    path: &Path,
+    report_id: &str,
+    findings: &[Finding],
+) -> anyhow::Result<()> {
     let mut connection = Connection::open(path)?;
+    connection.execute_batch("PRAGMA foreign_keys = ON;")?;
     let tx = connection.transaction()?;
+    tx.execute(
+        "DELETE FROM findings WHERE report_id = ?1",
+        params![report_id],
+    )?;
     for finding in findings {
+        if finding.report_id.as_deref() != Some(report_id) {
+            return Err(anyhow!("finding report id does not match replacement report"));
+        }
         insert_finding_tx(&tx, finding)?;
     }
     tx.commit()?;

@@ -136,7 +136,7 @@ export function CodeWorkbenchView(props: {
         <WorkbenchCommandBar
           action={(
             <button className="primary-button" onClick={analyzeSingleFile} disabled={props.singleBusy || !props.code.trim()} type="button">
-              {props.singleBusy ? <Loader2 className="spin" size={17} /> : <Play size={17} />}{props.singleBusy ? "正在生成" : "生成报告"}
+              {props.singleBusy ? <Loader2 className="spin" size={17} /> : <Play size={17} />}{props.singleBusy ? "正在生成" : props.report?.analysis_source === "local_fallback" ? "重试 AI" : "生成报告"}
             </button>
           )}
           ariaLabel="单文件分析配置"

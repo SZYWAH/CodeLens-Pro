@@ -26,8 +26,8 @@ pub use models::{
     AnalysisResponse, AppHealth, CardMaterial, ChatMessageItem, ChatSessionDetail,
     ChatSessionSummary, ChatStreamRequest, CodeMap, CodeSymbol, DailyLog, DailySummary,
     DiffAnalyzeRequest, FileDependency, Finding, LanguageStat, LearningCalendarItem, LearningCard,
-    LearningCardCandidate, LearningCardCreate, LearningCenterData, LlmTestResult, ModelProfile,
-    ModelProfileInput, ProductArchiveImportResult, ProductArchiveResult, ProjectAnalyzeRequest,
+    LearningCardCandidate, LearningCardCreate, LearningCenterData, LlmTestRequest, LlmTestResult,
+    ModelProfile, ModelProfileInput, ProductArchiveImportResult, ProductArchiveResult, ProjectAnalyzeRequest,
     ProjectFileInput, ProjectGuide, ProjectGuideItem, ProjectImportResult, ReportDetail,
     ReportFile, ReportMetrics, ReportSummary, Settings, SettingsUpdate, TraceabilityCounts,
     TraceabilityLink, TraceabilityNode, TraceabilitySnapshot,
@@ -35,6 +35,8 @@ pub use models::{
     WorkspaceBridgeManifestResult, WorkspaceBridgeStatus, WorkspaceDetail, WorkspaceFile,
     WorkspaceFileHotspot, WorkspaceSummary,
 };
+
+pub use llm::{classify_llm_error_code, classify_llm_error_message};
 
 #[derive(Clone)]
 pub struct CoreApp {
@@ -99,7 +101,7 @@ impl CoreApp {
                 .map(|_| "SQLite ready".to_string())
                 .unwrap_or_else(|err| format!("SQLite unavailable. See logs for details: {err}")),
             llm_enabled: settings.enable_llm,
-            llm_configured: settings.api_key_set,
+            llm_configured: settings.llm_state == "configured",
         }
     }
 
@@ -163,14 +165,9 @@ impl CoreApp {
         let settings = self.settings()?;
         let api_key = storage::load_api_key(&self.database_path)?;
         let mut local_report = analysis::analyze_locally(&request);
-        let has_custom_title = request
-            .title
-            .as_deref()
-            .is_some_and(|value| !value.trim().is_empty());
         let mut warnings = Vec::new();
-        let mut llm_report_ready = false;
 
-        let should_try_llm = request.use_llm.unwrap_or(true) && settings.enable_llm;
+        let should_try_llm = request.use_llm.unwrap_or(true) && settings.llm_state == "configured";
         if should_try_llm {
             match api_key.as_deref() {
                 Some(key) if !key.trim().is_empty() => {
@@ -178,7 +175,6 @@ impl CoreApp {
                         Ok(ai_report) => {
                             local_report.full_report = ai_report;
                             local_report.analysis_source = "llm".to_string();
-                            llm_report_ready = true;
                         }
                         Err(err) => {
                             self.log_event("llm", &format!("LLM failed, using local fallback: {err}"));
@@ -188,25 +184,19 @@ impl CoreApp {
                     }
                 }
                 _ => {
-                    self.log_event("llm", "LLM enabled but API Key is not configured");
-                    warnings.push("已启用 LLM，但尚未配置 API Key；本次使用本地分析。".to_string());
-                    local_report.analysis_source = "local_fallback".to_string();
+                    warnings.push("LLM 配置已失效；本次直接使用本地分析。".to_string());
                 }
             }
+        } else if request.use_llm.unwrap_or(true) && settings.llm_state == "missing_key" {
+            warnings.push("尚未配置 API Key；本次直接使用本地分析。".to_string());
         }
 
-        if !has_custom_title && llm_report_ready {
-            if let Some(key) = api_key.as_deref().filter(|value| !value.trim().is_empty()) {
-                match llm::generate_report_title(&settings, key, &request, &local_report, &local_report.title).await {
-                    Ok(title) => local_report.title = title,
-                    Err(err) => {
-                        self.log_event("llm", &format!("report title failed, using local fallback: {err}"));
-                        warnings.push("报告正文已生成；自动命名失败，已使用本地语义标题。".to_string());
-                    }
-                }
-            }
-        }
-        local_report.title = storage::unique_report_title(&self.database_path, &local_report.title, None)?;
+        self.apply_retry_report_id(&mut local_report, request.retry_report_id.as_deref())?;
+        local_report.title = storage::unique_report_title(
+            &self.database_path,
+            &local_report.title,
+            request.retry_report_id.as_deref(),
+        )?;
 
         storage::save_report(&self.database_path, &local_report)?;
         self.record_activity("report", "生成代码分析报告", &local_report.title, Some("report"), Some(&local_report.id));
@@ -235,6 +225,10 @@ impl CoreApp {
         if request.files.is_empty() {
             return Err(anyhow!("没有提供可分析的项目文件。"));
         }
+        self.validate_project_retry_scope(
+            request.retry_report_id.as_deref(),
+            request.workspace_id.as_deref(),
+        )?;
         self.log_event(
             "analysis",
             &format!(
@@ -254,6 +248,7 @@ impl CoreApp {
                 on_chunk,
             )
             .await?;
+        self.apply_retry_report_id(&mut report, request.retry_report_id.as_deref())?;
         storage::save_report(&self.database_path, &report)?;
         self.record_activity("report", "生成项目分析报告", &report.title, Some("report"), Some(&report.id));
         Ok(AnalysisResponse { report, warnings })
@@ -288,6 +283,7 @@ impl CoreApp {
                 on_chunk,
             )
             .await?;
+        self.apply_retry_report_id(&mut report, request.retry_report_id.as_deref())?;
         storage::save_report(&self.database_path, &report)?;
         self.record_activity("report", "生成代码对比报告", &report.title, Some("report"), Some(&report.id));
         Ok(AnalysisResponse { report, warnings })
@@ -314,13 +310,14 @@ impl CoreApp {
             return Err(anyhow!("设置中尚未启用 LLM。"));
         }
 
-        let title = chat_title(message);
-        let session_id =
-            storage::upsert_chat_session(&self.database_path, request.session_id.clone(), title, request.context_report_id.clone())?;
-        storage::save_chat_message(&self.database_path, &session_id, "user", message)?;
-
-        let history = storage::get_chat_session(&self.database_path, &session_id)?
-            .messages
+        let existing_session = match request.session_id.as_deref() {
+            Some(id) => storage::find_chat_session(&self.database_path, id)?,
+            None => None,
+        };
+        let history = existing_session
+            .as_ref()
+            .map(|session| session.messages.clone())
+            .unwrap_or_default()
             .into_iter()
             .filter(|item| item.role == "user" || item.role == "assistant")
             .map(|item| llm::ChatMessage {
@@ -335,17 +332,44 @@ impl CoreApp {
             Ok(())
         })
         .await?;
-        storage::save_chat_message(&self.database_path, &session_id, "assistant", &assistant_text)?;
-        self.record_activity("chat", "AI 对话回复", message, Some("chat_session"), Some(&session_id));
+        let title = existing_session
+            .as_ref()
+            .map(|session| session.title.clone())
+            .unwrap_or_else(|| chat_title(message));
+        let context_report_id = request
+            .context_report_id
+            .clone()
+            .or_else(|| existing_session.as_ref().and_then(|session| session.context_report_id.clone()));
+        let session_id = storage::save_chat_exchange(
+            &self.database_path,
+            request.session_id.clone(),
+            title,
+            context_report_id,
+            message,
+            &assistant_text,
+        )?;
+        self.record_activity(
+            "chat",
+            "AI 对话回复",
+            "对话已完成",
+            Some("chat_session"),
+            Some(&session_id),
+        );
         self.log_event("chat", &format!("chat message saved session_id={session_id}"));
         storage::get_chat_session(&self.database_path, &session_id)
     }
 
-    pub async fn test_llm_connection(&self, api_key: Option<String>) -> anyhow::Result<LlmTestResult> {
-        let settings = self.settings()?;
-        let key = match api_key {
-            Some(value) if !value.trim().is_empty() => Some(value),
-            _ => storage::load_api_key(&self.database_path)?,
+    pub async fn test_llm_connection(&self, request: LlmTestRequest) -> anyhow::Result<LlmTestResult> {
+        let key = match request.api_key {
+            Some(value) => (!value.trim().is_empty()).then_some(value),
+            None => storage::load_api_key(&self.database_path)?,
+        };
+        let settings = Settings {
+            enable_llm: true,
+            api_base: request.api_base.trim().to_string(),
+            model: request.model.trim().to_string(),
+            api_key_set: key.is_some(),
+            llm_state: if key.is_some() { "configured" } else { "missing_key" }.to_string(),
         };
         Ok(llm::test_connection(&settings, key).await)
     }
@@ -461,17 +485,22 @@ impl CoreApp {
         &self,
         workspace_id: String,
         use_llm: Option<bool>,
+        retry_report_id: Option<String>,
         on_chunk: F,
     ) -> anyhow::Result<AnalysisResponse>
     where
         F: FnMut(&str) -> anyhow::Result<()> + Send,
     {
+        let is_retry = retry_report_id
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty());
         let detail = storage::get_workspace(&self.database_path, &workspace_id)?;
         if detail.files.is_empty() {
             return Err(anyhow!("Workspace has no files to analyze."));
         }
         let request = ProjectAnalyzeRequest {
             project_name: detail.summary.name.clone(),
+            workspace_id: Some(workspace_id.clone()),
             title: Some(format!("{} workspace review", detail.summary.name)),
             files: detail
                 .files
@@ -483,7 +512,12 @@ impl CoreApp {
                 })
                 .collect(),
             use_llm,
+            retry_report_id,
         };
+        self.validate_project_retry_scope(
+            request.retry_report_id.as_deref(),
+            Some(&workspace_id),
+        )?;
         let mut report = self.build_project_report(&request)?;
         report.report_type = "project".to_string();
         report.metadata_json = json!({
@@ -501,13 +535,16 @@ impl CoreApp {
                 on_chunk,
             )
             .await?;
+        self.apply_retry_report_id(&mut report, request.retry_report_id.as_deref())?;
         storage::save_report(&self.database_path, &report)?;
         self.record_activity("report", "生成工作区审查报告", &report.title, Some("report"), Some(&report.id));
-        let mut findings = Vec::new();
-        for file in &detail.files {
-            findings.extend(workspace::build_findings(file, Some(report.id.clone())));
+        if !is_retry {
+            let mut findings = Vec::new();
+            for file in &detail.files {
+                findings.extend(workspace::build_findings(file, Some(report.id.clone())));
+            }
+            storage::replace_findings_for_report(&self.database_path, &report.id, &findings)?;
         }
-        storage::save_findings(&self.database_path, &findings)?;
         Ok(AnalysisResponse { report, warnings })
     }
 
@@ -572,7 +609,7 @@ impl CoreApp {
         let mut source = "local".to_string();
         if use_llm.unwrap_or(true) {
             let settings = self.settings()?;
-            if settings.enable_llm {
+            if settings.llm_state == "configured" {
                 if let Some(key) = storage::load_api_key(&self.database_path)?.filter(|value| !value.trim().is_empty()) {
                     let messages = llm::learning_material_messages(&card);
                     match llm::complete_chat(&settings, &key, &messages).await {
@@ -1629,6 +1666,33 @@ impl CoreApp {
         let _ = append_log(&self.logs_dir.join("codelens-next.log"), area, message);
     }
 
+    pub fn log_ai_task_event(
+        &self,
+        request_id: &str,
+        task: &str,
+        phase: &str,
+        elapsed_ms: u128,
+        chunk_count: u64,
+        source: Option<&str>,
+        error_code: Option<&str>,
+    ) {
+        self.log_event(
+            "ai_task",
+            &format!(
+                "request_id={} task={} phase={} elapsed_ms={} chunks={} source={} error_code={}",
+                safe_log_token(request_id),
+                safe_log_token(task),
+                safe_log_token(phase),
+                elapsed_ms,
+                chunk_count,
+                source.map(safe_log_token).unwrap_or_else(|| "-".to_string()),
+                error_code
+                    .map(safe_log_token)
+                    .unwrap_or_else(|| "-".to_string()),
+            ),
+        );
+    }
+
     fn record_activity(
         &self,
         event_type: &str,
@@ -2049,7 +2113,11 @@ impl CoreApp {
             report_type: "project".to_string(),
             risk_level,
             file_count: report_files.len(),
-            metadata_json: json!({ "project_name": request.project_name }).to_string(),
+            metadata_json: json!({
+                "project_name": request.project_name,
+                "workspace_id": request.workspace_id
+            })
+            .to_string(),
             risks: all_risks,
             suggestions,
             metrics: total_metrics,
@@ -2072,7 +2140,7 @@ impl CoreApp {
         let settings = self.settings()?;
         let api_key = storage::load_api_key(&self.database_path)?;
         let mut warnings = Vec::new();
-        if use_llm && settings.enable_llm {
+        if use_llm && settings.llm_state == "configured" {
             if let Some(key) = api_key.filter(|value| !value.trim().is_empty()) {
                 let messages = llm::report_messages(title, prompt);
                 match llm::stream_chat(&settings, &key, &messages, |chunk| {
@@ -2092,14 +2160,67 @@ impl CoreApp {
                         report.analysis_source = "local_fallback".to_string();
                     }
                 }
-            } else {
-                warnings.push("已启用 LLM，但尚未配置 API Key；本次使用本地报告。".to_string());
-                report.analysis_source = "local_fallback".to_string();
             }
+        } else if use_llm && settings.llm_state == "missing_key" {
+            warnings.push("尚未配置 API Key；本次直接使用本地报告。".to_string());
         }
 
         stream_text(&report.full_report, &mut on_chunk)?;
         Ok(warnings)
+    }
+
+    fn apply_retry_report_id(
+        &self,
+        report: &mut ReportDetail,
+        retry_report_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let Some(id) = retry_report_id.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Ok(());
+        };
+        let existing = storage::get_report(&self.database_path, id)
+            .with_context(|| format!("无法重试不存在的报告：{id}"))?;
+        if existing.report_type != report.report_type {
+            return Err(anyhow!(
+                "重试报告类型不匹配：期望 {}，实际 {}。",
+                report.report_type,
+                existing.report_type
+            ));
+        }
+        report.id = existing.id;
+        report.created_at = existing.created_at;
+        for file in &mut report.files {
+            file.report_id = report.id.clone();
+        }
+        Ok(())
+    }
+
+    fn validate_project_retry_scope(
+        &self,
+        retry_report_id: Option<&str>,
+        expected_workspace_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let Some(id) = retry_report_id.map(str::trim).filter(|value| !value.is_empty()) else {
+            return Ok(());
+        };
+        let existing = storage::get_report(&self.database_path, id)
+            .with_context(|| format!("无法重试不存在的报告：{id}"))?;
+        let existing_workspace_id = serde_json::from_str::<serde_json::Value>(
+            &existing.metadata_json,
+        )
+        .ok()
+        .and_then(|value| {
+            value
+                .get("workspace_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+        let expected_workspace_id = expected_workspace_id
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if existing_workspace_id.as_deref() != expected_workspace_id {
+            return Err(anyhow!("重试报告不属于当前工作区或项目作用域。"));
+        }
+        Ok(())
     }
 }
 
@@ -2120,6 +2241,20 @@ where
         on_chunk(&String::from_utf8_lossy(chunk))?;
     }
     Ok(())
+}
+
+fn safe_log_token(value: &str) -> String {
+    value
+        .chars()
+        .take(96)
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.' | ':') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect()
 }
 
 fn chat_title(message: &str) -> String {
@@ -3008,6 +3143,207 @@ mod tests {
     }
 
     #[test]
+    fn validates_settings_transactionally_and_preserves_existing_key() {
+        let root = test_root();
+        let app = CoreApp::initialize(&root).expect("core app initializes");
+
+        let missing_key = app.save_settings(SettingsUpdate {
+            enable_llm: true,
+            api_base: "https://example.test/v1".to_string(),
+            model: "review-model".to_string(),
+            api_key: None,
+            clear_api_key: false,
+        });
+        assert!(missing_key.is_err());
+        assert_eq!(app.settings().expect("default settings").llm_state, "disabled");
+
+        let configured = app
+            .save_settings(SettingsUpdate {
+                enable_llm: true,
+                api_base: "https://example.test/v1".to_string(),
+                model: "review-model".to_string(),
+                api_key: Some("stored-secret".to_string()),
+                clear_api_key: false,
+            })
+            .expect("valid settings");
+        assert_eq!(configured.llm_state, "configured");
+
+        let retained = app
+            .save_settings(SettingsUpdate {
+                enable_llm: true,
+                api_base: "https://draft.example/v1".to_string(),
+                model: "draft-model".to_string(),
+                api_key: Some("   ".to_string()),
+                clear_api_key: false,
+            })
+            .expect("blank key retains stored key");
+        assert!(retained.api_key_set);
+        assert_eq!(retained.model, "draft-model");
+        let explicit_blank_key = futures::executor::block_on(app.test_llm_connection(
+            LlmTestRequest {
+                api_base: retained.api_base.clone(),
+                model: retained.model.clone(),
+                api_key: Some(String::new()),
+            },
+        ))
+        .expect("test explicit blank key");
+        assert!(!explicit_blank_key.ok);
+        assert_eq!(explicit_blank_key.error_code.as_deref(), Some("configuration"));
+
+        let reopened = CoreApp::initialize(&root).expect("reopen configured app");
+        let persisted = reopened.settings().expect("persisted settings");
+        assert_eq!(persisted.llm_state, "configured");
+        assert_eq!(persisted.api_base, "https://draft.example/v1");
+        assert_eq!(persisted.model, "draft-model");
+
+        for (api_base, model) in [
+            ("file:///tmp/model", "draft-model"),
+            ("https://draft.example/v1", ""),
+        ] {
+            assert!(app
+                .save_settings(SettingsUpdate {
+                    enable_llm: true,
+                    api_base: api_base.to_string(),
+                    model: model.to_string(),
+                    api_key: None,
+                    clear_api_key: false,
+                })
+                .is_err());
+        }
+        let after_failed_updates = app.settings().expect("settings after rollback");
+        assert_eq!(after_failed_updates.api_base, "https://draft.example/v1");
+        assert_eq!(after_failed_updates.model, "draft-model");
+
+        let cleared = app
+            .save_settings(SettingsUpdate {
+                enable_llm: true,
+                api_base: after_failed_updates.api_base,
+                model: after_failed_updates.model,
+                api_key: None,
+                clear_api_key: true,
+            })
+            .expect("clear key");
+        assert!(!cleared.enable_llm);
+        assert!(!cleared.api_key_set);
+        assert_eq!(cleared.llm_state, "disabled");
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn saves_chat_exchange_atomically() {
+        let root = test_root();
+        let app = CoreApp::initialize(&root).expect("core app initializes");
+        let session_id = storage::save_chat_exchange(
+            &app.database_path,
+            None,
+            "原子对话".to_string(),
+            None,
+            "用户问题",
+            "助手回答",
+        )
+        .expect("save exchange");
+        let session = app.get_chat_session(session_id).expect("load session");
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].role, "user");
+        assert_eq!(session.messages[1].role, "assistant");
+
+        assert!(storage::save_chat_exchange(
+            &app.database_path,
+            None,
+            "不完整对话".to_string(),
+            None,
+            "用户问题",
+            "",
+        )
+        .is_err());
+        assert_eq!(app.list_chat_sessions(None).expect("sessions").len(), 1);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn model_failure_falls_back_for_review_without_saving_partial_chat() {
+        let root = test_root();
+        let app = CoreApp::initialize(&root).expect("core app initializes");
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve local port");
+        let address = listener.local_addr().expect("local address");
+        drop(listener);
+        app.save_settings(SettingsUpdate {
+            enable_llm: true,
+            api_base: format!("http://{address}/v1"),
+            model: "unavailable-model".to_string(),
+            api_key: Some("test-only-key".to_string()),
+            clear_api_key: false,
+        })
+        .expect("save unavailable mock settings");
+
+        let review = app
+            .analyze_code(AnalysisRequest {
+                code: "function sample() { return 1; }".to_string(),
+                language: Some("TypeScript".to_string()),
+                title: None,
+                source_label: Some("src/sample.ts".to_string()),
+                mode_group: Some("function".to_string()),
+                mode: Some("risk_review".to_string()),
+                mode_label: Some("风险审查".to_string()),
+                use_llm: Some(true),
+                retry_report_id: None,
+            })
+            .await
+            .expect("review falls back");
+        assert_eq!(review.report.analysis_source, "local_fallback");
+        assert!(!review.warnings.is_empty());
+
+        let chat = app
+            .send_chat_message_stream(
+                ChatStreamRequest {
+                    session_id: None,
+                    message: "this prompt must not be persisted".to_string(),
+                    context_report_id: None,
+                    context_kind: None,
+                    context_id: None,
+                },
+                |_| Ok(()),
+            )
+            .await;
+        assert!(chat.is_err());
+        assert!(app.list_chat_sessions(None).expect("chat sessions").is_empty());
+        let log_text = fs::read_to_string(app.logs_dir_path().join("codelens-next.log"))
+            .expect("read log");
+        assert!(!log_text.contains("this prompt must not be persisted"));
+        assert!(!log_text.contains("test-only-key"));
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn retry_overwrites_same_report_id_without_creating_duplicate() {
+        let root = test_root();
+        let app = CoreApp::initialize(&root).expect("core app initializes");
+        let request = |code: &str, retry_report_id: Option<String>| AnalysisRequest {
+            code: code.to_string(),
+            language: Some("TypeScript".to_string()),
+            title: Some("可重试报告".to_string()),
+            source_label: Some("src/retry.ts".to_string()),
+            mode_group: Some("function".to_string()),
+            mode: Some("risk_review".to_string()),
+            mode_label: Some("风险审查".to_string()),
+            use_llm: Some(false),
+            retry_report_id,
+        };
+        let first = futures::executor::block_on(app.analyze_code(request("const a = 1;", None)))
+            .expect("first report")
+            .report;
+        let retried = futures::executor::block_on(app.analyze_code(request(
+            "const a = unsafeInput;",
+            Some(first.id.clone()),
+        )))
+        .expect("retried report")
+        .report;
+        assert_eq!(retried.id, first.id);
+        assert_eq!(app.list_reports(None).expect("reports").len(), 1);
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn exports_report_markdown_and_html() {
         let root = test_root();
         let app = CoreApp::initialize(&root).expect("core app initializes");
@@ -3020,6 +3356,7 @@ mod tests {
             mode: Some("risk_review".to_string()),
             mode_label: Some("风险审查".to_string()),
             use_llm: Some(false),
+            retry_report_id: None,
         });
         storage::save_report(&app.database_path, &report).expect("report save");
 
@@ -3045,6 +3382,7 @@ mod tests {
             mode: Some("risk_review".to_string()),
             mode_label: Some("风险审查".to_string()),
             use_llm: Some(false),
+            retry_report_id: None,
         });
         let second = analysis::analyze_locally(&AnalysisRequest {
             code: "function second() { return 2; }".to_string(),
@@ -3055,6 +3393,7 @@ mod tests {
             mode: Some("risk_review".to_string()),
             mode_label: Some("风险审查".to_string()),
             use_llm: Some(false),
+            retry_report_id: None,
         });
         storage::save_report(&app.database_path, &first).expect("save first report");
         storage::save_report(&app.database_path, &second).expect("save second report");
@@ -3078,6 +3417,7 @@ mod tests {
         let app = CoreApp::initialize(&root).expect("core app initializes");
         let request = ProjectAnalyzeRequest {
             project_name: "样例项目".to_string(),
+            workspace_id: None,
             title: None,
             files: vec![ProjectFileInput {
                 path: "src/main.ts".to_string(),
@@ -3085,6 +3425,7 @@ mod tests {
                 language: Some("TypeScript".to_string()),
             }],
             use_llm: Some(false),
+            retry_report_id: None,
         };
         let mut report = app.build_project_report(&request).expect("project report");
         report.full_report.push_str("\n");
@@ -3099,16 +3440,17 @@ mod tests {
     fn chat_session_roundtrip() {
         let root = test_root();
         let app = CoreApp::initialize(&root).expect("core app initializes");
-        let session_id = storage::upsert_chat_session(
+        let session_id = storage::save_chat_exchange(
             &app.database_path,
             None,
             "Hello".to_string(),
             None,
+            "hello",
+            "hello back",
         )
         .expect("session");
-        storage::save_chat_message(&app.database_path, &session_id, "user", "hello").unwrap();
         let session = app.get_chat_session(session_id).expect("load session");
-        assert_eq!(session.messages.len(), 1);
+        assert_eq!(session.messages.len(), 2);
         fs::remove_dir_all(root).ok();
     }
 
@@ -3125,6 +3467,7 @@ mod tests {
             mode: Some("risk_review".to_string()),
             mode_label: Some("风险审查".to_string()),
             use_llm: Some(false),
+            retry_report_id: None,
         });
         storage::save_report(&app.database_path, &report).expect("save report");
         let summaries = app.list_reports_filtered(None, None).expect("list reports");
@@ -3144,11 +3487,13 @@ mod tests {
         ).expect("save candidate");
         drop(connection);
 
-        let chat_id = storage::upsert_chat_session(
+        let chat_id = storage::save_chat_exchange(
             &app.database_path,
             None,
             "报告追问".to_string(),
             Some(report.id.clone()),
+            "报告重点是什么？",
+            "请先处理高优先级项。",
         ).expect("save chat");
         let task = AgentTask {
             id: Uuid::new_v4().to_string(),
@@ -3215,6 +3560,59 @@ mod tests {
             .expect("code map");
         assert!(!code_map.symbols.is_empty());
         assert!(!code_map.dependencies.is_empty());
+
+        let first_review = futures::executor::block_on(app.analyze_workspace_stream(
+            workspace.summary.id.clone(),
+            Some(false),
+            None,
+            |_| Ok(()),
+        ))
+        .expect("first workspace review");
+        assert!(app
+            .validate_project_retry_scope(
+                Some(&first_review.report.id),
+                Some(&workspace.summary.id),
+            )
+            .is_ok());
+        assert!(app
+            .validate_project_retry_scope(Some(&first_review.report.id), Some("other-workspace"))
+            .is_err());
+        assert!(app
+            .validate_project_retry_scope(Some(&first_review.report.id), None)
+            .is_err());
+        let first_review_findings = app
+            .list_findings(None, None, None, Some(first_review.report.id.clone()))
+            .expect("first review findings");
+        assert!(!first_review_findings.is_empty());
+        let preserved_finding = app
+            .update_finding_status(first_review_findings[0].id.clone(), "reviewing".to_string())
+            .expect("mark report finding");
+        let preserved_cards = app
+            .create_cards_from_findings(vec![preserved_finding.id.clone()])
+            .expect("create linked card");
+        assert_eq!(preserved_cards[0].finding_id.as_deref(), Some(preserved_finding.id.as_str()));
+        let retried_review = futures::executor::block_on(app.analyze_workspace_stream(
+            workspace.summary.id.clone(),
+            Some(false),
+            Some(first_review.report.id.clone()),
+            |_| Ok(()),
+        ))
+        .expect("retried workspace review");
+        let retried_findings = app
+            .list_findings(None, None, None, Some(retried_review.report.id.clone()))
+            .expect("retried findings");
+        assert_eq!(retried_review.report.id, first_review.report.id);
+        assert_eq!(retried_findings.len(), first_review_findings.len());
+        assert!(retried_findings
+            .iter()
+            .any(|finding| finding.id == preserved_finding.id && finding.status == "reviewing"));
+        let cards_after_retry = app
+            .list_learning_cards(Some(workspace.summary.id.clone()), None, None)
+            .expect("cards after retry");
+        assert!(cards_after_retry
+            .iter()
+            .any(|card| card.id == preserved_cards[0].id
+                && card.finding_id.as_deref() == Some(preserved_finding.id.as_str())));
 
         let findings = app
             .list_findings(Some(workspace.summary.id.clone()), Some("open".to_string()), None, None)
@@ -3381,6 +3779,7 @@ mod tests {
 
         let request = ProjectAnalyzeRequest {
             project_name: workspace.summary.name.clone(),
+            workspace_id: Some(workspace.summary.id.clone()),
             title: Some("候选卡片报告".to_string()),
             files: workspace
                 .files
@@ -3392,12 +3791,14 @@ mod tests {
                 })
                 .collect(),
             use_llm: Some(false),
+            retry_report_id: None,
         };
         let mut report = app.build_project_report(&request).expect("report");
         report.metadata_json = json!({ "workspace_id": workspace.summary.id }).to_string();
         storage::save_report(&app.database_path, &report).expect("save report");
         let report_findings = workspace::build_findings(&workspace.files[0], Some(report.id.clone()));
-        storage::save_findings(&app.database_path, &report_findings).expect("save report findings");
+        storage::replace_findings_for_report(&app.database_path, &report.id, &report_findings)
+            .expect("save report findings");
         let linked_findings = app
             .list_findings(None, None, None, Some(report.id.clone()))
             .expect("linked report findings");
@@ -3433,15 +3834,15 @@ mod tests {
             .expect("report agent plan");
         assert_eq!(report_task.context_id, report.id);
 
-        let chat_id = storage::upsert_chat_session(
+        let _chat_id = storage::save_chat_exchange(
             &app.database_path,
             None,
             "围绕报告追问".to_string(),
             Some(report.id.clone()),
+            "解释这份报告的最高优先级。",
+            "请先从报告的高风险项开始。",
         )
         .expect("report chat session");
-        storage::save_chat_message(&app.database_path, &chat_id, "user", "解释这份报告的最高优先级。")
-            .expect("report chat message");
 
         let today = Utc::now().format("%Y-%m-%d").to_string();
         let draft = app.generate_daily_log(today.clone()).expect("daily draft");

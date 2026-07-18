@@ -5,6 +5,7 @@
   "identifier": "com.local.codelensnext",
   "build": {
     "beforeDevCommand": "npm run dev --prefix ../web",
+    "beforeBuildCommand": "npm run build --prefix ../web",
     "devUrl": "http://127.0.0.1:1420",
     "frontendDist": "../../web/dist"
   },
