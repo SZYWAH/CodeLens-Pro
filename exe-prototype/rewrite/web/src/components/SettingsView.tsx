@@ -1,11 +1,11 @@
-import { CheckCircle2, Database, KeyRound, Loader2, Menu, Moon, Palette, Plus, Save, Settings as SettingsIcon, ShieldCheck, Sun, Trash2, Wifi, X } from "lucide-react";
+import { CheckCircle2, Database, FolderInput, KeyRound, Loader2, Menu, Moon, Palette, Plus, RotateCcw, Save, Settings as SettingsIcon, ShieldCheck, Sun, Trash2, Wifi, X } from "lucide-react";
 import type { FormEvent } from "react";
 import { useEffect, useRef, useState } from "react";
-import type { ModelProfile, Settings } from "../types";
+import type { LegacyMigrationResult, ModelProfile, Settings } from "../types";
 import { useOverlayFocus } from "../hooks/useOverlayFocus";
 import { ProductToolbar } from "./ProductShell";
 
-type Section = "appearance" | "mode" | "connection" | "profiles" | "security";
+type Section = "appearance" | "mode" | "connection" | "profiles" | "security" | "data";
 
 export function SettingsView(props: {
     theme: "dark" | "light";
@@ -22,6 +22,8 @@ export function SettingsView(props: {
     busy: string | null;
     testResult: string | null;
     focusConnectionRequest: number;
+    migration: LegacyMigrationResult | null;
+    migrationBusy: boolean;
     onEnableLlmChange: (v: boolean) => void;
     onApiBaseChange: (v: string) => void;
     onModelChange: (v: string) => void;
@@ -37,6 +39,8 @@ export function SettingsView(props: {
     onTest: () => void;
     onOpenHealth: () => void;
     onThemeChange: (theme: "dark" | "light") => void;
+    onMigrateLegacyData: () => void;
+    onRestartApplication: () => void;
 }) {
     const [section, setSection] = useState<Section>("appearance");
     const [mobile, setMobile] = useState(false);
@@ -96,8 +100,8 @@ export function SettingsView(props: {
                     <button aria-label="关闭设置章节" onClick={() => setMobile(false)} type="button"><X size={16} /></button>
                 </header>
                 <nav>
-                    {([['appearance', '外观'], ['mode', '模型模式'], ['connection', '连接配置'], ['profiles', '模型档案'], ['security', '安全说明']] as [Section, string][]).map(([v, l]) => <button className={section === v ? "active" : ""} key={v} onClick={() => choose(v)} type="button">
-                        <span>{v === "appearance" ? <Palette size={14} /> : v === "connection" ? <Wifi size={14} /> : v === "profiles" ? <SettingsIcon size={14} /> : v === "security" ? <ShieldCheck size={14} /> : <KeyRound size={14} />}</span>
+                    {([['appearance', '外观'], ['mode', '模型模式'], ['connection', '连接配置'], ['profiles', '模型档案'], ['data', '数据迁移'], ['security', '安全说明']] as [Section, string][]).map(([v, l]) => <button className={section === v ? "active" : ""} key={v} onClick={() => choose(v)} type="button">
+                        <span>{v === "appearance" ? <Palette size={14} /> : v === "connection" ? <Wifi size={14} /> : v === "profiles" ? <SettingsIcon size={14} /> : v === "data" ? <Database size={14} /> : v === "security" ? <ShieldCheck size={14} /> : <KeyRound size={14} />}</span>
                         <strong>{l}</strong>
                     </button>)}
                 </nav>
@@ -148,6 +152,23 @@ export function SettingsView(props: {
                         <Header title="安全说明" detail="配置和项目数据只保存在本机。" />
                         <div className="settings-security-v139"><Info title="本机存储" text="API Key 保存在本机 SQLite 中；界面不回显，也不会写入运行日志或产品档案。" /><Info title="本地兜底" text="LLM 未配置或调用失败时，核心审查流程继续使用本地规则。" /><Info title="档案导出" text="模型档案和导出文件不包含 API Key，只记录密钥是否已配置。" /></div>
                     </section>}
+                    {section === "data" && <section className="settings-section-v139 settings-migration-v110">
+                        <Header title="旧版数据迁移" detail="安装版数据保存在当前用户的 LocalAppData，不随卸载删除。" />
+                        <dl className="settings-status-v139">
+                            <Meta label="迁移状态" value={migrationStatusLabel(props.migration)} />
+                            <Meta label="目标目录" value={props.migration?.destination || "正在检查"} />
+                            <Meta label="旧版来源" value={props.migration?.source || "尚未选择"} />
+                            <Meta label="迁移日志" value={props.migration?.logsMigrated ? `${props.migration.logsMigrated} 个` : "无"} />
+                        </dl>
+                        <p className="system-note-v139">{props.migration?.message || "正在检查旧免安装版数据。"}</p>
+                        <div className="settings-migration-v110__actions">
+                            <button disabled={props.migrationBusy || props.migration?.status === "not_needed"} onClick={props.onMigrateLegacyData} type="button">
+                                {props.migrationBusy ? <Loader2 className="spin" size={14} /> : <FolderInput size={14} />}选择旧版目录并迁移
+                            </button>
+                            {props.migration?.restartRequired && <button className="primary-button" onClick={props.onRestartApplication} type="button"><RotateCcw size={14} />重启并载入</button>}
+                        </div>
+                        <p className="system-note-v139">迁移只复制并校验数据，不会删除旧目录；当前库已有用户数据时请改用产品档案导入。</p>
+                    </section>}
                 </form>
             </main>
         </div>
@@ -186,4 +207,13 @@ function Info({ title, text }: {
     text: string;
 }) {
     return <article><CheckCircle2 size={15} /><div><strong>{title}</strong><p>{text}</p></div></article>;
+}
+
+function migrationStatusLabel(migration: LegacyMigrationResult | null) {
+    if (!migration) return "正在检查";
+    if (migration.status === "completed") return migration.restartRequired ? "已迁移，等待重启" : "迁移完成";
+    if (migration.status === "candidate_found") return "发现旧版数据";
+    if (migration.status === "needs_location") return "等待选择旧版目录";
+    if (migration.status === "failed") return "迁移失败";
+    return "无需迁移";
 }

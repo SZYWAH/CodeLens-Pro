@@ -870,6 +870,111 @@
   text-shadow: none;
 }
 
+/* v1.1.0 installed-data migration */
+.legacy-migration-prompt-v110 {
+  position: fixed;
+  z-index: 120;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: rgba(3, 8, 12, .7);
+  padding: 24px;
+  backdrop-filter: blur(8px);
+}
+
+.legacy-migration-prompt-v110 > section {
+  width: min(520px, 100%);
+  border: 1px solid var(--shell-line-strong);
+  border-radius: var(--shell-radius-lg);
+  color: var(--shell-text);
+  background: var(--shell-solid);
+  box-shadow: 0 24px 70px rgba(0, 0, 0, .42);
+  padding: 18px;
+}
+
+.legacy-migration-prompt-v110 header,
+.legacy-migration-prompt-v110 header > div,
+.legacy-migration-prompt-v110 footer,
+.settings-migration-v110__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.legacy-migration-prompt-v110 header {
+  justify-content: space-between;
+}
+
+.legacy-migration-prompt-v110 header > div > span {
+  display: grid;
+  gap: 2px;
+}
+
+.legacy-migration-prompt-v110 header small,
+.legacy-migration-prompt-v110 p {
+  color: var(--shell-muted);
+}
+
+.legacy-migration-prompt-v110 header > button {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+}
+
+.legacy-migration-prompt-v110 code {
+  display: block;
+  overflow-wrap: anywhere;
+  border: 1px solid var(--shell-line);
+  border-radius: var(--shell-radius-sm);
+  color: var(--shell-muted);
+  background: var(--shell-reading);
+  padding: 9px 10px;
+  font-size: 11px;
+}
+
+.legacy-migration-prompt-v110 footer {
+  justify-content: flex-end;
+  margin-top: 16px;
+}
+
+.legacy-migration-prompt-v110 footer button,
+.settings-migration-v110__actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.settings-migration-v110 .settings-status-v139 dd {
+  overflow-wrap: anywhere;
+}
+
+.settings-migration-v110__actions {
+  flex-wrap: wrap;
+}
+
+@media (max-width: 560px) {
+  .legacy-migration-prompt-v110 {
+    align-items: end;
+    padding: 12px;
+  }
+
+  .legacy-migration-prompt-v110 > section {
+    padding: 15px;
+  }
+
+  .legacy-migration-prompt-v110 footer {
+    align-items: stretch;
+    flex-direction: column;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .legacy-migration-prompt-v110 {
+    backdrop-filter: none;
+  }
+}
+
 .ai-task-status-v150 {
   min-height: 42px;
   display: flex;

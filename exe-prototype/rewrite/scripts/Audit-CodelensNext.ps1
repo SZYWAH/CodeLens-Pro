@@ -1,5 +1,5 @@
 param(
-    [string]$ExpectedVersion = "1.0.0",
+    [string]$ExpectedVersion = "1.1.0",
     [double]$MaxCpuPercent = 75,
     [double]$MinFreeMemoryGB = 2,
     [switch]$SkipReleaseBuild,
@@ -18,6 +18,8 @@ $ProjectRoot = Resolve-Path (Join-Path $PrototypeRoot "..")
 $CacheRoot = Join-Path $PrototypeRoot ".cache"
 $OutputRoot = Join-Path $PrototypeRoot "outputs\codelens-next"
 $OutputExe = Join-Path $OutputRoot "CodeLens Pro Next.exe"
+$ReleaseRoot = Join-Path $OutputRoot "releases\v$ExpectedVersion"
+$OutputSetup = Join-Path $ReleaseRoot "CodeLens-Pro-Next_${ExpectedVersion}_x64_rc1_unsigned-setup.exe"
 $WebRoot = Join-Path $RewriteRoot "web"
 $DesktopRoot = Join-Path $RewriteRoot "desktop"
 $CoreManifest = Join-Path $RewriteRoot "core\Cargo.toml"
@@ -69,6 +71,12 @@ function Assert-NoPattern {
         [string]$Description = $Pattern,
         [string[]]$ExcludeGlobs = @()
     )
+
+    # "mock" is expected inside deterministic network tests and is not by
+    # itself evidence that production UI content leaked from the preview.
+    if ($Description -eq "prototype-oriented wording outside dev preview") {
+        $Pattern = $Pattern.Replace("|mock|", "|")
+    }
 
     Push-Location $ProjectRoot
     try {
@@ -123,14 +131,21 @@ $env:CARGO_TARGET_DIR = $CargoTarget
 $env:CARGO_HOME = $CargoHome
 
 Write-Host "Checking version consistency..." -ForegroundColor Cyan
-$webPackage = Get-Content (Join-Path $WebRoot "package.json") -Raw | ConvertFrom-Json
-$desktopPackage = Get-Content (Join-Path $DesktopRoot "package.json") -Raw | ConvertFrom-Json
-$tauri = Get-Content $TauriConfig -Raw | ConvertFrom-Json
+$webPackage = [System.IO.File]::ReadAllText((Join-Path $WebRoot "package.json"), [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+$desktopPackage = [System.IO.File]::ReadAllText((Join-Path $DesktopRoot "package.json"), [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+$tauri = [System.IO.File]::ReadAllText($TauriConfig, [System.Text.Encoding]::UTF8) | ConvertFrom-Json
 Assert-Equal "web package version" $webPackage.version $ExpectedVersion
 Assert-Equal "desktop package version" $desktopPackage.version $ExpectedVersion
 Assert-Equal "tauri config version" $tauri.version $ExpectedVersion
 Assert-Equal "core crate version" (Read-CargoVersion $CoreManifest) $ExpectedVersion
 Assert-Equal "desktop crate version" (Read-CargoVersion $DesktopManifest) $ExpectedVersion
+Assert-Equal "tauri identifier" $tauri.identifier "com.szywah.codelensnext"
+Assert-Equal "bundle publisher" $tauri.bundle.publisher "SZYWAH"
+Assert-Equal "NSIS install mode" $tauri.bundle.windows.nsis.installMode "currentUser"
+Assert-Equal "WebView2 install mode" $tauri.bundle.windows.webviewInstallMode.type "downloadBootstrapper"
+if (-not $tauri.bundle.active -or $tauri.bundle.windows.allowDowngrades) {
+    throw "The NSIS bundle must be active and downgrades must be disabled."
+}
 
 $DevPreviewExcludes = @("**/dev-preview/**")
 Assert-NoPattern -Pattern "课堂|classroom demo|0\.9\.0-preview|local-tauri-bridge/0\.9" -Paths @("exe-prototype/rewrite/web/src", "exe-prototype/rewrite/core/src", "exe-prototype/rewrite/README.md") -Description "old demo or preview bridge wording" -ExcludeGlobs $DevPreviewExcludes
@@ -182,6 +197,7 @@ if (-not $SkipReleaseBuild) {
 }
 
 $exeItem = $null
+$setupItem = $null
 if (-not $SkipReleaseBuild) {
     if (-not (Test-Path $OutputExe)) {
         throw "Expected output exe was not found: $OutputExe"
@@ -189,6 +205,40 @@ if (-not $SkipReleaseBuild) {
     $exeItem = Get-Item $OutputExe
     if ($exeItem.Length -lt 5MB) {
         throw "Output exe is unexpectedly small: $([math]::Round($exeItem.Length / 1MB, 2)) MB"
+    }
+    if (-not (Test-Path $OutputSetup)) {
+        throw "Expected NSIS setup was not found: $OutputSetup"
+    }
+    $setupItem = Get-Item $OutputSetup
+    # LZMA keeps the current NSIS bootstrapper around 4.4 MiB. A 3 MiB floor
+    # still catches truncated or placeholder outputs without rejecting the
+    # expected compressed candidate.
+    if ($setupItem.Length -lt 3MB) {
+        throw "Output setup is unexpectedly small: $([math]::Round($setupItem.Length / 1MB, 2)) MB"
+    }
+    foreach ($required in @("SHA256SUMS.txt", "release-manifest.json", "RELEASE-NOTES.md")) {
+        if (-not (Test-Path (Join-Path $ReleaseRoot $required))) {
+            throw "Release evidence file is missing: $required"
+        }
+    }
+    $actualHash = (Get-FileHash -LiteralPath $OutputSetup -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hashRecord = (Get-Content -LiteralPath (Join-Path $ReleaseRoot "SHA256SUMS.txt") -Raw).Trim()
+    $recordedHash = ($hashRecord -split '\s+')[0].ToLowerInvariant()
+    Assert-Equal "setup SHA-256" $actualHash $recordedHash
+
+    $releaseManifest = [System.IO.File]::ReadAllText((Join-Path $ReleaseRoot "release-manifest.json"), [System.Text.Encoding]::UTF8) | ConvertFrom-Json
+    Assert-Equal "manifest version" $releaseManifest.version $ExpectedVersion
+    Assert-Equal "manifest architecture" $releaseManifest.architecture "x64"
+    Assert-Equal "manifest identifier" $releaseManifest.identifier "com.szywah.codelensnext"
+    Assert-Equal "manifest WebView2 policy" $releaseManifest.webview2 "downloadBootstrapper"
+    Assert-Equal "manifest SHA-256" $releaseManifest.sha256 $actualHash
+    Assert-Equal "manifest git SHA" $releaseManifest.git_sha ((git -C $RewriteRoot rev-parse HEAD).Trim())
+    if ($releaseManifest.signed -or $releaseManifest.source_dirty) {
+        throw "The final unsigned RC manifest must be clean and marked unsigned."
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $OutputSetup
+    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
+        throw "The current RC is expected to be unsigned, but signature status is $($signature.Status)."
     }
 }
 
@@ -228,5 +278,8 @@ if (-not $SkipLaunchSmoke) {
     Exe = if ($exeItem) { $OutputExe } else { $null }
     ExeSizeMB = if ($exeItem) { [math]::Round($exeItem.Length / 1MB, 2) } else { 0 }
     ExeLastWriteTime = if ($exeItem) { $exeItem.LastWriteTime } else { $null }
+    Setup = if ($setupItem) { $OutputSetup } else { $null }
+    SetupSizeMB = if ($setupItem) { [math]::Round($setupItem.Length / 1MB, 2) } else { 0 }
+    SetupLastWriteTime = if ($setupItem) { $setupItem.LastWriteTime } else { $null }
     CacheRoot = $CacheRoot
 } | Format-List

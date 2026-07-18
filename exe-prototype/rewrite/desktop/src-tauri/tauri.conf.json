@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "CodeLens Pro Next",
-  "version": "1.0.0",
-  "identifier": "com.local.codelensnext",
+  "version": "1.1.0",
+  "identifier": "com.szywah.codelensnext",
   "build": {
     "beforeDevCommand": "npm run dev --prefix ../web",
     "beforeBuildCommand": "npm run build --prefix ../web",
@@ -27,7 +27,28 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all"
+    "active": true,
+    "targets": ["nsis"],
+    "publisher": "SZYWAH",
+    "icon": ["icons/icon.ico"],
+    "shortDescription": "本地优先的代码审查与项目理解桌面工具",
+    "longDescription": "CodeLens Pro Next 提供代码审查、项目依赖图谱、AI 对话与学习材料沉淀。",
+    "windows": {
+      "allowDowngrades": false,
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper",
+        "silent": true
+      },
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "uninstallerIcon": "icons/icon.ico",
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": false,
+        "compression": "lzma",
+        "startMenuFolder": "CodeLens Pro Next",
+        "installerHooks": "windows/hooks.nsh"
+      }
+    }
   }
 }

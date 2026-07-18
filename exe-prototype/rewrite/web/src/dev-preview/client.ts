@@ -32,6 +32,7 @@ import type {
   LearningCenterData,
   LlmTestRequest,
   LlmTestResult,
+  LegacyMigrationResult,
   ModelProfile,
   ModelProfileInput,
   ProductArchiveImportResult,
@@ -81,6 +82,25 @@ export async function getAppHealth(): Promise<AppHealth> {
 
 export async function getSettings(): Promise<Settings> {
   return call("get_settings", undefined, () => mockSettingsValue);
+}
+
+export async function getLegacyMigrationState(): Promise<LegacyMigrationResult> {
+  return {
+    status: "not_needed",
+    destination: "开发预览数据",
+    databaseMigrated: false,
+    logsMigrated: 0,
+    restartRequired: false,
+    message: "浏览器预览不执行桌面版数据迁移。"
+  };
+}
+
+export async function selectLegacyDataAndMigrate(): Promise<LegacyMigrationResult> {
+  return getLegacyMigrationState();
+}
+
+export async function restartApplication(): Promise<void> {
+  return Promise.resolve();
 }
 
 export async function saveSettings(update: SettingsUpdate): Promise<Settings> {
@@ -1069,7 +1089,7 @@ function defaultModelProfiles(): ModelProfile[] {
 
 function mockHealth(): AppHealth {
   return {
-    version: "1.0.0",
+    version: "1.1.0",
     app_home: "local-preview",
     storage_dir: "local-preview/storage",
     logs_dir: "local-preview/logs",

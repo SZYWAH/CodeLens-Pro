@@ -32,6 +32,7 @@ import type {
   LearningCenterData,
   LlmTestRequest,
   LlmTestResult,
+  LegacyMigrationResult,
   ModelProfile,
   ModelProfileInput,
   ProductArchiveImportResult,
@@ -64,6 +65,18 @@ export async function getAppHealth(): Promise<AppHealth> {
 
 export async function getSettings(): Promise<Settings> {
   return call("get_settings");
+}
+
+export async function getLegacyMigrationState(): Promise<LegacyMigrationResult> {
+  return call("get_legacy_migration_state");
+}
+
+export async function selectLegacyDataAndMigrate(): Promise<LegacyMigrationResult> {
+  return call("select_legacy_data_and_migrate");
+}
+
+export async function restartApplication(): Promise<void> {
+  return call("restart_application");
 }
 
 export async function saveSettings(update: SettingsUpdate): Promise<Settings> {

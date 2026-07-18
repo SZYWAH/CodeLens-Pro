@@ -5,6 +5,7 @@ import {
   Database,
   FileCode2,
   FileText,
+  FolderInput,
   GitBranch,
   GraduationCap,
   History,
@@ -12,8 +13,10 @@ import {
   Loader2,
   Map,
   MessageSquare,
+  RotateCcw,
   Settings as SettingsIcon,
-  ShieldAlert
+  ShieldAlert,
+  X
 } from "lucide-react";
 import { FormEvent, Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -51,6 +54,7 @@ import {
   getAppHealth,
   getDailySummary,
   getLearningCenter,
+  getLegacyMigrationState,
   getProjectGuide,
   getChatSession,
   getCodeMap,
@@ -82,12 +86,14 @@ import {
   saveModelProfile,
   rescanWorkspace,
   saveSettings,
+  selectLegacyDataAndMigrate,
   sendChatMessageStream,
   testLlmConnection,
   updateWorkspaceBridgeSelection,
   updateFindingStatus,
   updateLearningCard,
-  deleteModelProfile
+  deleteModelProfile,
+  restartApplication
 } from "./api";
 import type {
   ActivityConstellationData,
@@ -109,6 +115,7 @@ import type {
   LearningCard,
   LearningCardCandidate,
   LearningCenterData,
+  LegacyMigrationResult,
   ModelProfile,
   ProjectGuide,
   ReportDetail,
@@ -228,6 +235,15 @@ export default function App() {
   const [traceability, setTraceability] = useState<TraceabilitySnapshot | null>(null);
   const [workspaceTraceability, setWorkspaceTraceability] = useState<TraceabilitySnapshot | null>(null);
   const [modelProfiles, setModelProfiles] = useState<ModelProfile[]>([]);
+  const [legacyMigration, setLegacyMigration] = useState<LegacyMigrationResult | null>(null);
+  const [migrationBusy, setMigrationBusy] = useState(false);
+  const [migrationPromptDismissed, setMigrationPromptDismissed] = useState(() => {
+    try {
+      return window.localStorage.getItem("codelens.legacyMigration.dismissed.v1") === "1";
+    } catch {
+      return false;
+    }
+  });
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -399,6 +415,7 @@ export default function App() {
 
   useEffect(() => {
     refreshAll();
+    getLegacyMigrationState().then(setLegacyMigration).catch((err) => setError(friendlyError(err)));
   }, []);
 
   useEffect(() => {
@@ -2221,6 +2238,37 @@ export default function App() {
     }
   }
 
+  async function handleLegacyMigration() {
+    setMigrationBusy(true);
+    setError(null);
+    try {
+      const result = await selectLegacyDataAndMigrate();
+      setLegacyMigration(result);
+      if (result.databaseMigrated) {
+        setMessage("旧版数据已安全复制并校验，请重启应用载入迁移结果。");
+        setMigrationPromptDismissed(false);
+      }
+    } catch (err) {
+      setError(`旧版数据迁移失败：${friendlyError(err)}`);
+      try {
+        setLegacyMigration(await getLegacyMigrationState());
+      } catch {
+        // Preserve the original migration error.
+      }
+    } finally {
+      setMigrationBusy(false);
+    }
+  }
+
+  function dismissMigrationPrompt() {
+    setMigrationPromptDismissed(true);
+    try {
+      window.localStorage.setItem("codelens.legacyMigration.dismissed.v1", "1");
+    } catch {
+      // The settings page remains available when browser storage is unavailable.
+    }
+  }
+
   const navGroups: ProductNavGroup[] = [
     {
       title: "审查主线",
@@ -2570,6 +2618,14 @@ export default function App() {
       : "global";
   const visibleMessage = message && (messageScope === "global" || messageScope === activeNoticeScope) ? message : null;
   const visibleError = error && (errorScope === "global" || errorScope === activeNoticeScope) ? error : null;
+  const showMigrationPrompt = Boolean(
+    legacyMigration
+    && !migrationPromptDismissed
+    && (legacyMigration.status === "needs_location"
+      || legacyMigration.status === "candidate_found"
+      || legacyMigration.status === "failed"
+      || legacyMigration.restartRequired)
+  );
 
   if (showLaunch) return <LaunchScreen onComplete={() => setShowLaunch(false)} />;
 
@@ -2589,8 +2645,25 @@ export default function App() {
       statusText={statusText}
       theme={theme}
       onToggleTheme={() => setTheme((current) => current === "dark" ? "light" : "dark")}
-      version={health?.version || "1.0.0"}
+      version={health?.version || "1.1.0"}
     >
+
+        {showMigrationPrompt && legacyMigration && <div className="legacy-migration-prompt-v110" role="presentation">
+          <section aria-labelledby="legacy-migration-title-v110" aria-modal="true" role="dialog">
+            <header>
+              <div><Database size={18} /><span><strong id="legacy-migration-title-v110">旧版数据迁移</strong><small>v1.1.0 安装版使用独立的 LocalAppData 目录</small></span></div>
+              {!legacyMigration.restartRequired && <button aria-label="稍后处理旧版数据迁移" onClick={dismissMigrationPrompt} type="button"><X size={16} /></button>}
+            </header>
+            <p>{legacyMigration.message}</p>
+            {legacyMigration.source && <code>{legacyMigration.source}</code>}
+            <footer>
+              {legacyMigration.restartRequired
+                ? <button className="primary-button" onClick={() => void restartApplication()} type="button"><RotateCcw size={14} />重启并载入</button>
+                : <button className="primary-button" disabled={migrationBusy} onClick={() => void handleLegacyMigration()} type="button">{migrationBusy ? <Loader2 className="spin" size={14} /> : <FolderInput size={14} />}选择旧版目录</button>}
+              {!legacyMigration.restartRequired && <button onClick={dismissMigrationPrompt} type="button">稍后在设置中处理</button>}
+            </footer>
+          </section>
+        </div>}
 
         <AiTaskStatusBar status={aiTaskStatus} onCancel={cancelActiveAiTask} />
 
@@ -2938,6 +3011,8 @@ export default function App() {
             busy={busyArea}
             testResult={llmTestResult}
             focusConnectionRequest={settingsConnectionRequest}
+            migration={legacyMigration}
+            migrationBusy={migrationBusy}
             onEnableLlmChange={setEnableLlm}
             onApiBaseChange={setApiBase}
             onModelChange={setModel}
@@ -2953,6 +3028,8 @@ export default function App() {
             onTest={handleTestLlm}
             onOpenHealth={() => setView("health")}
             onThemeChange={setTheme}
+            onMigrateLegacyData={() => void handleLegacyMigration()}
+            onRestartApplication={() => void restartApplication()}
           />
         )}
 

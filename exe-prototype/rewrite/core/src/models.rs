@@ -705,3 +705,26 @@ pub struct ProductArchiveImportResult {
     pub counts: TraceabilityCounts,
     pub warnings: Vec<String>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyMigrationStatus {
+    NotNeeded,
+    CandidateFound,
+    NeedsLocation,
+    Completed,
+    Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyMigrationResult {
+    pub status: LegacyMigrationStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub destination: String,
+    pub database_migrated: bool,
+    pub logs_migrated: usize,
+    pub restart_required: bool,
+    pub message: String,
+}

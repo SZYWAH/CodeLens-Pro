@@ -95,6 +95,10 @@ jobs:
           path: |
             exe-prototype/outputs/codelens-next/CodeLens Pro Next.exe
             exe-prototype/outputs/codelens-next/SHA256SUMS.txt
+            exe-prototype/outputs/codelens-next/releases/v1.1.0/CodeLens-Pro-Next_1.1.0_x64_rc1_unsigned-setup.exe
+            exe-prototype/outputs/codelens-next/releases/v1.1.0/SHA256SUMS.txt
+            exe-prototype/outputs/codelens-next/releases/v1.1.0/release-manifest.json
+            exe-prototype/outputs/codelens-next/releases/v1.1.0/RELEASE-NOTES.md
             exe-prototype/outputs/codelens-next/v14.15-route-audit/interaction-smoke.json
             exe-prototype/outputs/codelens-next/v14.15-route-audit/interaction-smoke.md
             exe-prototype/outputs/codelens-next/v14.15-route-audit/screenshots

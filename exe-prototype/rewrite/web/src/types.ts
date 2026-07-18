@@ -20,6 +20,23 @@ export type Settings = {
 
 export type LlmState = "disabled" | "missing_key" | "configured";
 
+export type LegacyMigrationStatus =
+  | "not_needed"
+  | "candidate_found"
+  | "needs_location"
+  | "completed"
+  | "failed";
+
+export type LegacyMigrationResult = {
+  status: LegacyMigrationStatus;
+  source?: string;
+  destination: string;
+  databaseMigrated: boolean;
+  logsMigrated: number;
+  restartRequired: boolean;
+  message: string;
+};
+
 export type SettingsUpdate = {
   enable_llm: boolean;
   api_base: string;

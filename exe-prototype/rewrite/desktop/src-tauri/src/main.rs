@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -16,7 +16,7 @@ use codelens_next_core::{
     AgentApplyRequest, AgentApplyResult, AgentPlanRequest, AgentTask, AnalysisRequest,
     AppHealth, CardMaterial, ChatSessionDetail, ChatSessionSummary,
     ChatStreamRequest, CodeMap, CoreApp, DailyLog, DailySummary, DiffAnalyzeRequest, Finding,
-    LearningCalendarItem, LearningCard,
+    LearningCalendarItem, LearningCard, LegacyMigrationResult, LegacyMigrationStatus,
     LearningCardCandidate, LearningCardCreate, LearningCenterData, LlmTestRequest, LlmTestResult,
     ModelProfile, ModelProfileInput, ProductArchiveImportResult, ProductArchiveResult, ProjectAnalyzeRequest, ProjectGuide,
     ProjectImportResult, ReportDetail, ReportSummary, Settings, SettingsUpdate,
@@ -25,7 +25,7 @@ use codelens_next_core::{
 };
 use serde::Serialize;
 use serde_json::Value;
-use tauri::{Emitter, Manager, State, Window};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 use tokio_util::sync::CancellationToken;
 
 #[cfg(not(windows))]
@@ -36,6 +36,14 @@ use std::os::windows::process::CommandExt;
 type CommandResult<T> = Result<T, String>;
 
 const AI_TASK_TIMEOUT: Duration = Duration::from_secs(90);
+const LEGACY_CANDIDATE_FILE: &str = "legacy-candidate.txt";
+
+#[derive(Clone)]
+struct LegacyMigrationContext {
+    app_home: PathBuf,
+    enabled: bool,
+    startup_error: Arc<Mutex<Option<String>>>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct AiTaskError {
@@ -369,6 +377,70 @@ fn get_app_health(core: State<'_, CoreApp>) -> CommandResult<AppHealth> {
 #[tauri::command]
 fn get_settings(core: State<'_, CoreApp>) -> CommandResult<Settings> {
     core.settings().map_err(format_error)
+}
+
+#[tauri::command]
+fn get_legacy_migration_state(
+    context: State<'_, LegacyMigrationContext>,
+) -> CommandResult<LegacyMigrationResult> {
+    if !context.enabled {
+        return Ok(LegacyMigrationResult {
+            status: LegacyMigrationStatus::NotNeeded,
+            source: None,
+            destination: context.app_home.display().to_string(),
+            database_migrated: false,
+            logs_migrated: 0,
+            restart_required: false,
+            message: "当前使用 CODELENS_NEXT_HOME 自定义数据目录，不执行安装版迁移。".to_string(),
+        });
+    }
+    if let Ok(error) = context.startup_error.lock() {
+        if let Some(error) = error.as_ref() {
+            return Ok(LegacyMigrationResult {
+                status: LegacyMigrationStatus::Failed,
+                source: discover_legacy_candidate(&context.app_home)
+                    .map(|path| path.display().to_string()),
+                destination: context.app_home.display().to_string(),
+                database_migrated: false,
+                logs_migrated: 0,
+                restart_required: false,
+                message: error.clone(),
+            });
+        }
+    }
+    let candidate = discover_legacy_candidate(&context.app_home);
+    codelens_next_core::legacy_migration_state(&context.app_home, candidate.as_deref())
+        .map_err(format_error)
+}
+
+#[tauri::command]
+fn select_legacy_data_and_migrate(
+    context: State<'_, LegacyMigrationContext>,
+) -> CommandResult<LegacyMigrationResult> {
+    if !context.enabled {
+        return Err("当前使用自定义数据目录，不能执行安装版迁移。".to_string());
+    }
+    let Some(source) = rfd::FileDialog::new()
+        .set_title("选择旧版 CodeLens Pro Next 所在文件夹")
+        .pick_folder()
+    else {
+        return codelens_next_core::legacy_migration_state(&context.app_home, None)
+            .map_err(format_error);
+    };
+    let result = codelens_next_core::migrate_legacy_data(&source, &context.app_home)
+        .map_err(format_error)?;
+    if result.status == LegacyMigrationStatus::Completed {
+        clear_legacy_candidate(&context.app_home);
+        if let Ok(mut error) = context.startup_error.lock() {
+            *error = None;
+        }
+    }
+    Ok(result)
+}
+
+#[tauri::command]
+fn restart_application(app: AppHandle) {
+    app.restart();
 }
 
 #[tauri::command]
@@ -988,15 +1060,46 @@ fn import_product_archive(core: State<'_, CoreApp>) -> CommandResult<ProductArch
 fn main() {
     tauri::Builder::default()
         .setup(|app| {
-            let app_home = resolve_app_home()?;
+            let (app_home, migration_enabled) = resolve_app_home(app.handle())?;
+            let startup_error = Arc::new(Mutex::new(None));
+            if migration_enabled {
+                if let Some(candidate) = discover_legacy_candidate(&app_home) {
+                    match codelens_next_core::legacy_migration_state(&app_home, Some(&candidate)) {
+                        Ok(state) if state.status == LegacyMigrationStatus::CandidateFound => {
+                            match codelens_next_core::migrate_legacy_data(&candidate, &app_home) {
+                                Ok(_) => clear_legacy_candidate(&app_home),
+                                Err(error) => {
+                                    if let Ok(mut value) = startup_error.lock() {
+                                        *value = Some(format!("自动迁移失败：{error}"));
+                                    }
+                                }
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            if let Ok(mut value) = startup_error.lock() {
+                                *value = Some(format!("检查旧版数据失败：{error}"));
+                            }
+                        }
+                    }
+                }
+            }
             let core = CoreApp::initialize(app_home)?;
             app.manage(core);
             app.manage(AiRequestRegistry::default());
+            app.manage(LegacyMigrationContext {
+                app_home: resolve_app_home(app.handle())?.0,
+                enabled: migration_enabled,
+                startup_error,
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_app_health,
             get_settings,
+            get_legacy_migration_state,
+            select_legacy_data_and_migrate,
+            restart_application,
             save_settings,
             list_model_profiles,
             save_model_profile,
@@ -1076,19 +1179,33 @@ fn main() {
         .expect("failed to run CodeLens Pro Next");
 }
 
-fn resolve_app_home() -> anyhow::Result<PathBuf> {
+fn resolve_app_home(app: &AppHandle) -> anyhow::Result<(PathBuf, bool)> {
     if let Ok(value) = env::var("CODELENS_NEXT_HOME") {
         let trimmed = value.trim();
         if !trimmed.is_empty() {
-            return Ok(PathBuf::from(trimmed));
+            return Ok((PathBuf::from(trimmed), false));
         }
     }
+    Ok((app.path().app_local_data_dir()?, true))
+}
 
-    let exe = env::current_exe()?;
-    Ok(exe
-        .parent()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| env::current_dir().unwrap_or_else(|_| PathBuf::from("."))))
+fn discover_legacy_candidate(app_home: &Path) -> Option<PathBuf> {
+    let candidate_file = app_home.join(LEGACY_CANDIDATE_FILE);
+    if let Ok(value) = fs::read_to_string(&candidate_file) {
+        let candidate = PathBuf::from(value.trim());
+        if candidate.join("storage").join("codelens-next.sqlite").is_file() {
+            return Some(candidate);
+        }
+    }
+    let exe_dir = env::current_exe().ok()?.parent()?.to_path_buf();
+    if exe_dir.join("storage").join("codelens-next.sqlite").is_file() {
+        return Some(exe_dir);
+    }
+    None
+}
+
+fn clear_legacy_candidate(app_home: &Path) {
+    let _ = fs::remove_file(app_home.join(LEGACY_CANDIDATE_FILE));
 }
 
 fn format_error(error: anyhow::Error) -> String {

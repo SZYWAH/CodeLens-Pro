@@ -1,6 +1,7 @@
 mod analysis;
 mod diff;
 mod llm;
+mod migration;
 mod models;
 mod project;
 mod storage;
@@ -26,7 +27,8 @@ pub use models::{
     AnalysisResponse, AppHealth, CardMaterial, ChatMessageItem, ChatSessionDetail,
     ChatSessionSummary, ChatStreamRequest, CodeMap, CodeSymbol, DailyLog, DailySummary,
     DiffAnalyzeRequest, FileDependency, Finding, LanguageStat, LearningCalendarItem, LearningCard,
-    LearningCardCandidate, LearningCardCreate, LearningCenterData, LlmTestRequest, LlmTestResult,
+    LearningCardCandidate, LearningCardCreate, LearningCenterData, LegacyMigrationResult,
+    LegacyMigrationStatus, LlmTestRequest, LlmTestResult,
     ModelProfile, ModelProfileInput, ProductArchiveImportResult, ProductArchiveResult, ProjectAnalyzeRequest,
     ProjectFileInput, ProjectGuide, ProjectGuideItem, ProjectImportResult, ReportDetail,
     ReportFile, ReportMetrics, ReportSummary, Settings, SettingsUpdate, TraceabilityCounts,
@@ -37,6 +39,7 @@ pub use models::{
 };
 
 pub use llm::{classify_llm_error_code, classify_llm_error_message};
+pub use migration::{legacy_migration_state, migrate_legacy_data};
 
 #[derive(Clone)]
 pub struct CoreApp {

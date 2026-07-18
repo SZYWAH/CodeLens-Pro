@@ -542,7 +542,7 @@ dependencies = [
 
 [[package]]
 name = "codelens_next_core"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -557,7 +557,7 @@ dependencies = [
 
 [[package]]
 name = "codelens_pro_next_desktop"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "codelens_next_core",
