@@ -143,6 +143,7 @@ import { ProjectWorkspaceView } from "./components/ProjectWorkspaceView";
 import { ProductShell, type ProductGlobalCommand, type ProductNavGroup } from "./components/ProductShell";
 import { SettingsView } from "./components/SettingsView";
 import { AiTaskStatusBar, type ActiveAiTaskStatus } from "./components/AiTaskStatusBar";
+import { useOverlayFocus } from "./hooks/useOverlayFocus";
 
 const ActivityGalaxyView = lazy(() =>
   import("./components/ActivityGalaxyView").then((module) => ({ default: module.ActivityGalaxyView }))
@@ -243,6 +244,27 @@ export default function App() {
     } catch {
       return false;
     }
+  });
+  const migrationDialogRef = useRef<HTMLElement | null>(null);
+  const migrationPrimaryRef = useRef<HTMLButtonElement | null>(null);
+  const productMainRef = useRef<HTMLElement | null>(null);
+  const showMigrationPrompt = Boolean(
+    legacyMigration
+    && !migrationPromptDismissed
+    && (legacyMigration.status === "needs_location"
+      || legacyMigration.status === "candidate_found"
+      || legacyMigration.status === "failed"
+      || legacyMigration.restartRequired)
+  );
+
+  useOverlayFocus({
+    active: showMigrationPrompt,
+    containerRef: migrationDialogRef,
+    initialFocusRef: migrationPrimaryRef,
+    returnFocusRef: productMainRef,
+    onRequestClose: dismissMigrationPrompt,
+    closeOnEscape: !legacyMigration?.restartRequired,
+    focusKey: `${legacyMigration?.status || "none"}:${Boolean(legacyMigration?.restartRequired)}`
   });
 
   useEffect(() => {
@@ -2618,15 +2640,6 @@ export default function App() {
       : "global";
   const visibleMessage = message && (messageScope === "global" || messageScope === activeNoticeScope) ? message : null;
   const visibleError = error && (errorScope === "global" || errorScope === activeNoticeScope) ? error : null;
-  const showMigrationPrompt = Boolean(
-    legacyMigration
-    && !migrationPromptDismissed
-    && (legacyMigration.status === "needs_location"
-      || legacyMigration.status === "candidate_found"
-      || legacyMigration.status === "failed"
-      || legacyMigration.restartRequired)
-  );
-
   if (showLaunch) return <LaunchScreen onComplete={() => setShowLaunch(false)} />;
 
   return (
@@ -2642,6 +2655,7 @@ export default function App() {
       onDismissError={() => setError(null)}
       navGroups={navGroups}
       onRefresh={refreshAll}
+      mainContentRef={productMainRef}
       statusText={statusText}
       theme={theme}
       onToggleTheme={() => setTheme((current) => current === "dark" ? "light" : "dark")}
@@ -2649,17 +2663,17 @@ export default function App() {
     >
 
         {showMigrationPrompt && legacyMigration && <div className="legacy-migration-prompt-v110" role="presentation">
-          <section aria-labelledby="legacy-migration-title-v110" aria-modal="true" role="dialog">
+          <section aria-describedby="legacy-migration-description-v110" aria-labelledby="legacy-migration-title-v110" aria-modal="true" ref={migrationDialogRef} role="dialog">
             <header>
               <div><Database size={18} /><span><strong id="legacy-migration-title-v110">旧版数据迁移</strong><small>v1.1.0 安装版使用独立的 LocalAppData 目录</small></span></div>
               {!legacyMigration.restartRequired && <button aria-label="稍后处理旧版数据迁移" onClick={dismissMigrationPrompt} type="button"><X size={16} /></button>}
             </header>
-            <p>{legacyMigration.message}</p>
+            <p id="legacy-migration-description-v110">{legacyMigration.message}</p>
             {legacyMigration.source && <code>{legacyMigration.source}</code>}
             <footer>
               {legacyMigration.restartRequired
-                ? <button className="primary-button" onClick={() => void restartApplication()} type="button"><RotateCcw size={14} />重启并载入</button>
-                : <button className="primary-button" disabled={migrationBusy} onClick={() => void handleLegacyMigration()} type="button">{migrationBusy ? <Loader2 className="spin" size={14} /> : <FolderInput size={14} />}选择旧版目录</button>}
+                ? <button className="primary-button" onClick={() => void restartApplication()} ref={migrationPrimaryRef} type="button"><RotateCcw size={14} />重启并载入</button>
+                : <button className="primary-button" disabled={migrationBusy} onClick={() => void handleLegacyMigration()} ref={migrationPrimaryRef} type="button">{migrationBusy ? <Loader2 className="spin" size={14} /> : <FolderInput size={14} />}选择旧版目录</button>}
               {!legacyMigration.restartRequired && <button onClick={dismissMigrationPrompt} type="button">稍后在设置中处理</button>}
             </footer>
           </section>

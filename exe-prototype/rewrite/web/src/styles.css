@@ -2869,6 +2869,11 @@ body {
   font-weight: 900;
 }
 
+.product-command-menu-next > [role="listbox"] {
+  display: grid;
+  gap: 6px;
+}
+
 .product-command-group-next {
   display: grid;
   gap: 5px;
@@ -17426,6 +17431,16 @@ body {
 
   .product-command-search-next {
     display: none;
+  }
+
+  .product-command-search-next.is-open {
+    display: grid;
+    position: absolute;
+    z-index: 40;
+    top: 6px;
+    right: 54px;
+    left: 54px;
+    width: auto;
   }
 
   .product-page-toolbar-next,

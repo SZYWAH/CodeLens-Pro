@@ -3,6 +3,7 @@ import type { FormEvent, KeyboardEvent } from "react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ChatMessageItem, ChatSessionDetail, ChatSessionSummary, Finding, ReportSummary, WorkspaceDetail, WorkspaceSummary } from "../types";
 import { describeContext, formatTime, roleLabel } from "../utils/display";
+import { useOverlayFocus } from "../hooks/useOverlayFocus";
 import { ProductToolbar } from "./ProductShell";
 
 const collapsedKey = "codelens.chat.collapsed";
@@ -21,6 +22,10 @@ export function AiChatView(props: {
   const [menuId, setMenuId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const messageRef = useRef<HTMLDivElement | null>(null);
+  const contextTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const contextDrawerRef = useRef<HTMLElement | null>(null);
+  const contextCloseRef = useRef<HTMLButtonElement | null>(null);
+  const contextSearchRef = useRef<HTMLInputElement | null>(null);
   const followRef = useRef(true);
   const contextText = describeContext(props.context, props.workspaces, props.workspace, props.findings, props.reports);
   const [contextKind] = props.context.split("|", 1);
@@ -32,7 +37,16 @@ export function AiChatView(props: {
   useEffect(() => { followRef.current = true; requestAnimationFrame(() => scrollToBottom(messageRef.current)); }, [props.activeChat?.id]);
   useEffect(() => { if (followRef.current) requestAnimationFrame(() => scrollToBottom(messageRef.current)); }, [props.messages.length, latestMessage?.content]);
 
-  function selectContext(value: string) { props.onContextChange(value); setContextOpen(false); setContextQuery(""); }
+  function closeContext() { setContextOpen(false); setContextQuery(""); }
+  useOverlayFocus({
+    active: contextOpen,
+    containerRef: contextDrawerRef,
+    initialFocusRef: contextSearchRef,
+    returnFocusRef: contextTriggerRef,
+    onRequestClose: closeContext
+  });
+
+  function selectContext(value: string) { props.onContextChange(value); closeContext(); }
   function openSession(id: string) { props.onOpen(id); setMobileSessions(false); setMenuId(null); }
   function newSession() { props.onNew(); setMobileSessions(false); setMenuId(null); followRef.current = true; }
   function onMessageScroll() { const node = messageRef.current; if (node) followRef.current = node.scrollHeight - node.scrollTop - node.clientHeight < 80; }
@@ -47,7 +61,7 @@ export function AiChatView(props: {
       </aside>
 
       <main className="chat-main-v137">
-        <ProductToolbar><button className="chat-mobile-sessions-v137" aria-label="打开会话索引" onClick={() => setMobileSessions(true)} type="button"><Menu size={16}/></button><div className="product-toolbar-context-next"><strong>{props.activeChat?.title || "新对话"}</strong><span>{contextText}</span></div><nav className="product-toolbar-actions-next"><span className={props.llmReady ? "ready" : "missing"}>{props.llmReady ? "模型已就绪" : "未配置模型"}</span><button onClick={() => setContextOpen(true)} type="button"><Folder size={14}/>选择上下文</button></nav></ProductToolbar>
+        <ProductToolbar><button className="chat-mobile-sessions-v137" aria-label="打开会话索引" onClick={() => setMobileSessions(true)} type="button"><Menu size={16}/></button><div className="product-toolbar-context-next"><strong>{props.activeChat?.title || "新对话"}</strong><span>{contextText}</span></div><nav className="product-toolbar-actions-next"><span className={props.llmReady ? "ready" : "missing"}>{props.llmReady ? "模型已就绪" : "未配置模型"}</span><button className="chat-context-trigger-v137" ref={contextTriggerRef} onClick={() => setContextOpen(true)} type="button"><Folder size={14}/>选择上下文</button></nav></ProductToolbar>
         {!props.llmReady && <div className="chat-llm-warning-v137"><AlertTriangle size={15}/><span>AI 对话需要启用 LLM 并配置 API Key。</span><button onClick={props.onOpenSettings} type="button"><Settings size={14}/>前往设置</button></div>}
         <div className="chat-messages-v137" ref={messageRef} onScroll={onMessageScroll}>
           {!props.messages.length && <section className="chat-empty-v137"><Lightbulb size={26}/><strong>围绕当前上下文开始对话</strong><p>{contextKind === "none" ? "先选择工作区、文件、问题或报告，回答会更准确。" : `当前上下文：${contextText}`}</p><div>{prompts.map((prompt) => <button key={prompt.title} onClick={() => props.onDraftChange(prompt.text)} type="button"><span>{prompt.icon}</span><strong>{prompt.title}</strong><small>{prompt.detail}</small></button>)}</div></section>}
@@ -57,7 +71,7 @@ export function AiChatView(props: {
       </main>
     </div>
 
-    {contextOpen && <><button className="chat-context-scrim-v137" aria-label="关闭上下文选择" onClick={() => setContextOpen(false)}/><aside className="chat-context-drawer-v137"><header><strong>选择上下文</strong><button aria-label="关闭上下文选择" onClick={() => setContextOpen(false)} type="button"><X size={17}/></button></header><label><Search size={14}/><input value={contextQuery} onChange={(event) => setContextQuery(event.target.value)} placeholder="搜索工作区、文件、问题或报告"/></label><div className="chat-context-list-v137"><ContextGroup title="通用" items={[{value:"none|",title:"无上下文",detail:"开始一个通用对话",icon:<MessageSquare size={14}/> }]} selected={props.context} onSelect={selectContext}/><ContextGroup title="工作区" items={contextItems.workspaces} selected={props.context} onSelect={selectContext}/><ContextGroup title="文件" items={contextItems.files} selected={props.context} onSelect={selectContext}/><ContextGroup title="问题" items={contextItems.findings} selected={props.context} onSelect={selectContext}/><ContextGroup title="报告" items={contextItems.reports} selected={props.context} onSelect={selectContext}/></div></aside></>}
+    {contextOpen && <><button className="chat-context-scrim-v137" aria-label="关闭上下文选择" onClick={closeContext} type="button"/><aside aria-labelledby="chat-context-title-v137" aria-modal="true" className="chat-context-drawer-v137" ref={contextDrawerRef} role="dialog"><header><strong id="chat-context-title-v137">选择上下文</strong><button aria-label="关闭上下文选择" onClick={closeContext} ref={contextCloseRef} type="button"><X size={17}/></button></header><label><Search size={14}/><input ref={contextSearchRef} value={contextQuery} onChange={(event) => setContextQuery(event.target.value)} placeholder="搜索工作区、文件、问题或报告"/></label><div className="chat-context-list-v137"><ContextGroup title="通用" items={[{value:"none|",title:"无上下文",detail:"开始一个通用对话",icon:<MessageSquare size={14}/> }]} selected={props.context} onSelect={selectContext}/><ContextGroup title="工作区" items={contextItems.workspaces} selected={props.context} onSelect={selectContext}/><ContextGroup title="文件" items={contextItems.files} selected={props.context} onSelect={selectContext}/><ContextGroup title="问题" items={contextItems.findings} selected={props.context} onSelect={selectContext}/><ContextGroup title="报告" items={contextItems.reports} selected={props.context} onSelect={selectContext}/></div></aside></>}
   </section>;
 }
 

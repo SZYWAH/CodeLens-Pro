@@ -1,5 +1,5 @@
 import { CheckCircle2, ChevronLeft, ChevronRight, Menu, Moon, RefreshCw, Search, Sun, TriangleAlert, X } from "lucide-react";
-import { createContext, ReactNode, useContext, useEffect, useMemo, useRef, useState } from "react";
+import { createContext, ReactNode, useContext, useEffect, useId, useMemo, useRef, useState, type Ref } from "react";
 import { createPortal } from "react-dom";
 
 const ProductToolbarTargetContext = createContext<HTMLDivElement | null>(null);
@@ -50,6 +50,7 @@ export function ProductShell({
   onRefresh,
   theme,
   onToggleTheme,
+  mainContentRef,
   children
 }: {
   statusText: string;
@@ -67,6 +68,7 @@ export function ProductShell({
   onRefresh: () => void;
   theme: "dark" | "light";
   onToggleTheme: () => void;
+  mainContentRef?: Ref<HTMLElement>;
   children: ReactNode;
 }) {
   const [collapsed, setCollapsed] = useState(() => {
@@ -79,6 +81,7 @@ export function ProductShell({
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
   const [toolbarTarget, setToolbarTarget] = useState<HTMLDivElement | null>(null);
   const commandInputRef = useRef<HTMLInputElement | null>(null);
+  const commandListboxId = useId();
   const displayVersion = version.startsWith("v") ? version : `v${version}`;
   const commandItems = useMemo(
     () => [
@@ -123,6 +126,15 @@ export function ProductShell({
   useEffect(() => {
     setSelectedCommandIndex(0);
   }, [commandQuery]);
+
+  useEffect(() => {
+    if (!commandOpen) return;
+    const frame = window.requestAnimationFrame(() => {
+      commandInputRef.current?.focus();
+      commandInputRef.current?.select();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [commandOpen]);
 
   useEffect(() => {
     window.localStorage.setItem("codelens.shell.expanded", String(!collapsed));
@@ -208,7 +220,7 @@ export function ProductShell({
       </aside>
       <button className="product-sidebar-scrim" type="button" onClick={() => setMobileOpen(false)} aria-label="关闭导航" />
 
-      <section className="product-main">
+      <section className="product-main" ref={mainContentRef} tabIndex={-1}>
         <header className="product-topbar">
           <button className="product-mobile-menu" type="button" onClick={() => setMobileOpen(true)} title="打开导航">
             <Menu size={18} />
@@ -217,7 +229,7 @@ export function ProductShell({
             <h2>{activeTitle}</h2>
             <p>{activeSubtitle}</p>
           </div>
-          <div className="product-command-search-next">
+          <div className={`product-command-search-next ${commandOpen ? "is-open" : ""}`}>
             <button
               className="product-command-search-trigger-next"
               type="button"
@@ -229,6 +241,13 @@ export function ProductShell({
             </button>
             <input
               ref={commandInputRef}
+              role="combobox"
+              aria-autocomplete="list"
+              aria-expanded={commandOpen}
+              aria-controls={commandListboxId}
+              aria-activedescendant={commandOpen && commandResults[selectedCommandIndex]
+                ? `${commandListboxId}-option-${selectedCommandIndex}`
+                : undefined}
               value={commandQuery}
               onChange={(event) => {
                 setCommandQuery(event.target.value);
@@ -240,19 +259,22 @@ export function ProductShell({
                 if (event.key === "ArrowDown") {
                   event.preventDefault();
                   setCommandOpen(true);
-                  setSelectedCommandIndex((value) => Math.min(commandResults.length - 1, value + 1));
+                  if (commandResults.length) setSelectedCommandIndex((value) => (value + 1) % commandResults.length);
                 }
                 if (event.key === "ArrowUp") {
                   event.preventDefault();
-                  setSelectedCommandIndex((value) => Math.max(0, value - 1));
+                  setCommandOpen(true);
+                  if (commandResults.length) setSelectedCommandIndex((value) => (value - 1 + commandResults.length) % commandResults.length);
                 }
                 if (event.key === "Enter" && commandResults[selectedCommandIndex]) {
                   event.preventDefault();
                   runCommand(commandResults[selectedCommandIndex]);
                 }
                 if (event.key === "Escape") {
+                  event.preventDefault();
                   setCommandOpen(false);
                   setCommandQuery("");
+                  setSelectedCommandIndex(0);
                 }
               }}
               placeholder="搜索页面、报告、问题、卡片..."
@@ -266,38 +288,49 @@ export function ProductShell({
             {commandOpen && (
               <div className="product-command-menu-next">
                 <span>快速跳转</span>
-                {groupedCommandResults.map((group) => {
-                  let offset = 0;
-                  for (const entry of groupedCommandResults) {
-                    if (entry.title === group.title) break;
-                    offset += entry.items.length;
-                  }
-                  return (
-                    <section className="product-command-group-next" key={group.title}>
-                      <strong>{group.title}</strong>
-                      {group.items.map((item, index) => {
-                        const commandIndex = offset + index;
-                        return (
-                          <button
-                            className={`${item.active ? "active entity" : "entity"} ${commandIndex === selectedCommandIndex ? "selected" : ""}`}
-                            key={item.key}
-                            onMouseDown={(event) => event.preventDefault()}
-                            onMouseEnter={() => setSelectedCommandIndex(commandIndex)}
-                            onClick={() => runCommand(item)}
-                            type="button"
-                          >
-                            {item.icon}
-                            <span>
-                              <em>{item.label}</em>
-                              <small>{item.description || "打开页面"}</small>
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </section>
-                  );
-                })}
-                {commandResults.length === 0 && <p>没有匹配的页面入口。</p>}
+                <div aria-label="快速跳转" id={commandListboxId} role="listbox">
+                  {groupedCommandResults.map((group) => {
+                    let offset = 0;
+                    for (const entry of groupedCommandResults) {
+                      if (entry.title === group.title) break;
+                      offset += entry.items.length;
+                    }
+                    return (
+                      <section
+                        aria-labelledby={`${commandListboxId}-group-${offset}`}
+                        className="product-command-group-next"
+                        key={group.title}
+                        role="group"
+                      >
+                        <strong id={`${commandListboxId}-group-${offset}`}>{group.title}</strong>
+                        {group.items.map((item, index) => {
+                          const commandIndex = offset + index;
+                          return (
+                            <button
+                              aria-selected={commandIndex === selectedCommandIndex}
+                              className={`${item.active ? "active entity" : "entity"} ${commandIndex === selectedCommandIndex ? "selected" : ""}`}
+                              id={`${commandListboxId}-option-${commandIndex}`}
+                              key={item.key}
+                              onMouseDown={(event) => event.preventDefault()}
+                              onMouseEnter={() => setSelectedCommandIndex(commandIndex)}
+                              onClick={() => runCommand(item)}
+                              role="option"
+                              tabIndex={-1}
+                              type="button"
+                            >
+                              {item.icon}
+                              <span>
+                                <em>{item.label}</em>
+                                <small>{item.description || "打开页面"}</small>
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </section>
+                    );
+                  })}
+                </div>
+                {commandResults.length === 0 && <p aria-live="polite">没有匹配结果</p>}
                 {commandResults.length > 0 && <footer>↑↓ 选择 / Enter 打开 / Esc 关闭</footer>}
               </div>
             )}

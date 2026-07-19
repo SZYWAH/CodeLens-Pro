@@ -2,6 +2,16 @@ import { useEffect, useRef, type RefObject } from "react";
 
 type ElementRef = RefObject<HTMLElement | null>;
 
+export type OverlayFocusOptions = {
+  active: boolean;
+  containerRef: ElementRef;
+  initialFocusRef?: ElementRef;
+  returnFocusRef?: ElementRef;
+  onRequestClose: () => void;
+  closeOnEscape?: boolean;
+  focusKey?: string | number | boolean;
+};
+
 const focusableSelector = [
   "a[href]",
   "button:not([disabled])",
@@ -13,17 +23,15 @@ const focusableSelector = [
 
 function getFocusableElements(container: HTMLElement): HTMLElement[] {
   return Array.from(container.querySelectorAll<HTMLElement>(focusableSelector)).filter((element) => {
-    return !element.hasAttribute("disabled") && element.getAttribute("aria-hidden") !== "true";
+    if (element.hasAttribute("disabled") || element.getAttribute("aria-hidden") === "true") return false;
+    if (element.closest("[inert]")) return false;
+    const style = window.getComputedStyle(element);
+    if (style.display === "none" || style.visibility === "hidden") return false;
+    return element.getClientRects().length > 0;
   });
 }
 
-export function useOverlayFocus(options: {
-  active: boolean;
-  containerRef: ElementRef;
-  initialFocusRef?: ElementRef;
-  returnFocusRef?: ElementRef;
-  onRequestClose: () => void;
-}) {
+export function useOverlayFocus(options: OverlayFocusOptions) {
   const closeRef = useRef(options.onRequestClose);
   const wasActiveRef = useRef(false);
 
@@ -41,12 +49,15 @@ export function useOverlayFocus(options: {
     wasActiveRef.current = true;
     const focusFrame = window.requestAnimationFrame(() => {
       const container = options.containerRef.current;
-      const target = options.initialFocusRef?.current || (container ? getFocusableElements(container)[0] : null);
+      const elements = container ? getFocusableElements(container) : [];
+      const requestedTarget = options.initialFocusRef?.current;
+      const target = requestedTarget && elements.includes(requestedTarget) ? requestedTarget : elements[0];
       target?.focus();
     });
 
     function onKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") {
+      if (event.defaultPrevented) return;
+      if (event.key === "Escape" && options.closeOnEscape !== false) {
         event.preventDefault();
         closeRef.current();
         return;
@@ -74,5 +85,5 @@ export function useOverlayFocus(options: {
       window.cancelAnimationFrame(focusFrame);
       window.removeEventListener("keydown", onKeyDown);
     };
-  }, [options.active, options.containerRef, options.initialFocusRef, options.returnFocusRef]);
+  }, [options.active, options.closeOnEscape, options.containerRef, options.focusKey, options.initialFocusRef, options.returnFocusRef]);
 }

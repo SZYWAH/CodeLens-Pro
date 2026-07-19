@@ -351,6 +351,9 @@ function Navigate-CdpPage {
     $lastError = $null
     for ($attempt = 1; $attempt -le 2; $attempt += 1) {
         try {
+            if ($Url -match "[?&]migration=") {
+                Invoke-CdpJson -Client $Client -Expression "(() => { try { window.localStorage.removeItem('codelens.legacyMigration.dismissed.v1'); return true; } catch (error) { return false; } })()" | Out-Null
+            }
             Invoke-CdpJson -Client $Client -Expression "(() => { try { window.localStorage.setItem('codelens.theme', $themeLiteral); return true; } catch (error) { return false; } })()" | Out-Null
             Invoke-CdpCommand -Client $Client -Method "Page.navigate" -Parameters @{ url = $Url } | Out-Null
             Wait-PageSettled -Client $Client
@@ -753,6 +756,12 @@ function Get-DialogOpenerManifest {
             openerSelector = "button[aria-label^='$deleteLabel']"
             expectedRole = "alertdialog"
         }
+        [pscustomobject]@{
+            name = "chat-context-drawer"
+            route = "chat"
+            openerSelector = ".chat-context-trigger-v137"
+            expectedRole = "dialog"
+        }
     )
 }
 
@@ -775,6 +784,9 @@ function Test-DialogFocusContract {
         shiftTabFocusContained = $false
         escaped = $false
         returnedFocus = $false
+        scrimClosed = $true
+        selectionReturnedFocus = $true
+        selectionClearedSearch = $true
         passed = $false
         note = ""
     }
@@ -862,7 +874,47 @@ function Test-DialogFocusContract {
     } while ((Get-Date) -lt $returnFocusDeadline)
     $record.escaped = -not [bool]$afterEscape.dialogVisible
     $record.returnedFocus = [bool]$afterEscape.returnedFocus
-    $record.passed = $record.initialFocusContained -and $record.tabFocusContained -and $record.shiftTabFocusContained -and $record.escaped -and $record.returnedFocus
+    if ($Name -eq "chat-context-drawer" -and $record.escaped -and $record.returnedFocus) {
+        Invoke-CdpClickSelector -Client $Client -Selector $OpenerSelector | Out-Null
+        Start-Sleep -Milliseconds 80
+        Invoke-CdpClickSelector -Client $Client -Selector ".chat-context-scrim-v137" | Out-Null
+        Start-Sleep -Milliseconds 80
+        $afterScrim = Invoke-CdpJson -Client $Client -Expression @"
+(() => {
+  const opener = document.querySelector($openerLiteral);
+  return { closed: !document.querySelector('.chat-context-drawer-v137'), returned: document.activeElement === opener };
+})()
+"@
+        $record.scrimClosed = [bool]($afterScrim.closed -and $afterScrim.returned)
+
+        Invoke-CdpClickSelector -Client $Client -Selector $OpenerSelector | Out-Null
+        Start-Sleep -Milliseconds 80
+        Invoke-CdpJson -Client $Client -Expression @"
+(() => {
+  const input = document.querySelector('.chat-context-drawer-v137 input');
+  if (!input) return false;
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  setter.call(input, 'workspace');
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+})()
+"@ | Out-Null
+        Start-Sleep -Milliseconds 80
+        Invoke-CdpClickSelector -Client $Client -Selector ".chat-context-list-v137 button" | Out-Null
+        Start-Sleep -Milliseconds 100
+        $afterSelection = Invoke-CdpJson -Client $Client -Expression @"
+(() => {
+  const opener = document.querySelector($openerLiteral);
+  return { closed: !document.querySelector('.chat-context-drawer-v137'), returned: document.activeElement === opener };
+})()
+"@
+        $record.selectionReturnedFocus = [bool]($afterSelection.closed -and $afterSelection.returned)
+        Invoke-CdpClickSelector -Client $Client -Selector $OpenerSelector | Out-Null
+        Start-Sleep -Milliseconds 80
+        $record.selectionClearedSearch = [bool](Invoke-CdpJson -Client $Client -Expression "(document.querySelector('.chat-context-drawer-v137 input')?.value || '') === ''")
+        Invoke-CdpKey -Client $Client -Key "Escape" -VirtualKeyCode 27
+    }
+    $record.passed = $record.initialFocusContained -and $record.tabFocusContained -and $record.shiftTabFocusContained -and $record.escaped -and $record.returnedFocus -and $record.scrimClosed -and $record.selectionReturnedFocus -and $record.selectionClearedSearch
     if (-not $record.passed) {
         $record.note = "focus containment or return-focus contract failed"
     }
@@ -876,18 +928,16 @@ function Invoke-RouteFocusChecks {
     )
 
     $checks = New-Object 'System.Collections.Generic.List[object]'
-    if ($Route -ne "settings") {
-        return $checks.ToArray()
-    }
-
-    $profilesLabel = New-Object 'System.Char[]' 4
-    $profilesLabel[0] = [char]0x6a21
-    $profilesLabel[1] = [char]0x578b
-    $profilesLabel[2] = [char]0x6863
-    $profilesLabel[3] = [char]0x6848
-    $sectionClick = Invoke-CdpClickButtonByText -Client $Client -Text (-join $profilesLabel)
-    if ($sectionClick.found) {
-        Start-Sleep -Milliseconds 100
+    if ($Route -eq "settings") {
+        $profilesLabel = New-Object 'System.Char[]' 4
+        $profilesLabel[0] = [char]0x6a21
+        $profilesLabel[1] = [char]0x578b
+        $profilesLabel[2] = [char]0x6863
+        $profilesLabel[3] = [char]0x6848
+        $sectionClick = Invoke-CdpClickButtonByText -Client $Client -Text (-join $profilesLabel)
+        if ($sectionClick.found) {
+            Start-Sleep -Milliseconds 100
+        }
     }
 
     foreach ($opener in @(Get-DialogOpenerManifest | Where-Object { $_.route -eq $Route })) {
@@ -895,6 +945,161 @@ function Invoke-RouteFocusChecks {
         $checks.Add($check)
     }
     return $checks.ToArray()
+}
+
+function Test-CommandPaletteContract {
+    param([Parameter(Mandatory = $true)]$Client)
+
+    $record = [ordered]@{
+        name = "global-command-palette"
+        available = $true
+        opened = $false
+        comboboxValid = $false
+        activeDescendantValid = $false
+        arrowSelectionChanged = $false
+        enterExecutedOnce = $false
+        escapeClosed = $false
+        noResultAnnounced = $false
+        passed = $false
+        note = ""
+    }
+
+    Invoke-CdpJson -Client $Client -Expression @"
+(() => {
+  window.__commandPaletteReplaceCount = 0;
+  if (!window.__commandPaletteOriginalReplaceState) {
+    window.__commandPaletteOriginalReplaceState = history.replaceState.bind(history);
+    history.replaceState = (...args) => {
+      window.__commandPaletteReplaceCount += 1;
+      return window.__commandPaletteOriginalReplaceState(...args);
+    };
+  }
+  return true;
+})()
+"@ | Out-Null
+    Invoke-CdpKey -Client $Client -Key "k" -VirtualKeyCode 75 -Modifiers 2
+    Start-Sleep -Milliseconds 100
+    $opened = Invoke-CdpJson -Client $Client -Expression @"
+(() => {
+  const input = document.querySelector('[role="combobox"]');
+  const listbox = input?.getAttribute('aria-controls') ? document.getElementById(input.getAttribute('aria-controls')) : null;
+  const activeId = input?.getAttribute('aria-activedescendant') || '';
+  return {
+    opened: input?.getAttribute('aria-expanded') === 'true',
+    inputFocused: document.activeElement === input,
+    listboxValid: listbox?.getAttribute('role') === 'listbox',
+    activeId,
+    activeValid: !!activeId && document.getElementById(activeId)?.getAttribute('role') === 'option'
+  };
+})()
+"@
+    $record.opened = [bool]$opened.opened
+    $record.comboboxValid = [bool]($opened.inputFocused -and $opened.listboxValid)
+    $record.activeDescendantValid = [bool]$opened.activeValid
+
+    Invoke-CdpKey -Client $Client -Key "ArrowDown" -VirtualKeyCode 40
+    Start-Sleep -Milliseconds 60
+    $afterArrow = Invoke-CdpJson -Client $Client -Expression "document.querySelector('[role=combobox]')?.getAttribute('aria-activedescendant') || ''"
+    $record.arrowSelectionChanged = [bool]($afterArrow -and $afterArrow -ne $opened.activeId)
+
+    Invoke-CdpKey -Client $Client -Key "Enter" -VirtualKeyCode 13
+    Start-Sleep -Milliseconds 100
+    $afterEnter = Invoke-CdpJson -Client $Client -Expression "({ count: window.__commandPaletteReplaceCount || 0, expanded: document.querySelector('[role=combobox]')?.getAttribute('aria-expanded') || '' })"
+    $record.enterExecutedOnce = [bool]($afterEnter.count -eq 1 -and $afterEnter.expanded -eq "false")
+
+    Invoke-CdpKey -Client $Client -Key "k" -VirtualKeyCode 75 -Modifiers 2
+    Start-Sleep -Milliseconds 60
+    Invoke-CdpKey -Client $Client -Key "Escape" -VirtualKeyCode 27
+    Start-Sleep -Milliseconds 60
+    $afterEscape = Invoke-CdpJson -Client $Client -Expression "({ expanded: document.querySelector('[role=combobox]')?.getAttribute('aria-expanded') || '', value: document.querySelector('[role=combobox]')?.value || '' })"
+    $record.escapeClosed = [bool]($afterEscape.expanded -eq "false" -and -not $afterEscape.value)
+
+    Invoke-CdpKey -Client $Client -Key "k" -VirtualKeyCode 75 -Modifiers 2
+    Start-Sleep -Milliseconds 60
+    Invoke-CdpJson -Client $Client -Expression @"
+(() => {
+  const input = document.querySelector('[role="combobox"]');
+  if (!input) return false;
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  setter.call(input, '__no_matching_command__');
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+  return true;
+})()
+"@ | Out-Null
+    Start-Sleep -Milliseconds 240
+    $noResult = Invoke-CdpJson -Client $Client -Expression @"
+(() => {
+  const input = document.querySelector('[role="combobox"]');
+  const live = document.querySelector('.product-command-menu-next [aria-live="polite"]');
+  return { active: input?.hasAttribute('aria-activedescendant') || false, announced: (live?.textContent || '').trim() };
+})()
+"@
+    $record.noResultAnnounced = [bool](-not $noResult.active -and $noResult.announced)
+    Invoke-CdpKey -Client $Client -Key "Escape" -VirtualKeyCode 27
+
+    $record.passed = $record.opened -and $record.comboboxValid -and $record.activeDescendantValid -and $record.arrowSelectionChanged -and $record.enterExecutedOnce -and $record.escapeClosed -and $record.noResultAnnounced
+    if (-not $record.passed) { $record.note = "combobox keyboard or announcement contract failed" }
+    return [pscustomobject]$record
+}
+
+function Test-MigrationDialogContract {
+    param(
+        [Parameter(Mandatory = $true)]$Client,
+        [Parameter(Mandatory = $true)][bool]$RestartRequired
+    )
+
+    Start-Sleep -Milliseconds 120
+    $record = [ordered]@{
+        name = $(if ($RestartRequired) { "migration-restart-required" } else { "migration-dismissible" })
+        available = $true
+        initialFocusCorrect = $false
+        tabFocusContained = $false
+        shiftTabFocusContained = $false
+        escapePolicyCorrect = $false
+        returnedFocus = $false
+        passed = $false
+        note = ""
+    }
+    $initial = Invoke-CdpJson -Client $Client -Expression @"
+(() => {
+  const dialog = document.querySelector('.legacy-migration-prompt-v110 [role="dialog"]');
+  const primary = dialog?.querySelector('.primary-button');
+  return { found: !!dialog, primaryFocused: document.activeElement === primary, described: !!dialog?.getAttribute('aria-describedby') };
+})()
+"@
+    if (-not $initial.found) {
+        $record.available = $false
+        $record.note = "migration dialog not mounted"
+        return [pscustomobject]$record
+    }
+    $record.initialFocusCorrect = [bool]($initial.primaryFocused -and $initial.described)
+    Invoke-CdpKey -Client $Client -Key "Tab" -VirtualKeyCode 9
+    Start-Sleep -Milliseconds 50
+    $afterTab = Get-VisibleDialog -Client $Client -Role "dialog"
+    $record.tabFocusContained = [bool]$afterTab.activeInside
+    Invoke-CdpKey -Client $Client -Key "Tab" -VirtualKeyCode 9 -Modifiers 8
+    Start-Sleep -Milliseconds 50
+    $afterShiftTab = Get-VisibleDialog -Client $Client -Role "dialog"
+    $record.shiftTabFocusContained = [bool]$afterShiftTab.activeInside
+    Invoke-CdpKey -Client $Client -Key "Escape" -VirtualKeyCode 27
+    Start-Sleep -Milliseconds 100
+    $afterEscape = Invoke-CdpJson -Client $Client -Expression @"
+(() => {
+  const dialog = document.querySelector('.legacy-migration-prompt-v110 [role="dialog"]');
+  const visible = !!dialog && dialog.getClientRects().length > 0;
+  return { visible, activeInDialog: !!dialog?.contains(document.activeElement), mainFocused: document.activeElement?.classList.contains('product-main') || false };
+})()
+"@
+    if ($RestartRequired) {
+        $record.escapePolicyCorrect = [bool]($afterEscape.visible -and $afterEscape.activeInDialog)
+        $record.returnedFocus = $true
+    } else {
+        $record.escapePolicyCorrect = -not [bool]$afterEscape.visible
+        $record.returnedFocus = [bool]$afterEscape.mainFocused
+    }
+    $record.passed = $record.initialFocusCorrect -and $record.tabFocusContained -and $record.shiftTabFocusContained -and $record.escapePolicyCorrect -and $record.returnedFocus
+    if (-not $record.passed) { $record.note = "migration focus or Escape policy failed" }
+    return [pscustomobject]$record
 }
 
 function Test-PreviewScenarioContract {
@@ -914,6 +1119,9 @@ function Test-PreviewScenarioContract {
     $deadline = (Get-Date).AddSeconds($(if ($Route.scenarioKind -eq "map-3d") { 15 } else { 5 }))
     $snapshot = $null
     do {
+        if ($Route.scenarioKind -eq "loading") {
+            Invoke-CdpJson -Client $Client -Expression "(() => { window.__CODELENS_PREVIEW__?.releaseLoadingGate('initial'); return true; })()" | Out-Null
+        }
         $snapshot = Invoke-CdpJson -Client $Client -Expression @"
 (() => {
   const preview = window.__CODELENS_PREVIEW__;
@@ -1319,14 +1527,24 @@ try {
                         $routeRecord.controlFailures = @($snapshot.failures)
                         $routeRecord.controlFailureCount = @($snapshot.failures).Count
                     }
-                    if ($route.name -eq "settings") {
-                        $focusChecks = Invoke-RouteFocusChecks -Client $CdpClient -Route $route.name
-                        $routeRecord.focusChecks = @($focusChecks)
-                        $routeRecord.focusFailureCount = @($focusChecks | Where-Object { $_.available -and -not $_.passed }).Count
-                    }
                     if ($ScenarioChecks) {
                         $routeRecord.scenarioCheck = Test-PreviewScenarioContract -Client $CdpClient -Route $route
                     }
+                    $focusChecks = New-Object 'System.Collections.Generic.List[object]'
+                    if ($route.name -eq "settings" -or $route.name -eq "chat" -or ($ScenarioChecks -and $route.scenarioKind -eq "ai")) {
+                        $focusRoute = if ($ScenarioChecks -and $route.scenarioKind -eq "ai") { "chat" } else { $route.name }
+                        foreach ($focusCheck in @(Invoke-RouteFocusChecks -Client $CdpClient -Route $focusRoute)) {
+                            $focusChecks.Add($focusCheck)
+                        }
+                    }
+                    if ($route.name -eq "workbench") {
+                        $focusChecks.Add((Test-CommandPaletteContract -Client $CdpClient))
+                    }
+                    if ($ScenarioChecks -and $route.scenarioKind -eq "migration") {
+                        $focusChecks.Add((Test-MigrationDialogContract -Client $CdpClient -RestartRequired ($route.name -eq "migration-restart")))
+                    }
+                    $routeRecord.focusChecks = @($focusChecks.ToArray())
+                    $routeRecord.focusFailureCount = @($focusChecks.ToArray() | Where-Object { $_.available -and -not $_.passed }).Count
                     $routeRecord.passed = $routeRecord.controlFailureCount -eq 0 -and $routeRecord.focusFailureCount -eq 0 -and (-not $routeRecord.scenarioCheck -or $routeRecord.scenarioCheck.passed)
                 } catch {
                     $routeRecord.error = $_.Exception.Message

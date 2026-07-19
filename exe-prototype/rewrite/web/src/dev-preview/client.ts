@@ -73,6 +73,7 @@ declare global {
 
 const previewScenario = readPreviewScenario();
 const loadingGates = new Map<string, { promise: Promise<void>; release: () => void }>();
+const releasedLoadingGates = new Set<string>();
 let activePreviewRequests = 0;
 let previewIdCounter = 0;
 const crypto = { randomUUID: () => previewId("entity") };
@@ -1123,6 +1124,7 @@ function previewId(prefix: string) {
 }
 
 function waitForLoadingGate(name: string): Promise<void> {
+  if (releasedLoadingGates.has(name)) return Promise.resolve();
   const existing = loadingGates.get(name);
   if (existing) return existing.promise;
   let release: () => void = () => {};
@@ -1135,8 +1137,12 @@ function waitForLoadingGate(name: string): Promise<void> {
 }
 
 function releaseLoadingGate(name: string) {
+  releasedLoadingGates.add(name);
   const gate = loadingGates.get(name);
-  if (!gate) return;
+  if (!gate) {
+    updatePreviewDebugState();
+    return;
+  }
   loadingGates.delete(name);
   gate.release();
   updatePreviewDebugState();
