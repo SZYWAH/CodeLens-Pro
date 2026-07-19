@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { runAiStream } from "../aiStreamRuntime";
+import { readPreviewScenario, type PreviewScenario } from "../previewScenario";
 import type {
   ActivityEvent,
   ActivityConstellationData,
@@ -58,8 +59,23 @@ declare global {
   interface Window {
     __TAURI_INTERNALS__?: unknown;
     __CODELENS_PREVIEW_COMMAND_COUNTS__?: Record<string, number>;
+    __CODELENS_PREVIEW__?: {
+      scenario: PreviewScenario;
+      releaseLoadingGate: (name: string) => void;
+      snapshot: () => {
+        commandCounts: Record<string, number>;
+        activeRequests: number;
+        pendingGates: string[];
+      };
+    };
   }
 }
+
+const previewScenario = readPreviewScenario();
+const loadingGates = new Map<string, { promise: Promise<void>; release: () => void }>();
+let activePreviewRequests = 0;
+let previewIdCounter = 0;
+const crypto = { randomUUID: () => previewId("entity") };
 
 const mockReports: ReportDetail[] = [];
 const mockSessions: ChatSessionDetail[] = [];
@@ -85,6 +101,39 @@ export async function getSettings(): Promise<Settings> {
 }
 
 export async function getLegacyMigrationState(): Promise<LegacyMigrationResult> {
+  if (previewScenario.migration === "candidate") {
+    return {
+      status: "candidate_found",
+      source: "local-preview/legacy/storage",
+      destination: "local-preview/storage",
+      databaseMigrated: false,
+      logsMigrated: 0,
+      restartRequired: false,
+      message: "发现可迁移的旧免安装版数据。"
+    };
+  }
+  if (previewScenario.migration === "failed") {
+    return {
+      status: "failed",
+      source: "local-preview/legacy/storage",
+      destination: "local-preview/storage",
+      databaseMigrated: false,
+      logsMigrated: 0,
+      restartRequired: false,
+      message: "旧版数据校验失败，请重新选择目录。"
+    };
+  }
+  if (previewScenario.migration === "restart-required") {
+    return {
+      status: "completed",
+      source: "local-preview/legacy/storage",
+      destination: "local-preview/storage",
+      databaseMigrated: true,
+      logsMigrated: 2,
+      restartRequired: true,
+      message: "迁移已完成，重启后载入旧版数据。"
+    };
+  }
   return {
     status: "not_needed",
     destination: "开发预览数据",
@@ -1001,9 +1050,24 @@ async function runStream<T>(
 ): Promise<T> {
   recordPreviewCommand(command);
   if (!hasTauriInvoke()) {
-    if (options?.signal?.aborted) throw new Error("AI 任务已取消。");
-    previewPhases(options);
-    return mock();
+    activePreviewRequests += 1;
+    updatePreviewDebugState();
+    try {
+      if (options?.signal?.aborted) throw previewAiError("cancelled", "AI 任务已取消。");
+      options?.onPhase?.("accepted");
+      options?.onPhase?.("connecting");
+      if (previewScenario.ai !== "success") {
+        await previewDelay(previewScenario.ai === "timeout" ? 360 : 80, options?.signal);
+        throw previewAiScenarioError(previewScenario.ai);
+      }
+      options?.onPhase?.("streaming");
+      const result = await mock();
+      options?.onPhase?.("saving");
+      return result;
+    } finally {
+      activePreviewRequests = Math.max(0, activePreviewRequests - 1);
+      updatePreviewDebugState();
+    }
   }
   return runAiStream<T>({
     listen: async (eventName, handler) => listen<AiStreamEvent<unknown>>(eventName, (event) => handler(event.payload)),
@@ -1028,7 +1092,16 @@ async function call<T>(
   if (hasTauriInvoke()) {
     return invoke<T>(command, args);
   }
-  return mock();
+  activePreviewRequests += 1;
+  updatePreviewDebugState();
+  try {
+    if (previewScenario.ui === "loading") await waitForLoadingGate("initial");
+    if (previewScenario.ui === "error") throw new Error("预览场景模拟的加载失败。");
+    return await mock();
+  } finally {
+    activePreviewRequests = Math.max(0, activePreviewRequests - 1);
+    updatePreviewDebugState();
+  }
 }
 
 function hasTauriInvoke(): boolean {
@@ -1041,14 +1114,86 @@ function recordPreviewCommand(command: string) {
   counts[command] = (counts[command] || 0) + 1;
   window.__CODELENS_PREVIEW_COMMAND_COUNTS__ = counts;
   document.documentElement.dataset.previewCommandCounts = JSON.stringify(counts);
+  updatePreviewDebugState();
 }
 
+function previewId(prefix: string) {
+  previewIdCounter += 1;
+  return `preview-${prefix}-${String(previewIdCounter).padStart(4, "0")}`;
+}
+
+function waitForLoadingGate(name: string): Promise<void> {
+  const existing = loadingGates.get(name);
+  if (existing) return existing.promise;
+  let release: () => void = () => {};
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  loadingGates.set(name, { promise, release });
+  updatePreviewDebugState();
+  return promise;
+}
+
+function releaseLoadingGate(name: string) {
+  const gate = loadingGates.get(name);
+  if (!gate) return;
+  loadingGates.delete(name);
+  gate.release();
+  updatePreviewDebugState();
+}
+
+function updatePreviewDebugState() {
+  if (typeof window === "undefined") return;
+  window.__CODELENS_PREVIEW__ = {
+    scenario: previewScenario,
+    releaseLoadingGate,
+    snapshot: () => ({
+      commandCounts: { ...(window.__CODELENS_PREVIEW_COMMAND_COUNTS__ || {}) },
+      activeRequests: activePreviewRequests,
+      pendingGates: [...loadingGates.keys()].sort()
+    })
+  };
+  document.documentElement.dataset.previewScenario = JSON.stringify(previewScenario);
+}
+
+function previewAiError(code: string, message: string) {
+  const error = new Error(message) as Error & { code?: string; retryable?: boolean };
+  error.code = code;
+  error.retryable = code !== "unauthorized" && code !== "configuration";
+  return error;
+}
+
+function previewAiScenarioError(scenario: PreviewScenario["ai"]) {
+  if (scenario === "unauthorized") return previewAiError("unauthorized", "模型服务拒绝了当前 API Key。");
+  if (scenario === "rate_limited") return previewAiError("rate_limited", "模型服务请求过于频繁，请稍后重试。");
+  if (scenario === "server_error") return previewAiError("network", "模型服务返回 HTTP 500。");
+  if (scenario === "timeout") return previewAiError("timeout", "模型请求超时。");
+  if (scenario === "disconnect") return previewAiError("protocol", "模型流式响应意外断开。");
+  return previewAiError("configuration", "当前预览场景未配置模型。");
+}
+
+function previewDelay(milliseconds: number, signal?: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(previewAiError("cancelled", "AI 任务已取消。"));
+      return;
+    }
+    const timer = window.setTimeout(resolve, milliseconds);
+    signal?.addEventListener("abort", () => {
+      window.clearTimeout(timer);
+      reject(previewAiError("cancelled", "AI 任务已取消。"));
+    }, { once: true });
+  });
+}
+
+updatePreviewDebugState();
+
 let mockSettingsValue: Settings = {
-  enable_llm: false,
+  enable_llm: previewScenario.ai !== "unconfigured",
   api_base: "https://api.deepseek.com/v1",
   model: "deepseek-chat",
-  api_key_set: false,
-  llm_state: "disabled"
+  api_key_set: previewScenario.ai !== "unconfigured",
+  llm_state: previewScenario.ai === "unconfigured" ? "disabled" : "configured"
 };
 
 function defaultModelProfiles(): ModelProfile[] {
@@ -1327,7 +1472,7 @@ function mockCodeMapDependencies(workspaceId: string) {
     ["src/services/reviewService.ts", "../domain/riskScorer", "import", 2],
     ["src/services/reviewService.ts", "../utils/formatDate", "import", 3],
     ["tests/reviewService.spec.ts", "../src/services/reviewService", "import", 1],
-    ["scripts/build.ts", "vite", "import", 1],
+    ["scripts/build.ts", "../src/app/createApp", "import", 1],
     ["desktop/src/main.rs", "crate::commands", "mod", 1]
   ];
   if (denseProjectFixtureEnabled()) {
@@ -1351,7 +1496,7 @@ function mockCodeMapDependencies(workspaceId: string) {
 }
 
 function denseProjectFixtureEnabled() {
-  return new URL(window.location.href).searchParams.get("fixture") === "dense";
+  return previewScenario.fixture === "dense";
 }
 
 function mockCodeAnalysis(request: AnalysisRequest): AnalysisResponse {
@@ -1728,6 +1873,7 @@ function mockTraceabilitySnapshot(scopeKind = "global", scopeId?: string): Trace
 }
 
 function seedPreviewFixtures() {
+  if (previewScenario.fixture === "empty") return;
   if (mockWorkspaces.length) return;
 
   const workspace = mockWorkspace();

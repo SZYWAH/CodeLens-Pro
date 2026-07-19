@@ -1,5 +1,6 @@
 import { ArrowLeft, ChevronRight, ExternalLink, FileCode2, GitBranch, Languages, List, Map as MapIcon, Menu, Network, RefreshCw, Search, Shapes, Workflow, X } from "lucide-react";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { isPreviewMode, readPreviewScenario } from "../previewScenario";
 import type { CodeMap, WorkspaceDetail, WorkspaceFileHotspot } from "../types";
 import type { InspectTarget } from "../utils/projectNavigation";
 import { projectBasename, resolveWorkspaceDependencies } from "../utils/projectNavigation";
@@ -12,6 +13,14 @@ const ProjectDependencyGraph = lazy(() => import("./ProjectDependencyGraph").the
 type Section = "overview" | "languages" | "hotspots" | "symbols" | "dependencies";
 type DependencyMode = "graph" | "list";
 
+function initialMapState(): { section: Section; dependencyMode: DependencyMode } {
+  const state = isPreviewMode() ? readPreviewScenario().map : "overview";
+  return {
+    section: state === "overview" ? "overview" : "dependencies",
+    dependencyMode: state === "dependencies-list" || state === "overview" ? "list" : "graph"
+  };
+}
+
 export function CodeMapView({ activeWorkspace, codeMap, onRefresh, onBack, onOpenGuide }: {
   activeWorkspace: WorkspaceDetail | null;
   codeMap: CodeMap | null;
@@ -19,7 +28,8 @@ export function CodeMapView({ activeWorkspace, codeMap, onRefresh, onBack, onOpe
   onBack: () => void;
   onOpenGuide: () => void;
 }) {
-  const [section, setSection] = useState<Section>("overview");
+  const initialState = useMemo(initialMapState, []);
+  const [section, setSection] = useState<Section>(initialState.section);
   const [mobileIndex, setMobileIndex] = useState(false);
   const [query, setQuery] = useState("");
   const [language, setLanguage] = useState("all");
@@ -28,7 +38,7 @@ export function CodeMapView({ activeWorkspace, codeMap, onRefresh, onBack, onOpe
   const [hotspotSort, setHotspotSort] = useState<"risk" | "complexity" | "lines" | "path">("risk");
   const [symbolLimit, setSymbolLimit] = useState(100);
   const [dependencyLimit, setDependencyLimit] = useState(100);
-  const [dependencyMode, setDependencyMode] = useState<DependencyMode>("list");
+  const [dependencyMode, setDependencyMode] = useState<DependencyMode>(initialState.dependencyMode);
   const [inspectTarget, setInspectTarget] = useState<InspectTarget | null>(null);
 
   useEffect(() => {
@@ -37,8 +47,9 @@ export function CodeMapView({ activeWorkspace, codeMap, onRefresh, onBack, onOpe
     setLanguage("all");
     setSymbolKind("all");
     setDependencyKind("all");
-    setDependencyMode("list");
-  }, [activeWorkspace?.summary.id]);
+    setSection(initialState.section);
+    setDependencyMode(initialState.dependencyMode);
+  }, [activeWorkspace?.summary.id, initialState]);
 
   const inspect = useCallback((target: InspectTarget) => setInspectTarget(target), []);
   const symbols = useMemo(() => {

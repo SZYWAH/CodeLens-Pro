@@ -142,6 +142,11 @@ type RenderableEdge = Pick<DependencyGraphEdge, "id" | "source" | "target"> & {
 };
 
 type SpatialDebugSnapshot = {
+  presentation: "3d";
+  graphLevel: DependencyGraphLevel["mode"];
+  focusedNodeId: string | null;
+  webglState: "ready" | "lost" | "disposed";
+  activeRafCount: number;
   nodeCount: number;
   totalNodeCount: number;
   edgeCount: number;
@@ -740,6 +745,7 @@ function createGraphRuntime({
   const lineMaterials = new Set<LineMaterial>();
 
   let disposed = false;
+  let webglState: SpatialDebugSnapshot["webglState"] = "ready";
   let fallbackSent = false;
   let animationFrame = 0;
   let settleTimer = 0;
@@ -841,8 +847,13 @@ function createGraphRuntime({
     const p95Index = Math.max(0, Math.ceil(orderedFrames.length * 0.95) - 1);
     const diagnostics = spatialLayout?.diagnostics;
     const snapshot: SpatialDebugSnapshot = {
+      presentation: "3d",
+      graphLevel: currentLevel.mode,
+      focusedNodeId: effectiveFocusId(),
+      webglState,
+      activeRafCount: animationFrame ? 1 : 0,
       nodeCount: currentVisibleModel.nodes.length,
-      totalNodeCount: currentModel.nodes.length,
+      totalNodeCount: currentModel.nodes.filter((node) => node.kind === "file").length,
       edgeCount: renderedEdgeCount,
       clusterCount: diagnostics?.clusterCount || 0,
       layerCount: diagnostics?.layerCount || 0,
@@ -1144,6 +1155,8 @@ function createGraphRuntime({
 
   const handleContextLost = (event: Event) => {
     event.preventDefault();
+    webglState = "lost";
+    updateDebugSnapshot();
     sendFallback(
       "三维图形上下文已丢失，已返回俯视图。请检查显卡驱动或关闭占用显存的程序后重试。"
     );
@@ -1998,6 +2011,7 @@ function createGraphRuntime({
       if (disposed) return;
       saveCurrentView();
       disposed = true;
+      webglState = "disposed";
       if (animationFrame) window.cancelAnimationFrame(animationFrame);
       if (settleTimer) window.clearTimeout(settleTimer);
       controls.removeEventListener("change", handleControlsChange);

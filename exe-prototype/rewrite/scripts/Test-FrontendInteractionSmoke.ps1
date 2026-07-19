@@ -2,6 +2,7 @@ param(
     [int]$Port = 1422,
     [string]$OutputDir = "",
     [switch]$Quick,
+    [switch]$ScenarioChecks,
     [switch]$CaptureScreenshots,
     [int]$ReadyTimeoutSeconds = 60
 )
@@ -13,7 +14,7 @@ $RewriteRoot = Resolve-Path (Join-Path $ScriptDir "..")
 $PrototypeRoot = Resolve-Path (Join-Path $RewriteRoot "..")
 $WebRoot = Join-Path $RewriteRoot "web"
 if (-not $OutputDir) {
-    $OutputDir = Join-Path $PrototypeRoot "outputs\codelens-next\v14.15-route-audit"
+    $OutputDir = Join-Path $PrototypeRoot "outputs\codelens-next\v1.1.0-rc2-foundation"
 }
 $OutputDir = [System.IO.Path]::GetFullPath($OutputDir)
 
@@ -347,14 +348,26 @@ function Navigate-CdpPage {
     )
 
     $themeLiteral = ConvertTo-JavaScriptString -Value $Theme
-    Invoke-CdpCommand -Client $Client -Method "Page.addScriptToEvaluateOnNewDocument" -Parameters @{
-        source = "try { window.localStorage.setItem('codelens.theme', $themeLiteral); } catch (error) {}"
-    } | Out-Null
     $lastError = $null
     for ($attempt = 1; $attempt -le 2; $attempt += 1) {
         try {
+            Invoke-CdpJson -Client $Client -Expression "(() => { try { window.localStorage.setItem('codelens.theme', $themeLiteral); return true; } catch (error) { return false; } })()" | Out-Null
             Invoke-CdpCommand -Client $Client -Method "Page.navigate" -Parameters @{ url = $Url } | Out-Null
             Wait-PageSettled -Client $Client
+            $themeProbe = Invoke-CdpJson -Client $Client -Expression @"
+(() => {
+  const desired = $themeLiteral;
+  if (document.documentElement.dataset.theme !== desired) {
+    document.querySelector('button.theme-toggle-button')?.click();
+  }
+  return document.documentElement.dataset.theme || '';
+})()
+"@
+            Start-Sleep -Milliseconds 220
+            $themeVerified = Invoke-CdpJson -Client $Client -Expression "document.documentElement.dataset.theme || ''"
+            if ($themeVerified -ne $Theme) {
+                throw "Requested theme $Theme but document theme is $themeVerified (initial probe: $themeProbe)."
+            }
             return
         } catch {
             $lastError = $_
@@ -884,7 +897,117 @@ function Invoke-RouteFocusChecks {
     return $checks.ToArray()
 }
 
+function Test-PreviewScenarioContract {
+    param(
+        [Parameter(Mandatory = $true)]$Client,
+        [Parameter(Mandatory = $true)]$Route
+    )
+
+    if (-not $ScenarioChecks) {
+        return $null
+    }
+
+    if ($Route.scenarioKind -eq "loading") {
+        Invoke-CdpJson -Client $Client -Expression "(() => { window.__CODELENS_PREVIEW__?.releaseLoadingGate('initial'); return true; })()" | Out-Null
+    }
+
+    $deadline = (Get-Date).AddSeconds($(if ($Route.scenarioKind -eq "map-3d") { 15 } else { 5 }))
+    $snapshot = $null
+    do {
+        $snapshot = Invoke-CdpJson -Client $Client -Expression @"
+(() => {
+  const preview = window.__CODELENS_PREVIEW__;
+  const graph = document.querySelector('[data-graph-presentation]');
+  const debug = window.__CODELENS_DEPENDENCY_SPACE_DEBUG__ || null;
+  const visible = (selector) => {
+    const element = document.querySelector(selector);
+    if (!element) return false;
+    const rect = element.getBoundingClientRect();
+    const style = getComputedStyle(element);
+    return rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden';
+  };
+  return {
+    preview: preview ? { scenario: preview.scenario, runtime: preview.snapshot() } : null,
+    graphPresentation: graph?.getAttribute('data-graph-presentation') || null,
+    graphPhase: graph?.getAttribute('data-graph-phase') || null,
+    dependencyListVisible: visible('#dependency-list-panel'),
+    dialogVisible: visible('[role="dialog"]'),
+    alertVisible: visible('[role="alert"]'),
+    debug
+  };
+})()
+"@
+        $ready = $false
+        if ($snapshot.preview) {
+            switch ($Route.scenarioKind) {
+                "loading" { $ready = $snapshot.preview.runtime.activeRequests -eq 0 -and @($snapshot.preview.runtime.pendingGates).Count -eq 0 }
+                "map-list" { $ready = [bool]$snapshot.dependencyListVisible }
+                "map-2d" { $ready = $snapshot.graphPresentation -eq "2d" }
+                "map-3d" { $ready = $snapshot.debug -and $snapshot.debug.webglState -eq "ready" -and $snapshot.debug.runtimeCount -eq 1 }
+                "migration" { $ready = [bool]$snapshot.dialogVisible }
+                default { $ready = $true }
+            }
+        }
+        if ($ready) { break }
+        Start-Sleep -Milliseconds 120
+    } while ((Get-Date) -lt $deadline)
+
+    $errors = New-Object 'System.Collections.Generic.List[string]'
+    if (-not $snapshot.preview) { $errors.Add("preview control interface missing") }
+    if ($snapshot.preview -and @($snapshot.preview.scenario.invalid.psobject.Properties).Count -gt 0) { $errors.Add("preview scenario contained invalid values") }
+    switch ($Route.scenarioKind) {
+        "loading" {
+            if ($snapshot.preview.runtime.activeRequests -ne 0) { $errors.Add("loading requests did not settle") }
+            if (@($snapshot.preview.runtime.pendingGates).Count -ne 0) { $errors.Add("loading gate remained pending") }
+        }
+        "error" {
+            if (-not $snapshot.alertVisible) { $errors.Add("error scenario did not expose an alert") }
+            if ($snapshot.preview.runtime.activeRequests -ne 0) { $errors.Add("error scenario left active requests") }
+        }
+        "map-list" { if (-not $snapshot.dependencyListVisible) { $errors.Add("dependency list was not visible") } }
+        "map-2d" { if ($snapshot.graphPresentation -ne "2d") { $errors.Add("2D graph was not reached") } }
+        "map-3d" {
+            if (-not $snapshot.debug) { $errors.Add("3D debug snapshot missing") }
+            else {
+                if ($snapshot.debug.totalNodeCount -ne 84) { $errors.Add("expected 84 total nodes, got $($snapshot.debug.totalNodeCount)") }
+                if ($snapshot.debug.fullEdgeCount -ne 47) { $errors.Add("expected 47 full edges, got $($snapshot.debug.fullEdgeCount)") }
+                if ($snapshot.debug.canvasCount -ne 1) { $errors.Add("expected one canvas, got $($snapshot.debug.canvasCount)") }
+                if ($snapshot.debug.runtimeCount -ne 1) { $errors.Add("expected one runtime, got $($snapshot.debug.runtimeCount)") }
+                if ($snapshot.debug.presentation -ne "3d") { $errors.Add("3D presentation marker missing") }
+                if ($snapshot.debug.webglState -ne "ready") { $errors.Add("WebGL state is $($snapshot.debug.webglState)") }
+            }
+        }
+        "migration" { if (-not $snapshot.dialogVisible) { $errors.Add("migration dialog was not visible") } }
+    }
+    return [pscustomobject]@{
+        passed = $errors.Count -eq 0
+        errors = $errors.ToArray()
+        snapshot = $snapshot
+    }
+}
+
 function Get-RouteDefinitions {
+    if ($ScenarioChecks) {
+        return @(
+            [pscustomobject]@{ name = "fixture-standard"; query = "?view=projects&fixture=standard"; scenarioKind = "basic" }
+            [pscustomobject]@{ name = "fixture-empty"; query = "?view=projects&fixture=empty"; scenarioKind = "empty" }
+            [pscustomobject]@{ name = "fixture-loading"; query = "?view=projects&fixture=standard&ui=loading"; scenarioKind = "loading" }
+            [pscustomobject]@{ name = "fixture-error"; query = "?view=projects&fixture=standard&ui=error"; scenarioKind = "error" }
+            [pscustomobject]@{ name = "map-list"; query = "?view=map&fixture=standard&map=dependencies-list"; scenarioKind = "map-list" }
+            [pscustomobject]@{ name = "map-2d"; query = "?view=map&fixture=standard&map=dependencies-2d"; scenarioKind = "map-2d" }
+            [pscustomobject]@{ name = "map-3d-dense"; query = "?view=map&fixture=dense&map=dependencies-3d"; scenarioKind = "map-3d" }
+            [pscustomobject]@{ name = "ai-unconfigured"; query = "?view=chat&ai=unconfigured"; scenarioKind = "ai" }
+            [pscustomobject]@{ name = "ai-success"; query = "?view=chat&ai=success"; scenarioKind = "ai" }
+            [pscustomobject]@{ name = "ai-unauthorized"; query = "?view=chat&ai=unauthorized"; scenarioKind = "ai" }
+            [pscustomobject]@{ name = "ai-rate-limited"; query = "?view=chat&ai=rate_limited"; scenarioKind = "ai" }
+            [pscustomobject]@{ name = "ai-server-error"; query = "?view=chat&ai=server_error"; scenarioKind = "ai" }
+            [pscustomobject]@{ name = "ai-timeout"; query = "?view=chat&ai=timeout"; scenarioKind = "ai" }
+            [pscustomobject]@{ name = "ai-disconnect"; query = "?view=chat&ai=disconnect"; scenarioKind = "ai" }
+            [pscustomobject]@{ name = "migration-candidate"; query = "?view=health&migration=candidate"; scenarioKind = "migration" }
+            [pscustomobject]@{ name = "migration-failed"; query = "?view=health&migration=failed"; scenarioKind = "migration" }
+            [pscustomobject]@{ name = "migration-restart"; query = "?view=health&migration=restart-required"; scenarioKind = "migration" }
+        )
+    }
     if ($Quick) {
         return @(
             [pscustomobject]@{ name = "galaxy"; query = "?view=galaxy&galaxy=explore" }
@@ -920,6 +1043,10 @@ function Get-MatrixDefinitions {
         [pscustomobject]@{ name = "390x720"; width = 390; height = 720 }
     )
     $themes = @("dark", "light")
+    if ($ScenarioChecks) {
+        $viewports = @([pscustomobject]@{ name = "1280x820"; width = 1280; height = 820 })
+        $themes = @("dark")
+    }
     if ($Quick) {
         $viewports = @($viewports[0], $viewports[3])
     }
@@ -975,7 +1102,7 @@ function Write-Evidence {
     $caseArray = @($CaseResults.ToArray())
     $routeArray = @($caseArray | ForEach-Object { @($_.routes) })
     $json = [ordered]@{
-        schema = "codelens-next.interaction-smoke.v14.15.1"
+        schema = "codelens-next.interaction-smoke.v1.1.0-rc2.1"
         status = $RunStatus
         error = $RunError
         startedAt = $StartedAt.ToString("o")
@@ -984,6 +1111,7 @@ function Write-Evidence {
         url = $DevUrl
         browser = $BrowserPath
         quick = [bool]$Quick
+        scenarioChecks = [bool]$ScenarioChecks
         matrix = @(Get-MatrixDefinitions)
         knownOwnerSelectors = $KnownOwnerSelectors
         geometryPolicy = [ordered]@{
@@ -1016,6 +1144,7 @@ function Write-Evidence {
     $markdown.Add(('- URL: `{0}`' -f $DevUrl))
     $markdown.Add(('- Browser: `{0}`' -f $BrowserPath))
     $markdownMode = if ($Quick) { "quick" } else { "full" }
+    if ($ScenarioChecks) { $markdownMode = "scenario" }
     $markdown.Add(('- Mode: `{0}`' -f $markdownMode))
     $markdown.Add("- Matrix: dark/light x 1440x1000, 1280x820, 900x720, 390x720")
     $markdown.Add("")
@@ -1036,6 +1165,9 @@ function Write-Evidence {
             }
             if ($route.error) {
                 $markdown.Add(('  error: `{0}`' -f $route.error))
+            }
+            foreach ($scenarioError in @($route.scenarioCheck.errors)) {
+                $markdown.Add(('  scenario: `{0}`' -f $scenarioError))
             }
         }
         $markdown.Add("")
@@ -1126,7 +1258,8 @@ try {
                 "--disable-component-update",
                 "--disable-default-apps",
                 "--disable-extensions",
-                "--disable-gpu",
+                $(if ($ScenarioChecks) { "--use-angle=swiftshader" } else { "--disable-gpu" }),
+                $(if ($ScenarioChecks) { "--enable-unsafe-swiftshader" } else { "--disable-software-rasterizer" }),
                 "--disable-sync",
                 "--no-default-browser-check",
                 "--no-first-run",
@@ -1146,7 +1279,7 @@ try {
                     viewport = $matrixCase.viewport
                     route = $route.name
                     url = "$DevUrl/$($route.query)"
-                    auditMode = if ($InformationalRouteNames -contains $route.name) { "informational" } else { "hard" }
+                    auditMode = if ($ScenarioChecks -or $InformationalRouteNames -contains $route.name) { "informational" } else { "hard" }
                     passed = $false
                     controlCount = 0
                     renderedControlCount = 0
@@ -1160,6 +1293,7 @@ try {
                     informationalFindings = @()
                     focusFailureCount = 0
                     focusChecks = @()
+                    scenarioCheck = $null
                     screenshot = ""
                     error = ""
                 }
@@ -1190,7 +1324,10 @@ try {
                         $routeRecord.focusChecks = @($focusChecks)
                         $routeRecord.focusFailureCount = @($focusChecks | Where-Object { $_.available -and -not $_.passed }).Count
                     }
-                    $routeRecord.passed = $routeRecord.controlFailureCount -eq 0 -and $routeRecord.focusFailureCount -eq 0
+                    if ($ScenarioChecks) {
+                        $routeRecord.scenarioCheck = Test-PreviewScenarioContract -Client $CdpClient -Route $route
+                    }
+                    $routeRecord.passed = $routeRecord.controlFailureCount -eq 0 -and $routeRecord.focusFailureCount -eq 0 -and (-not $routeRecord.scenarioCheck -or $routeRecord.scenarioCheck.passed)
                 } catch {
                     $routeRecord.error = $_.Exception.Message
                 }
@@ -1267,5 +1404,6 @@ if ($RunError) {
     MatrixCases = $CaseResults.Count
     Routes = $RouteResults.Count
     Quick = [bool]$Quick
+    ScenarioChecks = [bool]$ScenarioChecks
     Screenshots = if ($CaptureScreenshots) { @(Get-ChildItem -LiteralPath $ScreenshotDir -Filter "*.png" -File).Count } else { 0 }
 } | Format-List

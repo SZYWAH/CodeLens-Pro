@@ -6,9 +6,10 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
     "dev:preview": "vite --mode preview --host 127.0.0.1 --port 1422",
-    "test": "npm run test:graph && npm run test:ai",
+    "test": "npm run test:graph && npm run test:ai && npm run test:mock-ai",
     "test:graph": "node scripts/test-dependency-graph-model.mjs",
     "test:ai": "vitest run src/aiStreamRuntime.test.ts",
+    "test:mock-ai": "node ../scripts/test-mock-openai-server.mjs",
     "build": "tsc && vite build",
     "build:preview": "tsc && vite build --mode preview",
     "preview": "vite preview --host 127.0.0.1 --port 1421"

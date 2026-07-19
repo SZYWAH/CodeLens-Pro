@@ -1,6 +1,7 @@
 import cytoscape, { type Core, type StylesheetCSS } from "cytoscape";
 import { ArrowLeft, Box, Crosshair, Focus, List, Maximize2, Minimize2, Network, RotateCcw, Search, Workflow } from "lucide-react";
 import { lazy, Suspense, useEffect, useMemo, useRef, useState, type Ref } from "react";
+import { isPreviewMode, readPreviewScenario } from "../previewScenario";
 import type { WorkspaceDetail } from "../types";
 import type { InspectTarget, ResolvedDependency } from "../utils/projectNavigation";
 import { normalizeProjectPath, projectBasename, topLevelArea } from "../utils/projectNavigation";
@@ -19,6 +20,10 @@ import {
 
 type GraphPhase = "preparing" | "layout" | "ready" | "empty" | "error";
 type GraphPresentation = "2d" | "3d";
+
+function initialGraphPresentation(): GraphPresentation {
+  return isPreviewMode() && readPreviewScenario().map === "dependencies-3d" ? "3d" : "2d";
+}
 
 const ProjectDependencyGraph3D = lazy(() => import("./ProjectDependencyGraph3D").then((module) => ({ default: module.ProjectDependencyGraph3D })));
 
@@ -43,8 +48,9 @@ export function ProjectDependencyGraph({
   const wasImmersiveRef = useRef(false);
   const [level, setLevel] = useState<DependencyGraphLevel>({ mode: "overview" });
   const [phase, setPhase] = useState<GraphPhase>("preparing");
-  const [presentation, setPresentation] = useState<GraphPresentation>("2d");
-  const [spaceVisited, setSpaceVisited] = useState(false);
+  const initialPresentation = useMemo(initialGraphPresentation, []);
+  const [presentation, setPresentation] = useState<GraphPresentation>(initialPresentation);
+  const [spaceVisited, setSpaceVisited] = useState(initialPresentation === "3d");
   const [query, setQuery] = useState("");
   const [language, setLanguage] = useState("all");
   const [showIsolated, setShowIsolated] = useState(false);
@@ -103,8 +109,8 @@ export function ProjectDependencyGraph({
 
   useEffect(() => {
     setLevel({ mode: "overview" });
-    setPresentation("2d");
-    setSpaceVisited(false);
+    setPresentation(initialPresentation);
+    setSpaceVisited(initialPresentation === "3d");
     setQuery("");
     setLanguage("all");
     setShowIsolated(false);
@@ -113,7 +119,7 @@ export function ProjectDependencyGraph({
     setIdleEdgeMode("backbone");
     setFallbackNotice(null);
     setIsImmersive(false);
-  }, [workspace.summary.id]);
+  }, [initialPresentation, workspace.summary.id]);
 
   useEffect(() => {
     if (!isImmersive) return;
