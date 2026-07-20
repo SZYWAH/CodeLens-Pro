@@ -97,6 +97,16 @@ function Assert-InstallVersion {
     return $state
 }
 
+function Wait-ForUninstallRemoval {
+    param([int]$TimeoutSeconds = 20)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if (-not (Get-InstallState) -and -not (Test-Path -LiteralPath $InstallRoot)) { return }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    throw "Uninstall left the application registration or install directory behind after $TimeoutSeconds seconds."
+}
+
 function Invoke-FixtureState {
     param([Parameter(Mandatory = $true)][ValidateSet("seed", "verify")][string]$Mode, [Parameter(Mandatory = $true)][string]$AppHomePath)
     $oldHome = $env:CODELENS_RELEASE_FIXTURE_HOME
@@ -291,7 +301,7 @@ try {
     Add-ScenarioResult "downgrade-blocked" $true "The lower-version installer exited with code $downgradeExitCode and did not replace $ExpectedVersion."
 
     Invoke-CheckedProcess -FilePath $candidateInstall.Uninstaller -Arguments @("/S")
-    if (Get-InstallState -or (Test-Path -LiteralPath $InstallRoot)) { throw "Uninstall left the application registration or install directory behind." }
+    Wait-ForUninstallRemoval
     Invoke-FixtureState -Mode verify -AppHomePath $AppHome
     Add-ScenarioResult "uninstall-preserves-data" $true "Uninstall removed the app and retained application data."
 
@@ -301,6 +311,7 @@ try {
     Invoke-FixtureState -Mode verify -AppHomePath $AppHome
     Add-ScenarioResult "reinstall-restores-data" $true "Reinstall reopened the retained application data."
     Invoke-CheckedProcess -FilePath $reinstalled.Uninstaller -Arguments @("/S")
+    Wait-ForUninstallRemoval
 
     Remove-Item -LiteralPath $AppHome -Recurse -Force
     $legacyRoot = Join-Path $PrivateFixture "legacy-portable"
@@ -315,6 +326,7 @@ try {
     if (-not (Test-Path -LiteralPath (Join-Path $AppHome "migration-v1.json"))) { throw "Migration marker was not created." }
     Add-ScenarioResult "legacy-portable-migration" $true "Portable data migrated while the source remained intact."
     Invoke-CheckedProcess -FilePath $migrationInstall.Uninstaller -Arguments @("/S")
+    Wait-ForUninstallRemoval
     Invoke-FixtureState -Mode verify -AppHomePath $AppHome
 
     Remove-Item -LiteralPath (Join-Path $AppHome "migration-v1.json") -Force
@@ -332,6 +344,7 @@ try {
     if ($targetHashBefore -ne $targetHashAfter) { throw "A non-empty destination database was replaced during migration discovery." }
     Add-ScenarioResult "nonempty-migration-guard" $true "A non-empty destination was preserved and the legacy source remained intact."
     Invoke-CheckedProcess -FilePath $nonemptyInstall.Uninstaller -Arguments @("/S")
+    Wait-ForUninstallRemoval
 
     $passed = $true
 } catch {
@@ -343,6 +356,7 @@ try {
         $installed = Get-InstallState
         if ($installed -and (Test-Path -LiteralPath $installed.Uninstaller)) {
             Invoke-CheckedProcess -FilePath $installed.Uninstaller -Arguments @("/S") -TimeoutSeconds 120
+            Wait-ForUninstallRemoval
         }
     } catch { $RestorationErrors += "Failed to remove the test installation: $($_.Exception.Message)" }
     try {
