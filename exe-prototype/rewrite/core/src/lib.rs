@@ -41,6 +41,18 @@ pub use models::{
 pub use llm::{classify_llm_error_code, classify_llm_error_message};
 pub use migration::{legacy_migration_state, migrate_legacy_data};
 
+pub(crate) fn truncate_to_char_boundary(value: &mut String, max_bytes: usize) -> bool {
+    if value.len() <= max_bytes {
+        return false;
+    }
+    let mut boundary = max_bytes;
+    while boundary > 0 && !value.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    value.truncate(boundary);
+    true
+}
+
 #[derive(Clone)]
 pub struct CoreApp {
     app_home: PathBuf,
@@ -2262,8 +2274,7 @@ fn safe_log_token(value: &str) -> String {
 
 fn chat_title(message: &str) -> String {
     let mut title = message.lines().next().unwrap_or("新对话").trim().to_string();
-    if title.len() > 48 {
-        title.truncate(48);
+    if truncate_to_char_boundary(&mut title, 48) {
         title.push_str("...");
     }
     if title.is_empty() {
@@ -3077,6 +3088,13 @@ impl CoreApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn chat_title_truncates_multibyte_text_at_a_valid_boundary() {
+        let message = format!("a{}", "中".repeat(20));
+        let title = chat_title(&message);
+        assert_eq!(title, format!("a{}...", "中".repeat(15)));
+    }
 
     fn test_root() -> PathBuf {
         if let Ok(root) = std::env::var("CODELENS_TEST_ROOT") {

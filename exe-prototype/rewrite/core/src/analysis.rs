@@ -350,6 +350,13 @@ mod tests {
         let request = request("async function loadUserProfile() {}", None);
         assert_eq!(local_report_title(&request, "TypeScript"), "loadUserProfile 风险审查");
     }
+
+    #[test]
+    fn excerpt_truncates_multibyte_text_at_a_valid_boundary() {
+        let code = format!("a{}", "中".repeat(500));
+        let result = excerpt(&code);
+        assert_eq!(result, format!("a{}\n...", "中".repeat(399)));
+    }
 }
 
 fn summarize(language: &str, total_lines: usize, complexity_score: usize, risk_count: usize) -> String {
@@ -366,8 +373,7 @@ fn excerpt(code: &str) -> String {
         .join("\n")
         .trim()
         .to_string();
-    if text.len() > 1200 {
-        text.truncate(1200);
+    if crate::truncate_to_char_boundary(&mut text, 1200) {
         text.push_str("\n...");
     }
     text
