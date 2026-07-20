@@ -74,15 +74,11 @@ function Find-Browser {
 function Stop-ProcessTree {
     param([Parameter(Mandatory = $true)][int]$TargetProcessId)
 
-    $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $TargetProcessId" -ErrorAction SilentlyContinue
-    foreach ($child in $children) {
-        Stop-ProcessTree -TargetProcessId $child.ProcessId
-    }
-
     $process = Get-Process -Id $TargetProcessId -ErrorAction SilentlyContinue
-    if ($process) {
-        Stop-Process -Id $TargetProcessId -Force -ErrorAction SilentlyContinue
-    }
+    if (-not $process) { return }
+
+    & taskkill.exe /PID "$TargetProcessId" /T /F 2>$null | Out-Null
+    Stop-Process -Id $TargetProcessId -Force -ErrorAction SilentlyContinue
 }
 
 function Get-FreeTcpPort {
@@ -961,6 +957,10 @@ function Test-CommandPaletteContract {
         arrowSelectionChanged = $false
         enterExecutedOnce = $false
         escapeClosed = $false
+        noResultInputReady = $false
+        noResultValue = ""
+        noResultActiveDescendant = $false
+        noResultAnnouncement = ""
         noResultAnnounced = $false
         passed = $false
         note = ""
@@ -1017,7 +1017,30 @@ function Test-CommandPaletteContract {
     $record.escapeClosed = [bool]($afterEscape.expanded -eq "false" -and -not $afterEscape.value)
 
     Invoke-CdpKey -Client $Client -Key "k" -VirtualKeyCode 75 -Modifiers 2
-    Start-Sleep -Milliseconds 60
+    $noResultInputReady = $false
+    $noResultOpenDeadline = (Get-Date).AddSeconds(2)
+    do {
+        Start-Sleep -Milliseconds 60
+        $noResultInputReady = [bool](Invoke-CdpJson -Client $Client -Expression @"
+(() => {
+  const input = document.querySelector('[role="combobox"]');
+  return input?.getAttribute('aria-expanded') === 'true' && document.activeElement === input;
+})()
+"@)
+    } while (-not $noResultInputReady -and (Get-Date) -lt $noResultOpenDeadline)
+    if (-not $noResultInputReady) {
+        Invoke-CdpKey -Client $Client -Key "k" -VirtualKeyCode 75 -Modifiers 2
+        $noResultOpenDeadline = (Get-Date).AddSeconds(2)
+        do {
+            Start-Sleep -Milliseconds 60
+            $noResultInputReady = [bool](Invoke-CdpJson -Client $Client -Expression @"
+(() => {
+  const input = document.querySelector('[role="combobox"]');
+  return input?.getAttribute('aria-expanded') === 'true' && document.activeElement === input;
+})()
+"@)
+        } while (-not $noResultInputReady -and (Get-Date) -lt $noResultOpenDeadline)
+    }
     Invoke-CdpJson -Client $Client -Expression @"
 (() => {
   const input = document.querySelector('[role="combobox"]');
@@ -1029,19 +1052,23 @@ function Test-CommandPaletteContract {
 "@ | Out-Null
     Invoke-CdpCommand -Client $Client -Method "Input.insertText" -Parameters @{ text = "__no_matching_command__" } | Out-Null
     $noResult = $null
-    $noResultDeadline = (Get-Date).AddSeconds(2)
+    $noResultDeadline = (Get-Date).AddSeconds(5)
     do {
         Start-Sleep -Milliseconds 60
         $noResult = Invoke-CdpJson -Client $Client -Expression @"
 (() => {
   const input = document.querySelector('[role="combobox"]');
   const live = document.querySelector('.product-command-menu-next [aria-live="polite"]');
-  return { active: input?.hasAttribute('aria-activedescendant') || false, announced: (live?.textContent || '').trim() };
+  return { value: input?.value || '', active: input?.hasAttribute('aria-activedescendant') || false, announced: (live?.textContent || '').trim() };
 })()
 "@
-        if (-not $noResult.active -and $noResult.announced) { break }
+        if ($noResult.value -eq "__no_matching_command__" -and -not $noResult.active -and $noResult.announced) { break }
     } while ((Get-Date) -lt $noResultDeadline)
-    $record.noResultAnnounced = [bool](-not $noResult.active -and $noResult.announced)
+    $record.noResultInputReady = $noResultInputReady
+    $record.noResultValue = [string]$noResult.value
+    $record.noResultActiveDescendant = [bool]$noResult.active
+    $record.noResultAnnouncement = [string]$noResult.announced
+    $record.noResultAnnounced = [bool]($noResultInputReady -and $noResult.value -eq "__no_matching_command__" -and -not $noResult.active -and $noResult.announced)
     Invoke-CdpKey -Client $Client -Key "Escape" -VirtualKeyCode 27
 
     $record.passed = $record.opened -and $record.comboboxValid -and $record.activeDescendantValid -and $record.arrowSelectionChanged -and $record.enterExecutedOnce -and $record.escapeClosed -and $record.noResultAnnounced
