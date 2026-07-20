@@ -9,8 +9,19 @@ $ErrorActionPreference = "Stop"
 
 $counter = Get-Counter "\Processor(_Total)\% Processor Time" -SampleInterval $SampleIntervalSeconds -MaxSamples $Samples
 $cpu = ($counter.CounterSamples.CookedValue | Measure-Object -Average).Average
-$os = Get-CimInstance Win32_OperatingSystem
-$freeMemoryGb = [math]::Round(($os.FreePhysicalMemory * 1KB) / 1GB, 2)
+$memorySource = "performance-counter"
+try {
+    $memoryCounter = Get-Counter "\Memory\Available MBytes" -MaxSamples 1
+    $availableMemoryMb = ($memoryCounter.CounterSamples.CookedValue | Measure-Object -Average).Average
+    if ($null -eq $availableMemoryMb -or [double]::IsNaN([double]$availableMemoryMb)) {
+        throw "The available-memory performance counter returned no usable value."
+    }
+    $freeMemoryGb = [math]::Round($availableMemoryMb / 1KB, 2)
+} catch {
+    $memorySource = "wmi-fallback"
+    $os = Get-CimInstance Win32_OperatingSystem
+    $freeMemoryGb = [math]::Round(($os.FreePhysicalMemory * 1KB) / 1GB, 2)
+}
 $cpuRounded = [math]::Round($cpu, 1)
 $ready = ($cpuRounded -le $MaxCpuPercent) -and ($freeMemoryGb -ge $MinFreeMemoryGB)
 
@@ -19,6 +30,7 @@ $ready = ($cpuRounded -le $MaxCpuPercent) -and ($freeMemoryGb -ge $MinFreeMemory
     CpuPercent = $cpuRounded
     MaxCpuPercent = $MaxCpuPercent
     FreeMemoryGB = $freeMemoryGb
+    MemorySource = $memorySource
     MinFreeMemoryGB = $MinFreeMemoryGB
 } | Format-List
 
