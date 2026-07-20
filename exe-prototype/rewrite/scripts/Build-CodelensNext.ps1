@@ -5,6 +5,7 @@ param(
     [switch]$SkipWebBuild,
     [switch]$SkipTests,
     [switch]$AllowDirty,
+    [string]$ReleaseChannel = "rc2",
     [string]$CertificateThumbprint = "",
     [string]$TimestampUrl = "http://timestamp.digicert.com"
 )
@@ -25,6 +26,11 @@ $CargoTarget = Join-Path $CacheRoot "cargo-target-next"
 $CargoHome = Join-Path $CacheRoot "cargo-home-next"
 $NpmCache = Join-Path $CacheRoot "npm-next"
 $IconPath = Join-Path $DesktopRoot "src-tauri\icons\icon.ico"
+
+$ReleaseChannel = $ReleaseChannel.Trim().ToLowerInvariant()
+if ($ReleaseChannel -notmatch '^rc[1-9][0-9]*$') {
+    throw "ReleaseChannel must use the form rc1, rc2, and so on."
+}
 
 $dirty = git -C $RewriteRoot status --porcelain -- .
 if ($LASTEXITCODE -ne 0) {
@@ -130,7 +136,7 @@ if ($CertificateThumbprint.Trim() -and -not $isSigned) {
     throw "A certificate thumbprint was supplied, but the setup signature is not valid: $($signature.Status)"
 }
 $signatureLabel = if ($isSigned) { "signed" } else { "unsigned" }
-$setupName = "CodeLens-Pro-Next_${Version}_x64_rc1_${signatureLabel}-setup.exe"
+$setupName = "CodeLens-Pro-Next_${Version}_x64_${ReleaseChannel}_${signatureLabel}-setup.exe"
 $outputSetup = Join-Path $ReleaseRoot $setupName
 Copy-Item -Force $BuiltSetup.FullName $outputSetup
 
@@ -149,7 +155,7 @@ $hashLine = "$setupHash *$setupName`n"
 $manifest = [ordered]@{
     product = "CodeLens Pro Next"
     version = $Version
-    channel = "rc1"
+    channel = $ReleaseChannel
     architecture = "x64"
     installer = "nsis"
     setup_file = $setupName
@@ -168,7 +174,7 @@ $manifestJson = $manifest | ConvertTo-Json -Depth 6
 [System.IO.File]::WriteAllText((Join-Path $ReleaseRoot "release-manifest.json"), $manifestJson, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
 
 $releaseNotes = (@(
-    "# CodeLens Pro Next v1.1.0 RC1",
+    "# CodeLens Pro Next v1.1.0 $($ReleaseChannel.ToUpperInvariant())",
     "",
     "- Adds the true 3D dependency space, semantic LOD, relation inspector, and immersive graph mode.",
     "- Connects settings, reviews, diffs, AI chat, and learning materials through one AI runtime.",

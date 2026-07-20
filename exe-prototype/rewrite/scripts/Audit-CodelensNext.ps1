@@ -1,5 +1,6 @@
 param(
     [string]$ExpectedVersion = "1.1.0",
+    [string]$ExpectedChannel = "rc2",
     [double]$MaxCpuPercent = 75,
     [double]$MinFreeMemoryGB = 2,
     [switch]$SkipReleaseBuild,
@@ -19,7 +20,11 @@ $CacheRoot = Join-Path $PrototypeRoot ".cache"
 $OutputRoot = Join-Path $PrototypeRoot "outputs\codelens-next"
 $OutputExe = Join-Path $OutputRoot "CodeLens Pro Next.exe"
 $ReleaseRoot = Join-Path $OutputRoot "releases\v$ExpectedVersion"
-$OutputSetup = Join-Path $ReleaseRoot "CodeLens-Pro-Next_${ExpectedVersion}_x64_rc1_unsigned-setup.exe"
+$ExpectedChannel = $ExpectedChannel.Trim().ToLowerInvariant()
+if ($ExpectedChannel -notmatch '^rc[1-9][0-9]*$') {
+    throw "ExpectedChannel must use the form rc1, rc2, and so on."
+}
+$OutputSetup = Join-Path $ReleaseRoot "CodeLens-Pro-Next_${ExpectedVersion}_x64_${ExpectedChannel}_unsigned-setup.exe"
 $WebRoot = Join-Path $RewriteRoot "web"
 $DesktopRoot = Join-Path $RewriteRoot "desktop"
 $CoreManifest = Join-Path $RewriteRoot "core\Cargo.toml"
@@ -193,7 +198,7 @@ Invoke-CheckedCommand -FilePath cargo -Arguments @("check", "--manifest-path", $
 
 if (-not $SkipReleaseBuild) {
     Write-Host "Running release build..." -ForegroundColor Cyan
-    Invoke-CheckedCommand -FilePath powershell -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "Build-CodelensNext.ps1"), "-MaxCpuPercent", "$MaxCpuPercent", "-MinFreeMemoryGB", "$MinFreeMemoryGB")
+    Invoke-CheckedCommand -FilePath powershell -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "Build-CodelensNext.ps1"), "-MaxCpuPercent", "$MaxCpuPercent", "-MinFreeMemoryGB", "$MinFreeMemoryGB", "-ReleaseChannel", $ExpectedChannel)
 }
 
 $exeItem = $null
@@ -228,6 +233,7 @@ if (-not $SkipReleaseBuild) {
 
     $releaseManifest = [System.IO.File]::ReadAllText((Join-Path $ReleaseRoot "release-manifest.json"), [System.Text.Encoding]::UTF8) | ConvertFrom-Json
     Assert-Equal "manifest version" $releaseManifest.version $ExpectedVersion
+    Assert-Equal "manifest channel" $releaseManifest.channel $ExpectedChannel
     Assert-Equal "manifest architecture" $releaseManifest.architecture "x64"
     Assert-Equal "manifest identifier" $releaseManifest.identifier "com.szywah.codelensnext"
     Assert-Equal "manifest WebView2 policy" $releaseManifest.webview2 "downloadBootstrapper"
