@@ -10543,35 +10543,69 @@ body {
 /* V12: original CodeLens dual-theme shell and project-first workbench. */
 :root {
   color-scheme: dark;
-  --shell-bg: #030507;
+  /* RC2 semantic theme contract. Values are independent per theme; roles stay shared. */
+  --theme-surface-canvas: #030507;
+  --theme-surface-panel: #090d12;
+  --theme-surface-raised: #0b1016;
+  --theme-surface-control: #0b1016;
+  --theme-surface-control-hover: #131a21;
+  --theme-surface-reading: #080c11;
+  --theme-text-primary: #e6edf2;
+  --theme-text-secondary: #a7b3be;
+  --theme-text-tertiary: #8795a0;
+  --theme-text-inverse: #071018;
+  --theme-border-subtle: #2a3640;
+  --theme-border-control: #526674;
+  --theme-border-strong: #5b7080;
+  --theme-border-focus: #739bad;
+  --theme-accent-text: #8fb7c9;
+  --theme-accent-icon: #8fb7c9;
+  --theme-accent-border: #5d7f8f;
+  --theme-accent-fill: #28495a;
+  --theme-accent-fill-hover: #32596c;
+  --theme-success-text: #73bba5;
+  --theme-success-border: #477d6d;
+  --theme-success-fill: #17382f;
+  --theme-warning-text: #deb26d;
+  --theme-warning-border: #8f713e;
+  --theme-warning-fill: #3b2d18;
+  --theme-danger-text: #e08874;
+  --theme-danger-border: #985848;
+  --theme-danger-fill: #42231d;
+  --theme-knowledge-paper: #151514;
+  --theme-code-surface: #2b2b2b;
+
+  /* Compatibility aliases kept while legacy selectors are retired incrementally. */
+  --shell-bg: var(--theme-surface-canvas);
   --shell-bg-soft: #06090d;
   --shell-environment:
     linear-gradient(116deg, rgba(94, 121, 139, 0.045), transparent 31%),
     linear-gradient(246deg, rgba(105, 91, 132, 0.035), transparent 38%),
     linear-gradient(180deg, #030507 0%, #06090d 54%, #030507 100%);
-  --shell-panel: rgba(9, 13, 18, 0.88);
-  --shell-panel-strong: #0b1016;
-  --shell-solid: #090d12;
-  --shell-reading: #080c11;
+  --shell-panel: color-mix(in srgb, var(--theme-surface-panel) 88%, transparent);
+  --shell-panel-strong: var(--theme-surface-raised);
+  --shell-solid: var(--theme-surface-panel);
+  --shell-reading: var(--theme-surface-reading);
   --shell-glass: rgba(9, 13, 18, 0.72);
   --shell-glass-strong: rgba(13, 18, 24, 0.9);
   --shell-glass-hover: rgba(18, 24, 31, 0.88);
   --shell-index: rgba(7, 10, 14, 0.82);
-  --shell-line: rgba(178, 198, 213, 0.12);
-  --shell-line-strong: rgba(190, 211, 226, 0.22);
+  --shell-line: var(--theme-border-subtle);
+  --shell-line-strong: var(--theme-border-strong);
+  --shell-control-line: var(--theme-border-control);
   --shell-reflection: rgba(218, 232, 241, 0.075);
   --shell-reflection-strong: rgba(224, 238, 247, 0.14);
-  --shell-text: #e6edf2;
-  --shell-muted: #a7b3be;
-  --shell-faint: #6f7c87;
-  --shell-accent: #79a7bd;
-  --shell-cyan: #70b6ca;
-  --shell-plum: #a994c7;
-  --shell-success: #68b69d;
-  --shell-warning: #d5a55a;
-  --shell-danger: #d97b65;
-  --shell-control: rgba(11, 16, 22, 0.82);
-  --shell-control-hover: rgba(19, 26, 33, 0.92);
+  --shell-text: var(--theme-text-primary);
+  --shell-muted: var(--theme-text-secondary);
+  --shell-faint: var(--theme-text-tertiary);
+  --shell-accent: var(--theme-accent-text);
+  --shell-cyan: var(--theme-accent-text);
+  --shell-plum: var(--theme-accent-text);
+  --shell-success: var(--theme-success-text);
+  --shell-warning: var(--theme-warning-text);
+  --shell-danger: var(--theme-danger-text);
+  --shell-control: color-mix(in srgb, var(--theme-surface-control) 82%, transparent);
+  --shell-control-hover: color-mix(in srgb, var(--theme-surface-control-hover) 92%, transparent);
   --shell-overlay: rgba(1, 3, 6, 0.72);
   --shell-report-panel: #090d12;
   --shell-report-toolbar: rgba(12, 17, 23, 0.94);
@@ -10580,10 +10614,10 @@ body {
   --shell-chat-panel: #080c11;
   --shell-chat-toolbar: rgba(12, 17, 23, 0.94);
   --shell-chat-assistant: #0d1319;
-  --shell-code-bg: #2b2b2b;
+  --shell-code-bg: var(--theme-code-surface);
   --shell-code-soft: #313335;
   --shell-code-line: #3c3f41;
-  --shell-paper: linear-gradient(135deg, #151514, #101318 82%);
+  --shell-paper: linear-gradient(135deg, var(--theme-knowledge-paper), #101318 82%);
   --shell-paper-line: rgba(210, 176, 113, 0.22);
   --shell-glass-highlight: linear-gradient(180deg, var(--shell-reflection), transparent 34%);
   --shell-contact-shadow: 0 1px 0 rgba(255, 255, 255, 0.025), 0 8px 20px rgba(0, 0, 0, 0.16);
@@ -10597,40 +10631,72 @@ body {
   --shell-font-xs: 8px;
   --shell-font-sm: 9px;
   --shell-font-md: 11px;
-  --shell-focus: 0 0 0 2px rgba(96, 165, 250, 0.24);
+  --shell-focus: 0 0 0 2px color-mix(in srgb, var(--theme-border-focus) 38%, transparent);
 }
 
 :root[data-theme="light"] {
   color-scheme: light;
-  --shell-bg: #e9eef2;
+  --theme-surface-canvas: #e9eef2;
+  --theme-surface-panel: #f8fafb;
+  --theme-surface-raised: #ffffff;
+  --theme-surface-control: #f7fafc;
+  --theme-surface-control-hover: #ffffff;
+  --theme-surface-reading: #ffffff;
+  --theme-text-primary: #18242e;
+  --theme-text-secondary: #4f606d;
+  --theme-text-tertiary: #566773;
+  --theme-text-inverse: #f5fafc;
+  --theme-border-subtle: #b8c4cc;
+  --theme-border-control: #748692;
+  --theme-border-strong: #687b88;
+  --theme-border-focus: #315f74;
+  --theme-accent-text: #315f74;
+  --theme-accent-icon: #315f74;
+  --theme-accent-border: #587b8c;
+  --theme-accent-fill: #315f74;
+  --theme-accent-fill-hover: #284f61;
+  --theme-success-text: #2f6d5c;
+  --theme-success-border: #5c8579;
+  --theme-success-fill: #dbeae5;
+  --theme-warning-text: #82591e;
+  --theme-warning-border: #9a7949;
+  --theme-warning-fill: #f3e7d2;
+  --theme-danger-text: #944638;
+  --theme-danger-border: #a86b60;
+  --theme-danger-fill: #f3dfdb;
+  --theme-knowledge-paper: #fffaf0;
+  --theme-code-surface: #2b2b2b;
+
+  --shell-bg: var(--theme-surface-canvas);
   --shell-bg-soft: #f2f6f8;
   --shell-environment:
     linear-gradient(118deg, rgba(86, 129, 153, 0.08), transparent 34%),
     linear-gradient(246deg, rgba(139, 126, 169, 0.055), transparent 38%),
     linear-gradient(180deg, #f5f8fa 0%, #e8eef2 58%, #f1f5f7 100%);
-  --shell-panel: rgba(249, 251, 252, 0.9);
-  --shell-panel-strong: #f8fafb;
+  --shell-panel: color-mix(in srgb, var(--theme-surface-panel) 90%, transparent);
+  --shell-panel-strong: var(--theme-surface-panel);
   --shell-solid: #f6f8fa;
-  --shell-reading: #ffffff;
+  --shell-reading: var(--theme-surface-reading);
   --shell-glass: rgba(246, 249, 251, 0.72);
   --shell-glass-strong: rgba(250, 252, 253, 0.92);
   --shell-glass-hover: rgba(255, 255, 255, 0.96);
   --shell-index: rgba(240, 245, 248, 0.82);
-  --shell-line: rgba(68, 87, 102, 0.14);
-  --shell-line-strong: rgba(61, 82, 98, 0.24);
+  --shell-line: var(--theme-border-subtle);
+  --shell-line-strong: var(--theme-border-strong);
+  --shell-control-line: var(--theme-border-control);
   --shell-reflection: rgba(255, 255, 255, 0.72);
   --shell-reflection-strong: rgba(255, 255, 255, 0.96);
-  --shell-text: #18242e;
-  --shell-muted: #5f6f7c;
-  --shell-faint: #87939d;
-  --shell-accent: #49798f;
-  --shell-cyan: #3f849c;
-  --shell-plum: #796d98;
-  --shell-success: #3e816d;
-  --shell-warning: #9b6e2d;
-  --shell-danger: #a95848;
-  --shell-control: rgba(250, 252, 253, 0.82);
-  --shell-control-hover: rgba(255, 255, 255, 0.98);
+  --shell-text: var(--theme-text-primary);
+  --shell-muted: var(--theme-text-secondary);
+  --shell-faint: var(--theme-text-tertiary);
+  --shell-accent: var(--theme-accent-text);
+  --shell-cyan: var(--theme-accent-text);
+  --shell-plum: var(--theme-accent-text);
+  --shell-success: var(--theme-success-text);
+  --shell-warning: var(--theme-warning-text);
+  --shell-danger: var(--theme-danger-text);
+  --shell-control: color-mix(in srgb, var(--theme-surface-control) 82%, transparent);
+  --shell-control-hover: color-mix(in srgb, var(--theme-surface-control-hover) 98%, transparent);
   --shell-overlay: rgba(24, 34, 43, 0.32);
   --shell-report-panel: #f7f9fa;
   --shell-report-toolbar: rgba(244, 248, 250, 0.94);
@@ -10639,16 +10705,16 @@ body {
   --shell-chat-panel: #f8fafb;
   --shell-chat-toolbar: rgba(244, 248, 250, 0.94);
   --shell-chat-assistant: #f1f5f7;
-  --shell-code-bg: #2b2b2b;
+  --shell-code-bg: var(--theme-code-surface);
   --shell-code-soft: #313335;
   --shell-code-line: #3c3f41;
-  --shell-paper: linear-gradient(135deg, #fffaf0, #f8fafb 82%);
+  --shell-paper: linear-gradient(135deg, var(--theme-knowledge-paper), var(--theme-surface-panel) 82%);
   --shell-paper-line: rgba(185, 157, 108, 0.38);
   --shell-glass-highlight: linear-gradient(180deg, var(--shell-reflection), transparent 38%);
   --shell-contact-shadow: 0 1px 0 rgba(255, 255, 255, 0.92), 0 8px 22px rgba(62, 79, 91, 0.08);
   --shell-ambient-shadow: 0 18px 54px rgba(55, 73, 86, 0.12);
   --shell-glass-blur: 18px;
-  --shell-focus: 0 0 0 2px rgba(73, 121, 143, 0.2);
+  --shell-focus: 0 0 0 2px color-mix(in srgb, var(--theme-border-focus) 28%, transparent);
 }
 
 body {

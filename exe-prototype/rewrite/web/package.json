@@ -10,6 +10,8 @@
     "test:graph": "node scripts/test-dependency-graph-model.mjs",
     "test:ai": "vitest run src/aiStreamRuntime.test.ts",
     "test:mock-ai": "node ../scripts/test-mock-openai-server.mjs",
+    "audit:palette": "node ../scripts/audit-theme-palette.mjs --strict",
+    "audit:palette:baseline": "node ../scripts/audit-theme-palette.mjs",
     "build": "tsc && vite build",
     "build:preview": "tsc && vite build --mode preview",
     "preview": "vite preview --host 127.0.0.1 --port 1421"
