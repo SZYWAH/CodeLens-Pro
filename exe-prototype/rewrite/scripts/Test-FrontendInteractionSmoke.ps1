@@ -94,14 +94,6 @@ function Get-FreeTcpPort {
 function Get-TcpListenerProcessId {
     param([Parameter(Mandatory = $true)][int]$LocalPort)
 
-    try {
-        $connection = Get-NetTCPConnection -State Listen -LocalPort $LocalPort -ErrorAction Stop | Select-Object -First 1
-        if ($connection) {
-            return [int]$connection.OwningProcess
-        }
-    } catch {
-    }
-
     foreach ($line in @(netstat.exe -ano -p tcp 2>$null)) {
         if ($line -match ("^\s*TCP\s+\S+:" + $LocalPort + "\s+\S+\s+LISTENING\s+(\d+)\s*$")) {
             return [int]$Matches[1]
