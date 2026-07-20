@@ -2,6 +2,17 @@ name: Desktop release audit
 
 on:
   workflow_dispatch:
+    inputs:
+      expected_version:
+        description: Version shared by the web, desktop, Tauri, and Rust manifests
+        required: true
+        default: "1.1.0"
+        type: string
+      expected_channel:
+        description: Unsigned release-candidate channel (rc1, rc2, rc3, ...)
+        required: true
+        default: "rc3"
+        type: string
 
 permissions:
   contents: read
@@ -57,6 +68,8 @@ jobs:
           CODELENS_TEST_ROOT: ${{ runner.temp }}\codelens-core-tests
         run: >-
           ./exe-prototype/rewrite/scripts/Audit-CodelensNext.ps1
+          -ExpectedVersion "${{ inputs.expected_version }}"
+          -ExpectedChannel "${{ inputs.expected_channel }}"
           -SkipLaunchSmoke
           -CaptureInteractionScreenshots
           -MaxCpuPercent 100
@@ -88,17 +101,17 @@ jobs:
       - name: Upload candidate and audit evidence
         uses: actions/upload-artifact@v7
         with:
-          name: codelens-next-${{ github.sha }}-windows-x64
+          name: codelens-next-${{ inputs.expected_version }}-${{ inputs.expected_channel }}-${{ github.sha }}-windows-x64
           retention-days: 14
           compression-level: 0
           if-no-files-found: error
           path: |
             exe-prototype/outputs/codelens-next/CodeLens Pro Next.exe
             exe-prototype/outputs/codelens-next/SHA256SUMS.txt
-            exe-prototype/outputs/codelens-next/releases/v1.1.0/CodeLens-Pro-Next_1.1.0_x64_rc1_unsigned-setup.exe
-            exe-prototype/outputs/codelens-next/releases/v1.1.0/SHA256SUMS.txt
-            exe-prototype/outputs/codelens-next/releases/v1.1.0/release-manifest.json
-            exe-prototype/outputs/codelens-next/releases/v1.1.0/RELEASE-NOTES.md
+            exe-prototype/outputs/codelens-next/releases/v${{ inputs.expected_version }}/CodeLens-Pro-Next_${{ inputs.expected_version }}_x64_${{ inputs.expected_channel }}_unsigned-setup.exe
+            exe-prototype/outputs/codelens-next/releases/v${{ inputs.expected_version }}/SHA256SUMS.txt
+            exe-prototype/outputs/codelens-next/releases/v${{ inputs.expected_version }}/release-manifest.json
+            exe-prototype/outputs/codelens-next/releases/v${{ inputs.expected_version }}/RELEASE-NOTES.md
             exe-prototype/outputs/codelens-next/v14.15-route-audit/interaction-smoke.json
             exe-prototype/outputs/codelens-next/v14.15-route-audit/interaction-smoke.md
             exe-prototype/outputs/codelens-next/v14.15-route-audit/screenshots

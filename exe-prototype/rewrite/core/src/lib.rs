@@ -3971,4 +3971,88 @@ mod tests {
         assert!(!inbox_after.iter().any(|item| item.id == "vscode-request"));
         fs::remove_dir_all(root).ok();
     }
+
+    #[test]
+    #[ignore = "invoked only by the Windows installer acceptance harness"]
+    fn release_installer_acceptance_fixture() {
+        const FIXTURE_KEY: &str = "codelens-release-acceptance-key";
+        let home = std::env::var("CODELENS_RELEASE_FIXTURE_HOME")
+            .map(PathBuf::from)
+            .expect("CODELENS_RELEASE_FIXTURE_HOME is required");
+        let mode = std::env::var("CODELENS_RELEASE_FIXTURE_MODE")
+            .expect("CODELENS_RELEASE_FIXTURE_MODE is required");
+
+        match mode.as_str() {
+            "seed" => {
+                let source = home.join("acceptance-source");
+                fs::create_dir_all(source.join("src")).expect("fixture source dir");
+                fs::write(
+                    source.join("src").join("main.ts"),
+                    "export function releaseAcceptance(value: string) { return value.trim(); }\n",
+                )
+                .expect("fixture source file");
+
+                let app = CoreApp::initialize(&home).expect("fixture app initializes");
+                let settings = app
+                    .save_settings(SettingsUpdate {
+                        enable_llm: true,
+                        api_base: "https://release-acceptance.invalid/v1".to_string(),
+                        model: "release-acceptance-model".to_string(),
+                        api_key: Some(FIXTURE_KEY.to_string()),
+                        clear_api_key: false,
+                    })
+                    .expect("fixture settings");
+                assert_eq!(settings.llm_state, "configured");
+                app.save_model_profile(ModelProfileInput {
+                    id: None,
+                    name: "发布验收模型".to_string(),
+                    api_base: "https://release-acceptance.invalid/v1".to_string(),
+                    model: "release-acceptance-model".to_string(),
+                    note: "安装升级数据保留验收".to_string(),
+                    is_default: true,
+                })
+                .expect("fixture model profile");
+                app.import_workspace_from_path(source)
+                    .expect("fixture workspace import");
+                futures::executor::block_on(app.analyze_code(AnalysisRequest {
+                    code: "export const releaseAcceptance = true;".to_string(),
+                    language: Some("TypeScript".to_string()),
+                    title: Some("发布验收报告".to_string()),
+                    source_label: Some("src/main.ts".to_string()),
+                    mode_group: Some("function".to_string()),
+                    mode: Some("risk_review".to_string()),
+                    mode_label: Some("风险审查".to_string()),
+                    use_llm: Some(false),
+                    retry_report_id: None,
+                }))
+                .expect("fixture report");
+                storage::save_chat_exchange(
+                    &app.database_path,
+                    None,
+                    "发布验收对话".to_string(),
+                    None,
+                    "升级后是否仍然存在？",
+                    "该会话用于验证安装升级后的本地数据保留。",
+                )
+                .expect("fixture chat");
+                fs::write(home.join("release-acceptance.marker"), "v1.1.0")
+                    .expect("fixture marker");
+            }
+            "verify" => {
+                let app = CoreApp::initialize(&home).expect("fixture app reopens");
+                let settings = app.settings().expect("fixture settings reload");
+                assert!(settings.enable_llm);
+                assert!(settings.api_key_set);
+                assert_eq!(settings.llm_state, "configured");
+                assert_eq!(settings.model, "release-acceptance-model");
+                assert_eq!(storage::load_api_key(&app.database_path).expect("fixture key reload").as_deref(), Some(FIXTURE_KEY));
+                assert!(app.list_model_profiles().expect("fixture profiles").iter().any(|item| item.name == "发布验收模型"));
+                assert!(app.list_workspaces(None).expect("fixture workspaces").iter().any(|item| item.name == "acceptance-source"));
+                assert!(app.list_reports(None).expect("fixture reports").iter().any(|item| item.title == "发布验收报告"));
+                assert!(app.list_chat_sessions(None).expect("fixture chats").iter().any(|item| item.title == "发布验收对话"));
+                assert_eq!(fs::read_to_string(home.join("release-acceptance.marker")).expect("fixture marker reload"), "v1.1.0");
+            }
+            other => panic!("unsupported CODELENS_RELEASE_FIXTURE_MODE: {other}"),
+        }
+    }
 }

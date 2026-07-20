@@ -47,6 +47,35 @@ CodeLens Pro Next 是 CodeLens Pro 的本地独立重写版，面向真实个人
 
 构建脚本会先检查 CPU 和内存；电脑负载过高时会提前停止。
 
+### v1.1.0 发布通道
+
+未签名候选版使用明确的 RC 通道：
+
+```powershell
+.\exe-prototype\rewrite\scripts\Build-CodelensNext.ps1 -ReleaseChannel rc3 -MinFreeMemoryGB 2
+```
+
+正式版不允许未签名构建。代码签名证书必须安装在当前用户证书存储区，并通过指纹显式选择：
+
+```powershell
+.\exe-prototype\rewrite\scripts\Build-CodelensNext.ps1 `
+  -ReleaseChannel stable `
+  -CertificateThumbprint <thumbprint> `
+  -MinFreeMemoryGB 2
+```
+
+稳定版门禁会执行完整审计、真实工作区闭环和当前用户安装验收。安装验收会修改当前用户安装注册项，因此必须显式确认；检测到已有安装版时会拒绝继续：
+
+```powershell
+.\exe-prototype\rewrite\scripts\Invoke-StableReleaseGate.ps1 `
+  -ExpectedChannel rc3 `
+  -ConfirmCurrentUserMutation `
+  -MaxCpuPercent 100 `
+  -MinFreeMemoryGB 2
+```
+
+正式版还必须传入证书指纹，并确认交互式桌面快捷方式与真实模型冒烟已经人工完成。私有备份只写入 `.cache`，共享审计报告不会记录 API Key、源码、提示词或模型响应。
+
 ## v1.0 验收
 
 从项目根目录运行：

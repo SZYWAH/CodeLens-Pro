@@ -1,6 +1,7 @@
 param(
     [string]$ExpectedVersion = "1.1.0",
-    [string]$ExpectedChannel = "rc2",
+    [string]$ExpectedChannel = "rc3",
+    [string]$ExpectedSignerThumbprint = "",
     [double]$MaxCpuPercent = 75,
     [double]$MinFreeMemoryGB = 2,
     [switch]$SkipReleaseBuild,
@@ -21,10 +22,19 @@ $OutputRoot = Join-Path $PrototypeRoot "outputs\codelens-next"
 $OutputExe = Join-Path $OutputRoot "CodeLens Pro Next.exe"
 $ReleaseRoot = Join-Path $OutputRoot "releases\v$ExpectedVersion"
 $ExpectedChannel = $ExpectedChannel.Trim().ToLowerInvariant()
-if ($ExpectedChannel -notmatch '^rc[1-9][0-9]*$') {
-    throw "ExpectedChannel must use the form rc1, rc2, and so on."
+$isStable = $ExpectedChannel -eq "stable"
+if (-not $isStable -and $ExpectedChannel -notmatch '^rc[1-9][0-9]*$') {
+    throw "ExpectedChannel must be stable or use the form rc1, rc2, and so on."
 }
-$OutputSetup = Join-Path $ReleaseRoot "CodeLens-Pro-Next_${ExpectedVersion}_x64_${ExpectedChannel}_unsigned-setup.exe"
+$normalizedSignerThumbprint = ($ExpectedSignerThumbprint -replace '\s', '').ToUpperInvariant()
+if ($isStable -and -not $normalizedSignerThumbprint) {
+    throw "Stable audits require ExpectedSignerThumbprint."
+}
+$OutputSetup = Join-Path $ReleaseRoot $(if ($isStable) {
+    "CodeLens-Pro-Next_${ExpectedVersion}_x64_signed-setup.exe"
+} else {
+    "CodeLens-Pro-Next_${ExpectedVersion}_x64_${ExpectedChannel}_unsigned-setup.exe"
+})
 $WebRoot = Join-Path $RewriteRoot "web"
 $DesktopRoot = Join-Path $RewriteRoot "desktop"
 $CoreManifest = Join-Path $RewriteRoot "core\Cargo.toml"
@@ -198,7 +208,11 @@ Invoke-CheckedCommand -FilePath cargo -Arguments @("check", "--manifest-path", $
 
 if (-not $SkipReleaseBuild) {
     Write-Host "Running release build..." -ForegroundColor Cyan
-    Invoke-CheckedCommand -FilePath powershell -Arguments @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "Build-CodelensNext.ps1"), "-MaxCpuPercent", "$MaxCpuPercent", "-MinFreeMemoryGB", "$MinFreeMemoryGB", "-ReleaseChannel", $ExpectedChannel)
+    $releaseBuildArguments = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "Build-CodelensNext.ps1"), "-MaxCpuPercent", "$MaxCpuPercent", "-MinFreeMemoryGB", "$MinFreeMemoryGB", "-ReleaseChannel", $ExpectedChannel)
+    if ($isStable) {
+        $releaseBuildArguments += @("-CertificateThumbprint", $normalizedSignerThumbprint)
+    }
+    Invoke-CheckedCommand -FilePath powershell -Arguments $releaseBuildArguments
 }
 
 $exeItem = $null
@@ -239,12 +253,31 @@ if (-not $SkipReleaseBuild) {
     Assert-Equal "manifest WebView2 policy" $releaseManifest.webview2 "downloadBootstrapper"
     Assert-Equal "manifest SHA-256" $releaseManifest.sha256 $actualHash
     Assert-Equal "manifest git SHA" $releaseManifest.git_sha ((git -C $RewriteRoot rev-parse HEAD).Trim())
-    if ($releaseManifest.signed -or $releaseManifest.source_dirty) {
-        throw "The final unsigned RC manifest must be clean and marked unsigned."
-    }
     $signature = Get-AuthenticodeSignature -LiteralPath $OutputSetup
-    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
-        throw "The current RC is expected to be unsigned, but signature status is $($signature.Status)."
+    $exeSignature = Get-AuthenticodeSignature -LiteralPath $OutputExe
+    if ($releaseManifest.source_dirty) {
+        throw "Release artifacts must be built from a clean source tree."
+    }
+    if ($isStable) {
+        if (-not $releaseManifest.signed) {
+            throw "The stable manifest must be marked signed."
+        }
+        Assert-Equal "manifest signer thumbprint" $releaseManifest.signer_thumbprint $normalizedSignerThumbprint
+        Assert-Equal "manifest timestamp status" $releaseManifest.timestamp_status "present"
+        Assert-Equal "setup signature" $signature.Status.ToString() "Valid"
+        Assert-Equal "executable signature" $exeSignature.Status.ToString() "Valid"
+        Assert-Equal "setup signer" $signature.SignerCertificate.Thumbprint $normalizedSignerThumbprint
+        Assert-Equal "executable signer" $exeSignature.SignerCertificate.Thumbprint $normalizedSignerThumbprint
+        if (-not $signature.TimeStamperCertificate -or -not $exeSignature.TimeStamperCertificate) {
+            throw "Stable setup and executable must both contain a timestamp."
+        }
+    } else {
+        if ($releaseManifest.signed) {
+            throw "Release candidate manifests must be marked unsigned."
+        }
+        Assert-Equal "manifest timestamp status" $releaseManifest.timestamp_status "missing"
+        Assert-Equal "setup signature" $signature.Status.ToString() "NotSigned"
+        Assert-Equal "executable signature" $exeSignature.Status.ToString() "NotSigned"
     }
 }
 

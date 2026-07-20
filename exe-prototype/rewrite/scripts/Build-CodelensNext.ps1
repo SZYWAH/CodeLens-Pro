@@ -5,7 +5,7 @@ param(
     [switch]$SkipWebBuild,
     [switch]$SkipTests,
     [switch]$AllowDirty,
-    [string]$ReleaseChannel = "rc2",
+    [string]$ReleaseChannel = "rc3",
     [string]$CertificateThumbprint = "",
     [string]$TimestampUrl = "http://timestamp.digicert.com"
 )
@@ -28,8 +28,38 @@ $NpmCache = Join-Path $CacheRoot "npm-next"
 $IconPath = Join-Path $DesktopRoot "src-tauri\icons\icon.ico"
 
 $ReleaseChannel = $ReleaseChannel.Trim().ToLowerInvariant()
-if ($ReleaseChannel -notmatch '^rc[1-9][0-9]*$') {
-    throw "ReleaseChannel must use the form rc1, rc2, and so on."
+$isStable = $ReleaseChannel -eq "stable"
+if (-not $isStable -and $ReleaseChannel -notmatch '^rc[1-9][0-9]*$') {
+    throw "ReleaseChannel must be stable or use the form rc1, rc2, and so on."
+}
+
+$normalizedThumbprint = ($CertificateThumbprint -replace '\s', '').ToUpperInvariant()
+if ($isStable -and -not $normalizedThumbprint) {
+    throw "Stable builds require CertificateThumbprint. Unsigned stable installers are not allowed."
+}
+if (-not $isStable -and $normalizedThumbprint) {
+    throw "Release candidates must remain unsigned. Use ReleaseChannel stable for a signed build."
+}
+
+$signingCertificate = $null
+if ($isStable) {
+    $certificatePath = "Cert:\CurrentUser\My\$normalizedThumbprint"
+    $signingCertificate = Get-Item -LiteralPath $certificatePath -ErrorAction SilentlyContinue
+    if (-not $signingCertificate) {
+        throw "Code-signing certificate was not found in CurrentUser\\My: $normalizedThumbprint"
+    }
+    if (-not $signingCertificate.HasPrivateKey) {
+        throw "The selected code-signing certificate does not have a private key."
+    }
+    $codeSigningOid = "1.3.6.1.5.5.7.3.3"
+    $hasCodeSigningUsage = @($signingCertificate.EnhancedKeyUsageList | Where-Object { $_.ObjectId.Value -eq $codeSigningOid }).Count -gt 0
+    if (-not $hasCodeSigningUsage) {
+        throw "The selected certificate is not valid for code signing."
+    }
+    $now = Get-Date
+    if ($signingCertificate.NotBefore -gt $now -or $signingCertificate.NotAfter -le $now) {
+        throw "The selected code-signing certificate is not currently valid."
+    }
 }
 
 $dirty = git -C $RewriteRoot status --porcelain -- .
@@ -101,12 +131,12 @@ Write-Host "Installing desktop dependencies..." -ForegroundColor Cyan
 Push-Location $DesktopRoot
 Invoke-CheckedCommand npm ci
 $tauriArguments = @("run", "tauri:build")
-if ($CertificateThumbprint.Trim()) {
+if ($isStable) {
     $signingConfig = Join-Path $CacheRoot "tauri-signing-config.json"
     $config = @{
         bundle = @{
             windows = @{
-                certificateThumbprint = $CertificateThumbprint.Trim()
+                certificateThumbprint = $normalizedThumbprint
                 timestampUrl = $TimestampUrl.Trim()
             }
         }
@@ -131,12 +161,28 @@ if (-not $BuiltSetup) {
 }
 
 $signature = Get-AuthenticodeSignature -LiteralPath $BuiltSetup.FullName
+$exeSignature = Get-AuthenticodeSignature -LiteralPath $BuiltExe
 $isSigned = $signature.Status -eq [System.Management.Automation.SignatureStatus]::Valid
-if ($CertificateThumbprint.Trim() -and -not $isSigned) {
-    throw "A certificate thumbprint was supplied, but the setup signature is not valid: $($signature.Status)"
+$isExeSigned = $exeSignature.Status -eq [System.Management.Automation.SignatureStatus]::Valid
+if ($isStable) {
+    if (-not $isSigned -or -not $isExeSigned) {
+        throw "Stable signatures are invalid. setup=$($signature.Status) exe=$($exeSignature.Status)"
+    }
+    if ($signature.SignerCertificate.Thumbprint -ne $normalizedThumbprint -or $exeSignature.SignerCertificate.Thumbprint -ne $normalizedThumbprint) {
+        throw "Stable binaries were not signed by the requested certificate."
+    }
+    if (-not $signature.TimeStamperCertificate -or -not $exeSignature.TimeStamperCertificate) {
+        throw "Stable binaries must contain an Authenticode timestamp."
+    }
+} elseif ($signature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned -or $exeSignature.Status -ne [System.Management.Automation.SignatureStatus]::NotSigned) {
+    throw "Release candidates must be unsigned. setup=$($signature.Status) exe=$($exeSignature.Status)"
 }
 $signatureLabel = if ($isSigned) { "signed" } else { "unsigned" }
-$setupName = "CodeLens-Pro-Next_${Version}_x64_${ReleaseChannel}_${signatureLabel}-setup.exe"
+$setupName = if ($isStable) {
+    "CodeLens-Pro-Next_${Version}_x64_signed-setup.exe"
+} else {
+    "CodeLens-Pro-Next_${Version}_x64_${ReleaseChannel}_unsigned-setup.exe"
+}
 $outputSetup = Join-Path $ReleaseRoot $setupName
 Copy-Item -Force $BuiltSetup.FullName $outputSetup
 
@@ -167,23 +213,39 @@ $manifest = [ordered]@{
     install_mode = "currentUser"
     identifier = "com.szywah.codelensnext"
     signature_status = $signature.Status.ToString()
+    executable_signature_status = $exeSignature.Status.ToString()
     signed = $isSigned
+    signer_subject = if ($isSigned) { $signature.SignerCertificate.Subject } else { $null }
+    signer_thumbprint = if ($isSigned) { $signature.SignerCertificate.Thumbprint } else { $null }
+    timestamp_status = if ($signature.TimeStamperCertificate) { "present" } else { "missing" }
+    timestamp_url = if ($isStable) { $TimestampUrl.Trim() } else { $null }
     tests = @("core:cargo-test", "web:model-and-ai-tests", "web:production-build", "tauri:release-build")
 }
 $manifestJson = $manifest | ConvertTo-Json -Depth 6
 [System.IO.File]::WriteAllText((Join-Path $ReleaseRoot "release-manifest.json"), $manifestJson, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
 
-$releaseNotes = (@(
-    "# CodeLens Pro Next v1.1.0 $($ReleaseChannel.ToUpperInvariant())",
+$releaseNotesLines = @(
+    $(if ($isStable) { "# CodeLens Pro Next v1.1.0" } else { "# CodeLens Pro Next v1.1.0 $($ReleaseChannel.ToUpperInvariant())" }),
     "",
     "- Adds the true 3D dependency space, semantic LOD, relation inspector, and immersive graph mode.",
     "- Connects settings, reviews, diffs, AI chat, and learning materials through one AI runtime.",
     "- Installs per user through NSIS and downloads WebView2 only when it is required.",
-    "- Keeps user data under %LOCALAPPDATA%\com.szywah.codelensnext after uninstall.",
-    "- Candidate signature status: $signatureLabel.",
-    "",
-    "This candidate has not been published or tagged. It is intended for install, upgrade, and uninstall acceptance only."
-) -join [Environment]::NewLine) + [Environment]::NewLine
+    "- Keeps user data under %LOCALAPPDATA%\com.szywah.codelensnext after uninstall."
+)
+if ($isStable) {
+    $releaseNotesLines += @(
+        "- Authenticode signature: valid and timestamped.",
+        "",
+        "This is the signed v1.1.0 stable release."
+    )
+} else {
+    $releaseNotesLines += @(
+        "- Candidate signature status: unsigned.",
+        "",
+        "This candidate is intended for install, upgrade, and uninstall acceptance before the signed stable release."
+    )
+}
+$releaseNotes = ($releaseNotesLines -join [Environment]::NewLine) + [Environment]::NewLine
 [System.IO.File]::WriteAllText((Join-Path $ReleaseRoot "RELEASE-NOTES.md"), $releaseNotes, (New-Object System.Text.UTF8Encoding -ArgumentList $false))
 
 $VerifyScript = Join-Path $ScriptDir "Verify-Isolation.ps1"
