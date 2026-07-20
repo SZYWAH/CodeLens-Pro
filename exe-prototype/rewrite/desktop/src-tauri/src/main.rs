@@ -1191,8 +1191,8 @@ fn resolve_app_home(app: &AppHandle) -> anyhow::Result<(PathBuf, bool)> {
 
 fn discover_legacy_candidate(app_home: &Path) -> Option<PathBuf> {
     let candidate_file = app_home.join(LEGACY_CANDIDATE_FILE);
-    if let Ok(value) = fs::read_to_string(&candidate_file) {
-        let candidate = PathBuf::from(value.trim());
+    if let Some(value) = read_legacy_candidate_file(&candidate_file) {
+        let candidate = PathBuf::from(value);
         if candidate.join("storage").join("codelens-next.sqlite").is_file() {
             return Some(candidate);
         }
@@ -1202,6 +1202,32 @@ fn discover_legacy_candidate(app_home: &Path) -> Option<PathBuf> {
         return Some(exe_dir);
     }
     None
+}
+
+fn read_legacy_candidate_file(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    let value = if bytes.starts_with(&[0xff, 0xfe]) || bytes.starts_with(&[0xfe, 0xff]) {
+        let little_endian = bytes.starts_with(&[0xff, 0xfe]);
+        let payload = &bytes[2..];
+        if payload.len() % 2 != 0 {
+            return None;
+        }
+        let words = payload
+            .chunks_exact(2)
+            .map(|pair| {
+                if little_endian {
+                    u16::from_le_bytes([pair[0], pair[1]])
+                } else {
+                    u16::from_be_bytes([pair[0], pair[1]])
+                }
+            })
+            .collect::<Vec<_>>();
+        String::from_utf16(&words).ok()?
+    } else {
+        String::from_utf8(bytes).ok()?
+    };
+    let trimmed = value.trim_start_matches('\u{feff}').trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 fn clear_legacy_candidate(app_home: &Path) {
@@ -1321,5 +1347,31 @@ mod tests {
         let service_error = classify_ai_error("LLM returned HTTP 500");
         assert_eq!(service_error.code, "network");
         assert!(service_error.retryable);
+    }
+
+    #[test]
+    fn legacy_candidate_reader_supports_utf8_and_utf16_unicode_paths() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "codelens-candidate-{}-{nonce}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).expect("candidate fixture directory");
+        let path = root.join("legacy-candidate.txt");
+        let candidate = r"D:\开发\CodeLens 旧版";
+
+        fs::write(&path, candidate.as_bytes()).expect("UTF-8 candidate");
+        assert_eq!(read_legacy_candidate_file(&path).as_deref(), Some(candidate));
+
+        let mut utf16 = vec![0xff, 0xfe];
+        for word in candidate.encode_utf16() {
+            utf16.extend_from_slice(&word.to_le_bytes());
+        }
+        fs::write(&path, utf16).expect("UTF-16 candidate");
+        assert_eq!(read_legacy_candidate_file(&path).as_deref(), Some(candidate));
+        fs::remove_dir_all(root).ok();
     }
 }

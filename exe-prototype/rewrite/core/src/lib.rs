@@ -4035,7 +4035,10 @@ mod tests {
                     "该会话用于验证安装升级后的本地数据保留。",
                 )
                 .expect("fixture chat");
-                fs::write(home.join("release-acceptance.marker"), "v1.1.0")
+                fs::write(
+                    home.join("storage").join("release-acceptance.marker"),
+                    "v1.1.0",
+                )
                     .expect("fixture marker");
             }
             "verify" => {
@@ -4050,7 +4053,13 @@ mod tests {
                 assert!(app.list_workspaces(None).expect("fixture workspaces").iter().any(|item| item.name == "acceptance-source"));
                 assert!(app.list_reports(None).expect("fixture reports").iter().any(|item| item.title == "发布验收报告"));
                 assert!(app.list_chat_sessions(None).expect("fixture chats").iter().any(|item| item.title == "发布验收对话"));
-                assert_eq!(fs::read_to_string(home.join("release-acceptance.marker")).expect("fixture marker reload"), "v1.1.0");
+                assert_eq!(
+                    fs::read_to_string(
+                        home.join("storage").join("release-acceptance.marker")
+                    )
+                    .expect("fixture marker reload"),
+                    "v1.1.0"
+                );
             }
             other => panic!("unsupported CODELENS_RELEASE_FIXTURE_MODE: {other}"),
         }

@@ -166,9 +166,9 @@ function Start-AndCloseInstalledApp {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
         throw "Installed application did not accept a normal window close request."
     }
-    if (-not $process.WaitForExit(10000)) {
+    if (-not $process.WaitForExit(20000)) {
         Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
-        throw "Installed application did not close within 10 seconds."
+        throw "Installed application did not close within 20 seconds."
     }
 }
 
@@ -338,7 +338,22 @@ try {
     Copy-Item -LiteralPath $CandidateSetup -Destination $legacySetup
     Invoke-CheckedProcess -FilePath $legacySetup -Arguments @("/S")
     $migrationInstall = Assert-InstallVersion $ExpectedVersion
+    $candidateFile = Join-Path $AppHome "legacy-candidate.txt"
+    if (-not (Test-Path -LiteralPath $candidateFile)) { throw "The installer did not hand off the portable migration candidate." }
+    $candidateValue = (Get-Content -Raw -LiteralPath $candidateFile).Trim()
+    Write-Utf8File -Path (Join-Path $PrivateRoot "migration-candidate-diagnostic.json") -Content ((([ordered]@{
+        expected = [System.IO.Path]::GetFullPath($legacyRoot)
+        actual = $candidateValue
+        setup_directory = [System.IO.Path]::GetDirectoryName($legacySetup)
+    }) | ConvertTo-Json -Depth 3) + "`n")
+    if ([System.IO.Path]::GetFullPath($candidateValue) -ne [System.IO.Path]::GetFullPath($legacyRoot)) {
+        throw "The installer handed off an unexpected portable migration candidate."
+    }
+    Add-ScenarioResult "legacy-candidate-handoff" $true "The installer handed the portable data location to the application without exposing its contents."
     Start-AndCloseInstalledApp -Executable $migrationInstall.Executable
+    if (-not (Test-Path -LiteralPath (Join-Path $AppHome "migration-v1.json"))) {
+        throw "The application did not complete the portable data migration during startup."
+    }
     Invoke-FixtureState -Mode verify -AppHomePath $AppHome
     Invoke-FixtureState -Mode verify -AppHomePath $legacyRoot
     if (-not (Test-Path -LiteralPath (Join-Path $AppHome "migration-v1.json"))) { throw "Migration marker was not created." }

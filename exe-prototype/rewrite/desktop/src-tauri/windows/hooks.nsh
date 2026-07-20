@@ -21,7 +21,7 @@
   ${If} ${FileExists} "$EXEDIR\storage\codelens-next.sqlite"
     CreateDirectory "$LOCALAPPDATA\com.szywah.codelensnext"
     FileOpen $0 "$LOCALAPPDATA\com.szywah.codelensnext\legacy-candidate.txt" w
-    FileWrite $0 "$EXEDIR"
+    FileWriteUTF16LE /BOM $0 "$EXEDIR"
     FileClose $0
   ${EndIf}
 !macroend
