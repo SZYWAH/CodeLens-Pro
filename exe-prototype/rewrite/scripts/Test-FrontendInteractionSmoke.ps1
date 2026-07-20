@@ -77,7 +77,7 @@ function Stop-ProcessTree {
     $process = Get-Process -Id $TargetProcessId -ErrorAction SilentlyContinue
     if (-not $process) { return }
 
-    & taskkill.exe /PID "$TargetProcessId" /T /F 2>$null | Out-Null
+    Start-Process -FilePath taskkill.exe -ArgumentList @("/PID", "$TargetProcessId", "/T", "/F") -Wait -WindowStyle Hidden -ErrorAction SilentlyContinue | Out-Null
     Stop-Process -Id $TargetProcessId -Force -ErrorAction SilentlyContinue
 }
 
