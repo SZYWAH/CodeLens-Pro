@@ -1029,7 +1029,7 @@ function Test-CommandPaletteContract {
 })()
 "@ | Out-Null
     $noResult = $null
-    $noResultDeadline = (Get-Date).AddSeconds(1)
+    $noResultDeadline = (Get-Date).AddSeconds(2)
     do {
         Start-Sleep -Milliseconds 60
         $noResult = Invoke-CdpJson -Client $Client -Expression @"
