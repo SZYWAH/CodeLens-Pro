@@ -61,16 +61,18 @@ function Invoke-CheckedProcess {
     param(
         [Parameter(Mandatory = $true)][string]$FilePath,
         [string[]]$Arguments = @(),
-        [int]$TimeoutSeconds = 180
+        [int]$TimeoutSeconds = 180,
+        [int[]]$AllowedExitCodes = @(0)
     )
     $process = Start-Process -FilePath $FilePath -ArgumentList $Arguments -PassThru -WindowStyle Hidden
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         try { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue } catch {}
         throw "Process timed out after $TimeoutSeconds seconds: $([System.IO.Path]::GetFileName($FilePath))"
     }
-    if ($process.ExitCode -ne 0) {
+    if ($process.ExitCode -notin $AllowedExitCodes) {
         throw "Process failed with exit code $($process.ExitCode): $([System.IO.Path]::GetFileName($FilePath))"
     }
+    return $process.ExitCode
 }
 
 function Get-InstallState {
@@ -96,12 +98,12 @@ function Assert-InstallVersion {
 }
 
 function Invoke-FixtureState {
-    param([Parameter(Mandatory = $true)][ValidateSet("seed", "verify")][string]$Mode, [Parameter(Mandatory = $true)][string]$Home)
+    param([Parameter(Mandatory = $true)][ValidateSet("seed", "verify")][string]$Mode, [Parameter(Mandatory = $true)][string]$AppHomePath)
     $oldHome = $env:CODELENS_RELEASE_FIXTURE_HOME
     $oldMode = $env:CODELENS_RELEASE_FIXTURE_MODE
     $oldTarget = $env:CARGO_TARGET_DIR
     try {
-        $env:CODELENS_RELEASE_FIXTURE_HOME = $Home
+        $env:CODELENS_RELEASE_FIXTURE_HOME = $AppHomePath
         $env:CODELENS_RELEASE_FIXTURE_MODE = $Mode
         $env:CARGO_TARGET_DIR = Join-Path $PrototypeRoot ".cache\cargo-target-next"
         & cargo test --manifest-path (Join-Path $RewriteRoot "core\Cargo.toml") --locked 'tests::release_installer_acceptance_fixture' -- --ignored --exact
@@ -194,7 +196,7 @@ function Restore-OptionalPath {
 
 function Add-ScenarioResult {
     param([string]$Name, [bool]$Passed, [string]$Detail)
-    $script:ScenarioResults.Add([pscustomobject]@{ name = $Name; passed = $Passed; detail = $Detail }) | Out-Null
+    $script:ScenarioResults += [pscustomobject]@{ name = $Name; passed = $Passed; detail = $Detail }
 }
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -225,8 +227,8 @@ public static class InstallerAcceptanceWindow {
 New-Item -ItemType Directory -Force -Path $PrivateBackup, $SharedOutputRoot | Out-Null
 $candidateHash = (Get-FileHash -LiteralPath $CandidateSetup -Algorithm SHA256).Hash.ToLowerInvariant()
 $candidateSignature = Get-AuthenticodeSignature -LiteralPath $CandidateSetup
-$ScenarioResults = New-Object System.Collections.Generic.List[object]
-$RestorationErrors = New-Object System.Collections.Generic.List[string]
+$ScenarioResults = @()
+$RestorationErrors = @()
 $passed = $false
 $failure = $null
 $appHomeBackup = $null
@@ -257,7 +259,7 @@ try {
     }
     Add-ScenarioResult "shortcut-defaults" $true "Silent install created the Start menu entry and default desktop shortcut."
 
-    Invoke-FixtureState -Mode seed -Home $AppHome
+    Invoke-FixtureState -Mode seed -AppHomePath $AppHome
     Start-AndCloseInstalledApp -Executable $fixtureInstall.Executable
     Add-ScenarioResult "launch-close" $true "Installed application opened a main window and accepted a normal close request."
 
@@ -278,54 +280,54 @@ try {
         throw "The unsigned candidate installed an executable with an unexpected signature state: $($installedSignature.Status)."
     }
     Add-ScenarioResult "installed-signature" $true "The installed executable signature matches the candidate channel contract."
-    Invoke-FixtureState -Mode verify -Home $AppHome
+    Invoke-FixtureState -Mode verify -AppHomePath $AppHome
     Add-ScenarioResult "upgrade-data-preservation" $true "Upgraded $UpgradeFixtureVersion to $ExpectedVersion and retained workspace, report, chat, model, and key-configured state."
 
     $candidateBinaryHash = (Get-FileHash -LiteralPath $candidateInstall.Executable -Algorithm SHA256).Hash
-    Invoke-CheckedProcess -FilePath $upgradeSetup -Arguments @("/S")
+    $downgradeExitCode = Invoke-CheckedProcess -FilePath $upgradeSetup -Arguments @("/S") -AllowedExitCodes @(0, 2)
     $afterDowngrade = Assert-InstallVersion $ExpectedVersion
     $afterDowngradeHash = (Get-FileHash -LiteralPath $afterDowngrade.Executable -Algorithm SHA256).Hash
     if ($candidateBinaryHash -ne $afterDowngradeHash) { throw "The downgrade attempt replaced the installed executable." }
-    Add-ScenarioResult "downgrade-blocked" $true "The lower-version installer did not replace $ExpectedVersion."
+    Add-ScenarioResult "downgrade-blocked" $true "The lower-version installer exited with code $downgradeExitCode and did not replace $ExpectedVersion."
 
     Invoke-CheckedProcess -FilePath $candidateInstall.Uninstaller -Arguments @("/S")
     if (Get-InstallState -or (Test-Path -LiteralPath $InstallRoot)) { throw "Uninstall left the application registration or install directory behind." }
-    Invoke-FixtureState -Mode verify -Home $AppHome
+    Invoke-FixtureState -Mode verify -AppHomePath $AppHome
     Add-ScenarioResult "uninstall-preserves-data" $true "Uninstall removed the app and retained application data."
 
     Invoke-CheckedProcess -FilePath $CandidateSetup -Arguments @("/S")
     $reinstalled = Assert-InstallVersion $ExpectedVersion
     Start-AndCloseInstalledApp -Executable $reinstalled.Executable
-    Invoke-FixtureState -Mode verify -Home $AppHome
+    Invoke-FixtureState -Mode verify -AppHomePath $AppHome
     Add-ScenarioResult "reinstall-restores-data" $true "Reinstall reopened the retained application data."
     Invoke-CheckedProcess -FilePath $reinstalled.Uninstaller -Arguments @("/S")
 
     Remove-Item -LiteralPath $AppHome -Recurse -Force
     $legacyRoot = Join-Path $PrivateFixture "legacy-portable"
-    Invoke-FixtureState -Mode seed -Home $legacyRoot
+    Invoke-FixtureState -Mode seed -AppHomePath $legacyRoot
     $legacySetup = Join-Path $legacyRoot ([System.IO.Path]::GetFileName($CandidateSetup))
     Copy-Item -LiteralPath $CandidateSetup -Destination $legacySetup
     Invoke-CheckedProcess -FilePath $legacySetup -Arguments @("/S")
     $migrationInstall = Assert-InstallVersion $ExpectedVersion
     Start-AndCloseInstalledApp -Executable $migrationInstall.Executable
-    Invoke-FixtureState -Mode verify -Home $AppHome
-    Invoke-FixtureState -Mode verify -Home $legacyRoot
+    Invoke-FixtureState -Mode verify -AppHomePath $AppHome
+    Invoke-FixtureState -Mode verify -AppHomePath $legacyRoot
     if (-not (Test-Path -LiteralPath (Join-Path $AppHome "migration-v1.json"))) { throw "Migration marker was not created." }
     Add-ScenarioResult "legacy-portable-migration" $true "Portable data migrated while the source remained intact."
     Invoke-CheckedProcess -FilePath $migrationInstall.Uninstaller -Arguments @("/S")
-    Invoke-FixtureState -Mode verify -Home $AppHome
+    Invoke-FixtureState -Mode verify -AppHomePath $AppHome
 
     Remove-Item -LiteralPath (Join-Path $AppHome "migration-v1.json") -Force
     $nonemptySource = Join-Path $PrivateFixture "legacy-nonempty-guard"
-    Invoke-FixtureState -Mode seed -Home $nonemptySource
+    Invoke-FixtureState -Mode seed -AppHomePath $nonemptySource
     $targetDatabase = Join-Path $AppHome "storage\codelens-next.sqlite"
     $targetHashBefore = (Get-FileHash -LiteralPath $targetDatabase -Algorithm SHA256).Hash
     Write-Utf8File -Path (Join-Path $AppHome "legacy-candidate.txt") -Content $nonemptySource
     Invoke-CheckedProcess -FilePath $CandidateSetup -Arguments @("/S")
     $nonemptyInstall = Assert-InstallVersion $ExpectedVersion
     Start-AndCloseInstalledApp -Executable $nonemptyInstall.Executable
-    Invoke-FixtureState -Mode verify -Home $AppHome
-    Invoke-FixtureState -Mode verify -Home $nonemptySource
+    Invoke-FixtureState -Mode verify -AppHomePath $AppHome
+    Invoke-FixtureState -Mode verify -AppHomePath $nonemptySource
     $targetHashAfter = (Get-FileHash -LiteralPath $targetDatabase -Algorithm SHA256).Hash
     if ($targetHashBefore -ne $targetHashAfter) { throw "A non-empty destination database was replaced during migration discovery." }
     Add-ScenarioResult "nonempty-migration-guard" $true "A non-empty destination was preserved and the legacy source remained intact."
@@ -342,20 +344,20 @@ try {
         if ($installed -and (Test-Path -LiteralPath $installed.Uninstaller)) {
             Invoke-CheckedProcess -FilePath $installed.Uninstaller -Arguments @("/S") -TimeoutSeconds 120
         }
-    } catch { $RestorationErrors.Add("Failed to remove the test installation: $($_.Exception.Message)") | Out-Null }
+    } catch { $RestorationErrors += "Failed to remove the test installation: $($_.Exception.Message)" }
     try {
         if (Test-Path -LiteralPath $AppHome) { Remove-Item -LiteralPath $AppHome -Recurse -Force }
         Restore-OptionalPath -Backup $appHomeBackup -Destination $AppHome
-    } catch { $RestorationErrors.Add("Failed to restore application data: $($_.Exception.Message)") | Out-Null }
-    try { Restore-OptionalPath -Backup $startMenuBackup -Destination $StartMenuRoot } catch { $RestorationErrors.Add("Failed to restore Start menu state: $($_.Exception.Message)") | Out-Null }
-    try { Restore-OptionalPath -Backup $desktopBackup -Destination $DesktopShortcut } catch { $RestorationErrors.Add("Failed to restore desktop shortcut state: $($_.Exception.Message)") | Out-Null }
+    } catch { $RestorationErrors += "Failed to restore application data: $($_.Exception.Message)" }
+    try { Restore-OptionalPath -Backup $startMenuBackup -Destination $StartMenuRoot } catch { $RestorationErrors += "Failed to restore Start menu state: $($_.Exception.Message)" }
+    try { Restore-OptionalPath -Backup $desktopBackup -Destination $DesktopShortcut } catch { $RestorationErrors += "Failed to restore desktop shortcut state: $($_.Exception.Message)" }
     try {
         if (Test-Path -LiteralPath $ManufacturerRegistry) { Remove-Item -LiteralPath $ManufacturerRegistry -Recurse -Force }
         if ($hadManufacturerRegistry -and (Test-Path -LiteralPath $manufacturerRegBackup)) {
             & reg.exe import $manufacturerRegBackup | Out-Null
             if ($LASTEXITCODE -ne 0) { throw "reg import returned $LASTEXITCODE" }
         }
-    } catch { $RestorationErrors.Add("Failed to restore installer registry state: $($_.Exception.Message)") | Out-Null }
+    } catch { $RestorationErrors += "Failed to restore installer registry state: $($_.Exception.Message)" }
 }
 
 if ($RestorationErrors.Count -gt 0) { $passed = $false }

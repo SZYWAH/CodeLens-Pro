@@ -4,6 +4,7 @@ param(
     [string]$ExpectedSignerThumbprint = "",
     [double]$MaxCpuPercent = 75,
     [double]$MinFreeMemoryGB = 2,
+    [string]$UpgradeFixtureSetup = "",
     [switch]$ConfirmCurrentUserMutation,
     [switch]$SkipInstallerAcceptance,
     [switch]$DesktopShortcutOptOutVerified,
@@ -46,7 +47,7 @@ function Write-Utf8File {
 
 New-Item -ItemType Directory -Force -Path $GateOutput | Out-Null
 $startedAt = Get-Date
-$tests = New-Object System.Collections.Generic.List[object]
+$tests = @()
 
 $auditArguments = @(
     "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "Audit-CodelensNext.ps1"),
@@ -58,7 +59,7 @@ $auditArguments = @(
 )
 if ($isStable) { $auditArguments += @("-ExpectedSignerThumbprint", $ExpectedSignerThumbprint) }
 Invoke-CheckedCommand -FilePath powershell -Arguments $auditArguments
-$tests.Add([pscustomobject]@{ name = "full-release-audit"; passed = $true; evidence = "v14.15-route-audit and release manifest" }) | Out-Null
+$tests += [pscustomobject]@{ name = "full-release-audit"; passed = $true; evidence = "v14.15-route-audit and release manifest" }
 
 Push-Location (Join-Path $RewriteRoot "web")
 try {
@@ -66,7 +67,7 @@ try {
 } finally {
     Pop-Location
 }
-$tests.Add([pscustomobject]@{ name = "semantic-palette-audit"; passed = $true; evidence = "v1.1.0-rc2-theme palette audit" }) | Out-Null
+$tests += [pscustomobject]@{ name = "semantic-palette-audit"; passed = $true; evidence = "v1.1.0-rc2-theme palette audit" }
 
 $realWorkspaceOutput = Join-Path $GateOutput "real-workspace"
 Invoke-CheckedCommand -FilePath powershell -Arguments @(
@@ -74,7 +75,7 @@ Invoke-CheckedCommand -FilePath powershell -Arguments @(
     "-WorkspacePath", $RewriteRoot,
     "-OutputDir", $realWorkspaceOutput
 )
-$tests.Add([pscustomobject]@{ name = "real-workspace-closed-loop"; passed = $true; evidence = "real-workspace/real-workspace-acceptance.json" }) | Out-Null
+$tests += [pscustomobject]@{ name = "real-workspace-closed-loop"; passed = $true; evidence = "real-workspace/real-workspace-acceptance.json" }
 
 $releaseRoot = Join-Path $OutputRoot "releases\v$ExpectedVersion"
 $setupName = if ($isStable) {
@@ -86,21 +87,25 @@ $setupPath = Join-Path $releaseRoot $setupName
 
 $installerPassed = $false
 if (-not $SkipInstallerAcceptance) {
-    Invoke-CheckedCommand -FilePath powershell -Arguments @(
+    $installerArguments = @(
         "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $ScriptDir "Test-WindowsInstallerAcceptance.ps1"),
         "-CandidateSetup", $setupPath,
         "-ExpectedVersion", $ExpectedVersion,
         "-OutputDir", $GateOutput,
         "-ConfirmCurrentUserMutation"
     )
+    if ($UpgradeFixtureSetup.Trim()) {
+        $installerArguments += @("-UpgradeFixtureSetup", ([System.IO.Path]::GetFullPath($UpgradeFixtureSetup)), "-SkipUpgradeFixtureBuild")
+    }
+    Invoke-CheckedCommand -FilePath powershell -Arguments $installerArguments
     $installerResult = Get-Content -Raw -LiteralPath (Join-Path $GateOutput "installer-acceptance.json") | ConvertFrom-Json
     if (-not $installerResult.passed -or -not $installerResult.current_user_state_restored) {
         throw "Installer acceptance did not pass or current-user state was not restored."
     }
     $installerPassed = $true
-    $tests.Add([pscustomobject]@{ name = "windows-installer-acceptance"; passed = $true; evidence = "installer-acceptance.json" }) | Out-Null
+    $tests += [pscustomobject]@{ name = "windows-installer-acceptance"; passed = $true; evidence = "installer-acceptance.json" }
 } else {
-    $tests.Add([pscustomobject]@{ name = "windows-installer-acceptance"; passed = $false; evidence = "skipped" }) | Out-Null
+    $tests += [pscustomobject]@{ name = "windows-installer-acceptance"; passed = $false; evidence = "skipped" }
 }
 
 $manifest = Get-Content -Raw -LiteralPath (Join-Path $releaseRoot "release-manifest.json") | ConvertFrom-Json
