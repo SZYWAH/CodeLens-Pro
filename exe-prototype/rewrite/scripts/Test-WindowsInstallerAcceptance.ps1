@@ -365,16 +365,20 @@ try {
     Remove-Item -LiteralPath (Join-Path $AppHome "migration-v1.json") -Force
     $nonemptySource = Join-Path $PrivateFixture "legacy-nonempty-guard"
     Invoke-FixtureState -Mode seed -AppHomePath $nonemptySource
-    $targetDatabase = Join-Path $AppHome "storage\codelens-next.sqlite"
-    $targetHashBefore = (Get-FileHash -LiteralPath $targetDatabase -Algorithm SHA256).Hash
+    $targetSentinel = Join-Path $AppHome "storage\target-data.sentinel"
+    $sourceSentinel = Join-Path $nonemptySource "storage\source-data.sentinel"
+    Write-Utf8File -Path $targetSentinel -Content "target-must-remain`n"
+    Write-Utf8File -Path $sourceSentinel -Content "source-must-remain`n"
     Write-Utf8File -Path (Join-Path $AppHome "legacy-candidate.txt") -Content $nonemptySource
     Invoke-CheckedProcess -FilePath $CandidateSetup -Arguments @("/S")
     $nonemptyInstall = Assert-InstallVersion $ExpectedVersion
     Start-AndCloseInstalledApp -Executable $nonemptyInstall.Executable
     Invoke-FixtureState -Mode verify -AppHomePath $AppHome
     Invoke-FixtureState -Mode verify -AppHomePath $nonemptySource
-    $targetHashAfter = (Get-FileHash -LiteralPath $targetDatabase -Algorithm SHA256).Hash
-    if ($targetHashBefore -ne $targetHashAfter) { throw "A non-empty destination database was replaced during migration discovery." }
+    if (-not (Test-Path -LiteralPath $targetSentinel)) { throw "The non-empty destination storage was replaced during migration discovery." }
+    if (Test-Path -LiteralPath (Join-Path $AppHome "storage\source-data.sentinel")) { throw "Legacy source storage was copied over a non-empty destination." }
+    if (-not (Test-Path -LiteralPath $sourceSentinel)) { throw "The non-empty migration guard modified the legacy source." }
+    if (Test-Path -LiteralPath (Join-Path $AppHome "migration-v1.json")) { throw "A migration completion marker was written for a rejected non-empty destination." }
     Add-ScenarioResult "nonempty-migration-guard" $true "A non-empty destination was preserved and the legacy source remained intact."
     Invoke-CheckedProcess -FilePath $nonemptyInstall.Uninstaller -Arguments @("/S")
     Wait-ForUninstallRemoval
