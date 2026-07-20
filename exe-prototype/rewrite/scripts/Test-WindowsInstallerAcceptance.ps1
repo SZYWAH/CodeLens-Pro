@@ -77,7 +77,11 @@ function Invoke-CheckedProcess {
 
 function Get-InstallState {
     if (-not (Test-Path -LiteralPath $UninstallRegistry)) { return $null }
-    $item = Get-ItemProperty -LiteralPath $UninstallRegistry
+    try {
+        $item = Get-ItemProperty -LiteralPath $UninstallRegistry
+    } catch [System.Management.Automation.ItemNotFoundException] {
+        return $null
+    }
     $location = ([string]$item.InstallLocation).Trim('"')
     [pscustomobject]@{
         Version = [string]$item.DisplayVersion
@@ -89,19 +93,33 @@ function Get-InstallState {
 
 function Assert-InstallVersion {
     param([Parameter(Mandatory = $true)][string]$Version)
-    $state = Get-InstallState
+    $deadline = (Get-Date).AddSeconds(10)
+    do {
+        $state = Get-InstallState
+        if ($state -and $state.Version -eq $Version -and
+            (Test-Path -LiteralPath $state.Executable) -and
+            (Test-Path -LiteralPath $state.Uninstaller)) {
+            return $state
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
     if (-not $state) { throw "The installer did not create the expected HKCU uninstall registration." }
     if ($state.Version -ne $Version) { throw "Installed version is $($state.Version), expected $Version." }
     if (-not (Test-Path -LiteralPath $state.Executable)) { throw "Installed executable is missing." }
-    if (-not (Test-Path -LiteralPath $state.Uninstaller)) { throw "Installed uninstaller is missing." }
-    return $state
+    throw "Installed uninstaller is missing."
 }
 
 function Wait-ForUninstallRemoval {
     param([int]$TimeoutSeconds = 20)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    $absentSince = $null
     do {
-        if (-not (Get-InstallState) -and -not (Test-Path -LiteralPath $InstallRoot)) { return }
+        if (-not (Get-InstallState) -and -not (Test-Path -LiteralPath $InstallRoot)) {
+            if (-not $absentSince) { $absentSince = Get-Date }
+            if (((Get-Date) - $absentSince).TotalMilliseconds -ge 1500) { return }
+        } else {
+            $absentSince = $null
+        }
         Start-Sleep -Milliseconds 250
     } while ((Get-Date) -lt $deadline)
     throw "Uninstall left the application registration or install directory behind after $TimeoutSeconds seconds."
