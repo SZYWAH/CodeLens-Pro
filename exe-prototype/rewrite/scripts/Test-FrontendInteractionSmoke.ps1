@@ -1023,12 +1023,11 @@ function Test-CommandPaletteContract {
   const input = document.querySelector('[role="combobox"]');
   if (!input) return false;
   input.focus();
-  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
-  setter.call(input, '__no_matching_command__');
-  input.dispatchEvent(new Event('input', { bubbles: true }));
+  input.select();
   return true;
 })()
 "@ | Out-Null
+    Invoke-CdpCommand -Client $Client -Method "Input.insertText" -Parameters @{ text = "__no_matching_command__" } | Out-Null
     $noResult = $null
     $noResultDeadline = (Get-Date).AddSeconds(2)
     do {
