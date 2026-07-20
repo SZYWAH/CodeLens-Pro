@@ -4,6 +4,7 @@ param(
     [switch]$Quick,
     [switch]$ScenarioChecks,
     [switch]$CaptureScreenshots,
+    [int]$ThemeToggleCycles = 20,
     [int]$ReadyTimeoutSeconds = 60
 )
 
@@ -25,6 +26,7 @@ $BrowserUserDataRoot = Join-Path $OutputDir ".interaction-browser"
 $CdpCommandId = 0
 $RouteResults = New-Object 'System.Collections.Generic.List[object]'
 $CaseResults = New-Object 'System.Collections.Generic.List[object]'
+$ThemeToggleResult = $null
 $KnownOwnerSelectors = @(
     "[role='dialog']",
     "[role='alertdialog']",
@@ -821,7 +823,7 @@ function Test-DialogFocusContract {
     do {
         try {
             $dialog = Get-VisibleDialog -Client $Client -Role $ExpectedRole
-            if ($dialog.found) {
+            if ($dialog.found -and $dialog.activeInside) {
                 break
             }
         } catch {
@@ -1026,14 +1028,19 @@ function Test-CommandPaletteContract {
   return true;
 })()
 "@ | Out-Null
-    Start-Sleep -Milliseconds 240
-    $noResult = Invoke-CdpJson -Client $Client -Expression @"
+    $noResult = $null
+    $noResultDeadline = (Get-Date).AddSeconds(1)
+    do {
+        Start-Sleep -Milliseconds 60
+        $noResult = Invoke-CdpJson -Client $Client -Expression @"
 (() => {
   const input = document.querySelector('[role="combobox"]');
   const live = document.querySelector('.product-command-menu-next [aria-live="polite"]');
   return { active: input?.hasAttribute('aria-activedescendant') || false, announced: (live?.textContent || '').trim() };
 })()
 "@
+        if (-not $noResult.active -and $noResult.announced) { break }
+    } while ((Get-Date) -lt $noResultDeadline)
     $record.noResultAnnounced = [bool](-not $noResult.active -and $noResult.announced)
     Invoke-CdpKey -Client $Client -Key "Escape" -VirtualKeyCode 27
 
@@ -1253,7 +1260,6 @@ function Get-MatrixDefinitions {
     $themes = @("dark", "light")
     if ($ScenarioChecks) {
         $viewports = @([pscustomobject]@{ name = "1280x820"; width = 1280; height = 820 })
-        $themes = @("dark")
     }
     if ($Quick) {
         $viewports = @($viewports[0], $viewports[3])
@@ -1272,6 +1278,63 @@ function Get-MatrixDefinitions {
         }
     }
     return $matrix.ToArray()
+}
+
+function Test-ThemeToggleStability {
+    param(
+        [Parameter(Mandatory = $true)]$Client,
+        [Parameter(Mandatory = $true)][string]$InitialTheme,
+        [Parameter(Mandatory = $true)][int]$Cycles
+    )
+
+    $currentTheme = $InitialTheme
+    $states = New-Object 'System.Collections.Generic.List[string]'
+    for ($cycle = 0; $cycle -lt $Cycles; $cycle++) {
+        $expectedTheme = if ($currentTheme -eq "dark") { "light" } else { "dark" }
+        $clickDeadline = (Get-Date).AddSeconds(2)
+        $clicked = $false
+        do {
+            $clicked = Invoke-CdpJson -Client $Client -Expression @"
+(() => {
+  const button = document.querySelector('button.theme-toggle-button');
+  if (!button) return false;
+  button.click();
+  return true;
+})()
+"@
+            if ($clicked) { break }
+            Start-Sleep -Milliseconds 40
+        } while ((Get-Date) -lt $clickDeadline)
+        if (-not $clicked) {
+            throw "Theme toggle button was unavailable during cycle $($cycle + 1)."
+        }
+
+        $deadline = (Get-Date).AddSeconds(2)
+        $actualTheme = ""
+        do {
+            $actualTheme = Invoke-CdpJson -Client $Client -Expression "document.documentElement.dataset.theme || ''"
+            if ($actualTheme -eq $expectedTheme) { break }
+            Start-Sleep -Milliseconds 40
+        } while ((Get-Date) -lt $deadline)
+
+        if ($actualTheme -ne $expectedTheme) {
+            throw "Theme toggle cycle $($cycle + 1) expected $expectedTheme but observed $actualTheme."
+        }
+        $states.Add($actualTheme)
+        $currentTheme = $actualTheme
+    }
+
+    if ($currentTheme -ne $InitialTheme) {
+        throw "Theme toggle stress ended on $currentTheme instead of restoring $InitialTheme."
+    }
+
+    return [pscustomobject]@{
+        passed = $true
+        cycles = $Cycles
+        initialTheme = $InitialTheme
+        finalTheme = $currentTheme
+        states = $states.ToArray()
+    }
 }
 
 function New-CaseMarkdown {
@@ -1320,6 +1383,7 @@ function Write-Evidence {
         browser = $BrowserPath
         quick = [bool]$Quick
         scenarioChecks = [bool]$ScenarioChecks
+        themeToggle = $ThemeToggleResult
         matrix = @(Get-MatrixDefinitions)
         knownOwnerSelectors = $KnownOwnerSelectors
         geometryPolicy = [ordered]@{
@@ -1507,6 +1571,9 @@ try {
                 }
                 try {
                     Navigate-CdpPage -Client $CdpClient -Url $routeRecord.url -Theme $matrixCase.theme
+                    if (-not $ThemeToggleResult -and $ThemeToggleCycles -gt 0 -and $route.name -eq "workbench") {
+                        $ThemeToggleResult = Test-ThemeToggleStability -Client $CdpClient -InitialTheme $matrixCase.theme -Cycles $ThemeToggleCycles
+                    }
                     if ($CaptureScreenshots) {
                         $screenshotName = "$($matrixCase.id)-$($route.name).png"
                         $screenshotPath = Join-Path $ScreenshotDir $screenshotName

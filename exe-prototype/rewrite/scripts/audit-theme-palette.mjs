@@ -67,6 +67,8 @@ const allowedLiteralScopes = [
   "activity-",
   "project-source-code",
   "project-source-lines",
+  "single-code",
+  "diff-editor",
   "diff-code",
   "diff-line",
   "syntax",
@@ -180,8 +182,10 @@ const statePairs = [
   ["success-text", "success-fill"],
   ["warning-text", "warning-fill"],
   ["danger-text", "danger-fill"],
+  ["text-inverse", "accent-fill"],
+  ["text-inverse", "accent-fill-hover"],
 ];
-const borderRoles = ["border-control", "border-strong", "border-focus"];
+const borderRoles = ["border-control", "border-strong", "border-focus", "accent-border"];
 const borderSurfaces = ["surface-canvas", "surface-panel", "surface-raised"];
 
 for (const themeName of Object.keys(themes)) {
@@ -225,7 +229,7 @@ function inspectActiveRules(source) {
     const selector = match[1].trim();
     const body = match[2];
     if (!selector || selector.startsWith("@") || selector === "from" || selector === "to") continue;
-    if (selector.startsWith(":root")) continue;
+    if (selector.includes(":root")) continue;
     const lowerSelector = selector.toLowerCase();
     const excluded = allowedLiteralScopes.some((scope) => lowerSelector.includes(scope));
     const literals = body.match(colorLiteralPattern) ?? [];
@@ -247,6 +251,17 @@ const ordinaryRules = activeRules.filter((record) => !record.excluded);
 const ordinaryLiteralCount = ordinaryRules.reduce((sum, record) => sum + record.literals.length, 0);
 const ordinaryTokenCount = ordinaryRules.reduce((sum, record) => sum + record.colorTokenRefs.length, 0);
 const ordinaryTokenUsage = ordinaryTokenCount / Math.max(1, ordinaryTokenCount + ordinaryLiteralCount);
+const ordinaryLiteralInventory = Object.entries(
+  ordinaryRules.reduce((inventory, record) => {
+    for (const literal of record.literals) {
+      const normalized = literal.toLowerCase().replace(/\s+/g, "");
+      inventory[normalized] = (inventory[normalized] ?? 0) + 1;
+    }
+    return inventory;
+  }, {}),
+)
+  .map(([literal, count]) => ({ literal, count }))
+  .sort((left, right) => right.count - left.count || left.literal.localeCompare(right.literal));
 
 const scopeLeaks = [];
 for (const record of ordinaryRules) {
@@ -286,6 +301,9 @@ if (strict) {
   if (metrics.ordinaryTokenUsage < TARGETS.ordinaryTokenUsageMin) {
     failures.push(`ordinary token usage ${(metrics.ordinaryTokenUsage * 100).toFixed(1)}% < 90%`);
   }
+  if (metrics.ordinaryLiteralCount > 0) {
+    failures.push(`${metrics.ordinaryLiteralCount} ordinary selector color literal(s) remain`);
+  }
   if (scopeLeaks.length > 0) failures.push(`${scopeLeaks.length} ordinary selector color-scope leak(s)`);
 }
 
@@ -296,6 +314,7 @@ const report = {
   baseline: BASELINE,
   targets: TARGETS,
   metrics,
+  ordinaryLiteralInventory,
   contract: {
     roles: semanticRoles,
     issues: contractIssues,
