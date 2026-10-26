@@ -1,9 +1,23 @@
-﻿# CodeLens Pro
+# CodeLens Pro
+
+[GitHub 主页](https://github.com/SZYWAH) · [桌面版说明](exe-prototype/rewrite/README.md) · [Windows 预览安装包](https://github.com/SZYWAH/CodeLens-Pro/releases/tag/desktop-v1.1.0-rc3)
+
+面向编程学习、项目理解与知识沉淀的 AI 辅助工作台。本仓库同时保存桌面独立重写版，以及 Web 应用与 VS Code 插件协作版。
+
+## 选择版本
+
+| 版本 | 适用场景 | 技术栈与入口 |
+| --- | --- | --- |
+| **CodeLens Pro Next** | 在 Windows 上使用本地桌面应用，分析项目、阅读报告、管理知识卡片与学习记录 | Tauri + React + Rust + SQLite；[源码与构建说明](exe-prototype/rewrite/README.md) |
+| **CodeLens Pro Web + VS Code** | 使用本地 Web 工作台，并通过 VS Code 插件连接代码与 Agent 协作流程 | FastAPI + React + MySQL；下文介绍配置和使用方式 |
+
+桌面版已发布 **v1.1.0 RC3** Windows 预览安装包，下载和校验文件见上方 Release。桌面版使用独立实现；下文的 MySQL、Python 和 Web 后端配置面向 Web / 插件版。
+
+## Web 与 VS Code 插件版说明
 
 CodeLens Pro 是一个本地运行的编程学习与智能代码分析工作台，采用 **FastAPI + React + MySQL + DeepSeek API + VS Code 插件**。当前版本已经不只是“生成代码分析报告”的 Demo，而是包含报告阅读、AI 对话、Agent 项目协作、知识卡片、每日日志、统计分析和活动星图的一套本地准产品原型，适合课堂展示、课程设计、毕业设计演示和个人学习复盘。
 
 > 本 README 说明当前 Web 应用、FastAPI 后端和 VS Code 插件协同版本，不展开旧版 Streamlit 实现。
-
 
 ## 快速开始
 
@@ -577,3 +591,4 @@ npm run package
 - 知识卡片学习资料会缓存到 `learning_card_materials`，重新生成会覆盖当前缓存内容。
 - 每日日志的 LLM 生成会基于当天数据库活动；手写日记不会自动引用报告或对话。
 - `.env` 中包含 API Key 和数据库密码，不要提交到公开仓库。
+
